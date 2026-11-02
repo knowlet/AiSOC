@@ -741,11 +741,10 @@ class ConnectorScheduler:
                 connector_id,
                 len(kept),
             )
-            # Nothing reached Kafka, so nothing may be acknowledged. Dropping
-            # the staged handles leaves the messages on the source to be
-            # redelivered; discarding explicitly rather than letting the
-            # connector fall out of scope so the intent is legible here, at
-            # the one place that knows ingest refused.
+            # The complete poll was not confirmed. Earlier ingest chunks
+            # may already have reached Kafka, but acknowledging the source
+            # would lose the remaining events. Leave all staged handles
+            # unacknowledged so the source can redeliver them.
             self._discard_acknowledgements(connector, connector_id, reason="ingest_failed", staged=len(kept))
             await self._record_failure(target.id)
             return

@@ -42,9 +42,11 @@ down, polls fail loudly and the scheduler records that in
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -55,6 +57,10 @@ logger = logging.getLogger(__name__)
 # to give up before the server has a chance to publish; we also don't want
 # polls to hang the scheduler thread for minutes if Kafka is wedged.
 _DEFAULT_TIMEOUT_S = 30.0
+# Match the Go ingest service's defaults. Operators lowering either limit
+# must configure the same value on this client and the ingest service.
+_DEFAULT_MAX_BATCH_SIZE = 1000
+_DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
 
 
 def resolve_service_token() -> str:
@@ -89,10 +95,17 @@ class IngestClient:
         *,
         timeout_seconds: float = _DEFAULT_TIMEOUT_S,
         service_token: str | None = None,
+        max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
+        max_body_bytes: int = _DEFAULT_MAX_BODY_BYTES,
     ) -> None:
+        for name, limit in (("max_batch_size", max_batch_size), ("max_body_bytes", max_body_bytes)):
+            if type(limit) is not int or limit <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         # Strip trailing slash so we can append paths without doubling up.
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
+        self._max_batch_size = max_batch_size
+        self._max_body_bytes = max_body_bytes
         self._service_token = (service_token if service_token is not None else resolve_service_token()).strip()
         self._client: httpx.AsyncClient | None = None
         if not self._service_token:
@@ -109,7 +122,12 @@ class IngestClient:
     def from_env(cls) -> IngestClient:
         url = os.getenv("INGEST_SERVICE_URL", "http://ingest-worker:8080")
         timeout = float(os.getenv("INGEST_SERVICE_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT_S)))
-        return cls(url, timeout_seconds=timeout)
+        return cls(
+            url,
+            timeout_seconds=timeout,
+            max_batch_size=int(os.getenv("MAX_BATCH_SIZE", str(_DEFAULT_MAX_BATCH_SIZE))),
+            max_body_bytes=int(os.getenv("INGEST_MAX_BODY_BYTES", str(_DEFAULT_MAX_BODY_BYTES))),
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -139,6 +157,13 @@ class IngestClient:
         An empty event list short-circuits and returns ``{"accepted": 0,
         "rejected": 0}`` without making a network call — this is the common
         case (a poll cycle that found no new alerts).
+
+        Large polls are sent in requests bounded by both event count and
+        encoded body size. Counts are aggregated only after every request
+        succeeds; a later failure raises so the scheduler does not advance
+        its checkpoint. Earlier accepted requests may be replayed on retry.
+        A single-request response is returned unchanged; multiple responses
+        retain their errors and request IDs alongside the summed counts.
         """
         if not events:
             return {"accepted": 0, "rejected": 0}
@@ -158,15 +183,66 @@ class IngestClient:
         }
         if self._service_token:
             headers["Authorization"] = f"Bearer {self._service_token}"
-        payload = {
+        metadata = {
             "connector_id": str(connector_id),
             "connector_type": connector_type,
             "source_format": source_format,
-            "events": events,
         }
+        responses = []
+        for body, event_count in self._batches(metadata, events):
+            responses.append(await self._push_batch(client, url, headers, body, event_count, connector_id))
+        if len(responses) == 1:
+            return responses[0]
 
+        result: dict[str, Any] = {
+            "accepted": sum(response["accepted"] for response in responses),
+            "rejected": sum(response["rejected"] for response in responses),
+        }
+        errors = [error for response in responses for error in response.get("errors", [])]
+        if errors:
+            result["errors"] = errors
+        request_ids = [response["request_id"] for response in responses if "request_id" in response]
+        if request_ids:
+            result["request_ids"] = request_ids
+        return result
+
+    def _batches(self, metadata: dict[str, str], events: list[dict[str, Any]]) -> Iterator[tuple[bytes, int]]:
+        """Encode each event once and budget the exact bytes sent on the wire."""
+        # The service's locked httpx uses json.dumps defaults. Keep that
+        # representation, including separators, and send these bytes directly
+        # so body accounting cannot diverge from a second serialization.
+        prefix = json.dumps(metadata)[:-1].encode("utf-8") + b', "events": ['
+        suffix = b"]}"
+        overhead = len(prefix) + len(suffix)
+        batch: list[bytes] = []
+        size = overhead
+        for event in events:
+            try:
+                encoded = json.dumps(event).encode("utf-8")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise IngestClientError("ingest event cannot be JSON encoded") from exc
+            if overhead + len(encoded) > self._max_body_bytes:
+                raise IngestClientError(f"single event exceeds ingest body limit of {self._max_body_bytes} bytes")
+            if batch and (len(batch) >= self._max_batch_size or size + 2 + len(encoded) > self._max_body_bytes):
+                yield prefix + b", ".join(batch) + suffix, len(batch)
+                batch = []
+                size = overhead
+            size += len(encoded) + (2 if batch else 0)
+            batch.append(encoded)
+        if batch:
+            yield prefix + b", ".join(batch) + suffix, len(batch)
+
+    async def _push_batch(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        body: bytes,
+        event_count: int,
+        connector_id: uuid.UUID | str,
+    ) -> dict[str, Any]:
         try:
-            resp = await client.post(url, headers=headers, json=payload)
+            resp = await client.post(url, headers=headers, content=body)
         except httpx.HTTPError as exc:
             raise IngestClientError(f"ingest service unreachable at {url}: {exc}") from exc
 
@@ -187,6 +263,13 @@ class IngestClient:
             data = resp.json()
         except ValueError as err:
             raise IngestClientError("ingest service returned non-JSON response") from err
+        if not isinstance(data, dict):
+            raise IngestClientError("ingest service returned invalid acceptance counts")
+        accepted, rejected = data.get("accepted"), data.get("rejected")
+        if type(accepted) is not int or type(rejected) is not int or accepted < 0 or rejected < 0 or accepted + rejected != event_count:
+            raise IngestClientError("ingest service returned invalid acceptance counts")
+        if "errors" in data and (not isinstance(data["errors"], list) or any(not isinstance(error, str) for error in data["errors"])):
+            raise IngestClientError("ingest service returned invalid rejection details")
         return data
 
 

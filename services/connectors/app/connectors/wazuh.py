@@ -60,6 +60,10 @@ from app.connectors.base import (
 logger = structlog.get_logger()
 
 
+class WazuhSearchError(RuntimeError):
+    """The indexer did not return a complete, successful search result."""
+
+
 # ---------------------------------------------------------------------------
 # Severity mapping
 #
@@ -337,10 +341,9 @@ class WazuhConnector(BaseConnector):
         """Pull recent Wazuh alerts above the configured rule-level threshold.
 
         Uses the OpenSearch ``_search`` API on ``wazuh-alerts-*`` with a
-        time-window filter so we never re-pull historical events.
-        Pagination is bounded to 1000 hits per poll because anything
-        larger means the operator should drop the polling interval, not
-        chase a single huge batch.
+        time-window filter and a scroll snapshot. Each page contains up
+        to 1000 hits; the entire matching window is drained before any
+        alerts are returned to the scheduler.
 
         In ``vuln_mode=inventory`` (the default) vulnerability-detector hits
         are excluded here and returned by
@@ -396,8 +399,8 @@ class WazuhConnector(BaseConnector):
         ``(tenant, asset, cve, source)`` so repeat scans touch ``last_found``
         instead of multiplying rows.
 
-        The window is wider than the alert poll (1h vs 5min) and bounded by
-        the same 1000-hit page: the detector's own scan interval is hourly,
+        The window is wider than the alert poll (1h vs 5min) and drained in
+        1000-hit pages: the detector's own scan interval is hourly,
         so a narrow window would drop findings between polls if the
         connector was down, and re-scans are idempotent anyway.
 
@@ -445,39 +448,95 @@ class WazuhConnector(BaseConnector):
         return findings
 
     async def _search(self, query: dict[str, Any]) -> list[dict[str, Any]]:
-        """POST an OpenSearch DSL query at the alert index; return raw hits.
+        """Drain a scroll snapshot, or raise without returning a partial batch.
 
-        Shared by both fetch paths so auth, error handling and the
-        never-raise contract live once: a failed search returns ``[]`` and
-        logs, because the scheduler's failure recorder must see a fetch
-        return, not an exception escaping into the poll loop.
+        Scroll keeps the index view and shard cursors fixed across pages,
+        including documents that share a timestamp. It works on indexers
+        predating the PIT API and requires no sortable document-ID field.
+        The scheduler records an exception as a failed poll; ``[]`` is
+        reserved for a complete search with no matching documents.
         """
-        try:
-            async with httpx.AsyncClient(timeout=30.0, verify=self._verify_tls) as client:
+        scroll_id: str | None = None
+        hits: list[dict[str, Any]] = []
+        headers = self._headers()
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_tls) as client:
+            try:
                 resp = await client.post(
                     f"{self._base_url}/{self._index_pattern}/_search",
-                    headers=self._headers(),
+                    headers=headers,
+                    params={"scroll": "1m", "allow_partial_search_results": "false"},
                     json=query,
                 )
-        except httpx.RequestError as exc:
-            logger.warning("wazuh.fetch_exception", error=str(exc))
-            return []
+                while True:
+                    if resp.status_code != 200:
+                        raise WazuhSearchError(f"Wazuh indexer search failed (HTTP {resp.status_code})")
+                    try:
+                        payload = resp.json()
+                    except ValueError:
+                        raise WazuhSearchError("Wazuh indexer returned invalid JSON") from None
+                    if not isinstance(payload, dict):
+                        raise WazuhSearchError("Wazuh indexer returned an invalid search response")
 
-        if resp.status_code != 200:
-            logger.warning(
-                "wazuh.search_failed",
-                status=resp.status_code,
-                body=resp.text[:300],
-            )
-            return []
+                    # Keep even a failed page's new cursor so finally can
+                    # release the context when validation rejects it.
+                    page_scroll_id = payload.get("_scroll_id")
+                    if isinstance(page_scroll_id, str) and page_scroll_id:
+                        scroll_id = page_scroll_id
+                    page = self._search_hits(payload)
+                    if not page:
+                        return hits
+                    if not isinstance(page_scroll_id, str) or not page_scroll_id:
+                        raise WazuhSearchError("Wazuh indexer omitted the scroll cursor")
+                    hits.extend(page)
+                    # A short page is not an end marker. Only an empty
+                    # hits array proves the snapshot was fully drained.
+                    resp = await client.post(
+                        f"{self._base_url}/_search/scroll",
+                        headers=headers,
+                        json={"scroll": "1m", "scroll_id": scroll_id},
+                    )
+            except httpx.RequestError as exc:
+                # Do not leak response bodies, credentials or query data
+                # into the scheduler's exception log.
+                raise WazuhSearchError(f"Wazuh indexer request failed ({type(exc).__name__})") from None
+            finally:
+                if scroll_id:
+                    try:
+                        cleared = await client.request(
+                            "DELETE",
+                            f"{self._base_url}/_search/scroll",
+                            headers=headers,
+                            json={"scroll_id": [scroll_id]},
+                        )
+                        if cleared.status_code not in (200, 404):
+                            logger.warning("wazuh.scroll_cleanup_failed", status=cleared.status_code)
+                    except httpx.RequestError as exc:
+                        # Cleanup must not hide the original error or
+                        # cancellation. The one-minute lease also expires.
+                        logger.warning("wazuh.scroll_cleanup_failed", error_type=type(exc).__name__)
 
-        try:
-            payload = resp.json()
-        except ValueError:
-            logger.warning("wazuh.search_returned_non_json")
-            return []
-
-        return (payload.get("hits") or {}).get("hits") or []
+    @staticmethod
+    def _search_hits(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Reject partial or malformed pages, including HTTP-200 failures."""
+        if "error" in payload:
+            raise WazuhSearchError("Wazuh indexer returned a search error")
+        if payload.get("timed_out", False) is not False:
+            raise WazuhSearchError("Wazuh indexer search timed out")
+        shards = payload.get("_shards")
+        if shards is not None:
+            if not isinstance(shards, dict) or not {"total", "successful", "failed"} <= shards.keys():
+                raise WazuhSearchError("Wazuh indexer returned invalid shard metadata")
+            counts = [shards.get(field, 0) for field in ("total", "successful", "skipped", "failed")]
+            if any(type(count) is not int or count < 0 for count in counts):
+                raise WazuhSearchError("Wazuh indexer returned invalid shard metadata")
+            total, successful, skipped, failed = counts
+            if failed or successful + skipped < total:
+                raise WazuhSearchError("Wazuh indexer search returned incomplete shard results")
+        result = payload.get("hits")
+        page = result.get("hits") if isinstance(result, dict) else None
+        if not isinstance(page, list) or any(not isinstance(hit, dict) for hit in page):
+            raise WazuhSearchError("Wazuh indexer returned invalid search hits")
+        return page
 
     def normalize_vulnerability(self, hit: dict[str, Any]) -> dict[str, Any] | None:
         """Project a detector hit into the ``sync_findings`` finding shape.

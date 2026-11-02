@@ -111,6 +111,11 @@ names = ["Torq", "Tines", "Wazuh"]
 reason = "Connector modules, the connector registry, event fixtures and connector tests. These vendors ship as first-party integrations."
 
 [[allow]]
+paths = ["docs/research/wazuh-complete-polling.md", "tests/isolation/test_wazuh_polling_live.py"]
+names = ["Wazuh"]
+reason = "The connector's polling design record and its real HTTP/PostgreSQL integration regression name the service they integrate with."
+
+[[allow]]
 # The published spec is generated from the code above, so a connector field
 # that legitimately names a first-party integration reappears here on every
 # regeneration. `wazuh_locator` on the alert envelope is the deep link back to
