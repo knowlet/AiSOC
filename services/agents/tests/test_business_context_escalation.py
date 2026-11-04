@@ -102,6 +102,8 @@ async def test_worker_enforces_escalation_before_persisting_or_skipping_graph(tm
     assert result is not None
     written = persisted.call_args.kwargs
     if mandatory:
+        assert result["decision_contract"]["operational_disposition"] == "escalated_to_investigation"
+        assert result["business_context_rules"] == ["protected-detection"]
         assert written["auto_closed"] is False
         assert written["business_context"]["require_escalation"] is True
         assert written["business_context"]["escalation_rule_ids"] == ["protected-detection"]

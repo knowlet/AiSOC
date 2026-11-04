@@ -740,7 +740,8 @@ class TestMandatoryBusinessContextAtTheWrite:
         )
         assert result is not None
         assert not result.get("suppressed_by_memory", False)
-        assert result["escalated"] is True
+        assert result["decision_contract"]["operational_disposition"] == "escalated_to_investigation"
+        assert result["business_context_rules"] == ["wazuh-test-mandatory"]
         row = await _row(pool, alert_id)
         assert row["status"] == "triaged"
         assert row["severity"] == "critical"
