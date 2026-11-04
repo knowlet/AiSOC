@@ -153,6 +153,11 @@ names = ["Wazuh"]
 reason = """Names the connector the #374 reporter was installing when the marketplace returned 503, so the regression test asserts against the item that actually failed rather than an arbitrary one."""
 
 [[allow]]
+paths = ["apps/docs/docs/console/triage-context.md", "tests/isolation/test_closure_authorization_live.py"]
+names = ["Wazuh"]
+reason = "Connector-specific rule configuration and its live persistence regression. The example scopes the connector's vendor rule identity to its normalized finding.uid path; the integration test uses the same payload shape with an explicitly synthetic rule ID."
+
+[[allow]]
 paths = ["packages/types/src/generated/connector-types.ts", "packages/types/src/generated/connector-types.json"]
 names = ["Torq", "Tines", "Wazuh"]
 reason = "The console's connector_type vocabulary, generated from the connector registry by scripts/generate_connector_types.py. Each name here is a connector id the platform ingests under; removing one would make the type reject events from a connector that ships."

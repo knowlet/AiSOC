@@ -64,6 +64,7 @@ from app.services.business_context import (
     load_rules_from_yaml,
 )
 from app.services.business_context.engine import (
+    AlertEvaluation,
     _apply_action,
     _projection,
     evaluate_condition,
@@ -261,6 +262,211 @@ class TestParser:
         assert "eq" in ALLOWED_OPS and "exists" in ALLOWED_OPS
 
 
+class TestEscalationAction:
+    def test_escalation_is_an_action_without_another_mutation(self) -> None:
+        rule = load_rules_from_yaml(
+            "id: must-review\nwhen: {field: source, op: eq, value: fixture-source}\nthen: {require_escalation: true}\n"
+        )[0]
+        assert rule.then.require_escalation is True
+        assert rule.then.is_noop() is False
+
+    @pytest.mark.parametrize("value", ["'true'", "'false'", "1", "0", "null", "[]", "{}"])
+    def test_escalation_requires_a_boolean(self, value: str) -> None:
+        with pytest.raises(RuleParseError, match="require_escalation.*boolean"):
+            load_rules_from_yaml(
+                "id: must-review\nwhen: {field: source, op: eq, value: fixture-source}\n"
+                f"then: {{tag: review, require_escalation: {value}}}\n"
+            )
+
+    def test_escalation_and_suppression_in_one_rule_are_rejected(self) -> None:
+        with pytest.raises(RuleParseError, match="require_escalation.*suppress"):
+            load_rules_from_yaml(
+                "id: contradictory\nwhen: {field: source, op: eq, value: fixture-source}\n"
+                "then: {require_escalation: true, suppress: true}\n"
+            )
+
+    @pytest.mark.parametrize("action", ["{tag: review}", "{tag: review, require_escalation: false}"])
+    def test_escalation_is_opt_in(self, action: str) -> None:
+        rule = load_rules_from_yaml(f"id: ordinary\nwhen: {{field: source, op: eq, value: fixture-source}}\nthen: {action}\n")[0]
+        assert rule.then.require_escalation is False
+
+
+def _evaluate_escalation_rules(yaml_text: str, alert: dict[str, Any]) -> AlertEvaluation:
+    """The saved and unsaved preview paths must give the same decision."""
+    engine = BusinessContextEngine()
+    tenant = uuid.uuid4()
+    rules = load_rules_from_yaml(yaml_text)
+    engine.replace(tenant, rules)
+    result = engine.evaluate(tenant, alert)
+    assert engine.preview_against(tenant, [alert], rules=rules) == [result]
+    assert engine.preview_against(tenant, [alert]) == [result]
+    return result
+
+
+class TestMandatoryEscalation:
+    @pytest.mark.parametrize("suppression_priority", [1, 300])
+    def test_escalation_vetoes_suppression_and_severity_downgrades(self, suppression_priority: int) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml(f"""
+            rules:
+              - id: maintenance-noise
+                priority: {suppression_priority}
+                when: {{field: source, op: eq, value: fixture-source}}
+                then: {{suppress: true}}
+              - id: must-investigate
+                priority: 100
+                when: {{field: raw_event.rule.id, op: eq, value: synthetic-must-review}}
+                then: {{set_severity: critical, require_escalation: true, tag: must-review}}
+              - id: later-downgrade
+                priority: 200
+                when: {{field: source, op: eq, value: fixture-source}}
+                then: {{set_severity: low}}
+            """),
+            {
+                "id": "synthetic-alert",
+                "source": "fixture-source",
+                "severity": "medium",
+                "raw_event": {"rule": {"id": "synthetic-must-review"}},
+            },
+        )
+        assert result.suppressed is False
+        assert result.after["suppressed"] is False
+        assert result.after["severity"] == "critical"
+        assert result.require_escalation is True
+        assert result.escalation_rule_ids == ["must-investigate"]
+        assert result.before["require_escalation"] is False
+        assert result.before["escalation_rule_ids"] == []
+        assert result.after["require_escalation"] is True
+        assert result.after["escalation_rule_ids"] == ["must-investigate"]
+        assert set(result.matched_rule_ids) == {"maintenance-noise", "must-investigate", "later-downgrade"}
+
+    def test_escalation_match_uses_the_original_alert(self) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml("""
+            rules:
+              - id: ordinary-downgrade
+                priority: 1
+                when: {field: severity, op: eq, value: medium}
+                then: {set_severity: low}
+              - id: must-investigate
+                priority: 100
+                when: {field: severity, op: eq, value: medium}
+                then: {set_severity: high, require_escalation: true}
+            """),
+            {"severity": "medium"},
+        )
+        assert result.after["severity"] == "high"
+        assert result.require_escalation is True
+        assert result.matched_rule_ids == ["ordinary-downgrade", "must-investigate"]
+
+    def test_mutations_cannot_enable_an_originally_unmatched_escalation(self) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml("""
+            rules:
+              - id: ordinary-severity
+                priority: 1
+                when: {field: severity, op: eq, value: low}
+                then: {set_severity: critical}
+              - id: unmatched-escalation
+                priority: 100
+                when: {field: severity, op: eq, value: critical}
+                then: {require_escalation: true, set_severity: high, tag: unexpected}
+            """),
+            {"severity": "low"},
+        )
+        assert result.after["severity"] == "critical"
+        assert result.after["tags"] == []
+        assert result.require_escalation is False
+        assert result.escalation_rule_ids == []
+        assert result.matched_rule_ids == ["ordinary-severity"]
+
+    def test_severity_floor_is_applied_after_ordinary_rule_conditions(self) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml("""
+            rules:
+              - id: must-investigate
+                priority: 1
+                when: {field: source, op: eq, value: fixture-source}
+                then: {require_escalation: true, set_severity: high}
+              - id: ordinary-downgrade
+                priority: 2
+                when: {field: severity, op: eq, value: high}
+                then: {set_severity: low}
+              - id: tag-low-intermediate
+                priority: 3
+                when: {field: severity, op: eq, value: low}
+                then: {tag: intermediate-low}
+            """),
+            {"source": "fixture-source", "severity": "medium"},
+        )
+        assert result.after["severity"] == "high"
+        assert result.after["tags"] == ["intermediate-low"]
+
+    def test_escalation_without_severity_does_not_invent_a_floor(self) -> None:
+        result = _evaluate_escalation_rules(
+            "id: must-review\nwhen: {field: source, op: eq, value: fixture-source}\nthen: {require_escalation: true}\n",
+            {"source": "fixture-source", "severity": "medium"},
+        )
+        assert result.after["severity"] == "medium"
+        assert result.require_escalation is True
+        assert result.changed is True
+
+    def test_strongest_matched_escalation_severity_is_the_floor(self) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml("""
+            rules:
+              - id: critical-escalation
+                priority: 1
+                when: {field: source, op: eq, value: fixture-source}
+                then: {require_escalation: true, set_severity: critical}
+              - id: high-escalation
+                priority: 2
+                when: {field: source, op: eq, value: fixture-source}
+                then: {require_escalation: true, set_severity: high}
+            """),
+            {"source": "fixture-source", "severity": "low"},
+        )
+        assert result.after["severity"] == "critical"
+        assert result.escalation_rule_ids == ["critical-escalation", "high-escalation"]
+
+    @pytest.mark.parametrize(
+        "enabled,required,source",
+        [(False, True, "fixture-source"), (True, False, "fixture-source"), (True, True, "other")],
+    )
+    def test_unmatched_disabled_or_false_escalation_preserves_suppression(self, enabled: bool, required: bool, source: str) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml(f"""
+            rules:
+              - id: suppress-noise
+                priority: 1
+                when: {{field: source, op: exists}}
+                then: {{suppress: true}}
+              - id: inactive-escalation
+                priority: 100
+                enabled: {str(enabled).lower()}
+                when: {{field: source, op: eq, value: fixture-source}}
+                then: {{require_escalation: {str(required).lower()}, set_severity: critical}}
+            """),
+            {"source": source, "severity": "medium"},
+        )
+        assert result.suppressed is True
+        assert result.after["severity"] == "medium"
+        assert result.require_escalation is False
+        assert result.escalation_rule_ids == []
+        assert result.matched_rule_ids == ["suppress-noise"]
+
+    def test_alert_payload_cannot_fabricate_escalation_provenance(self) -> None:
+        alert = {"severity": "low", "require_escalation": True, "escalation_rule_ids": ["fabricated"]}
+        result = _evaluate_escalation_rules("", alert)
+        assert result.require_escalation is False
+        assert result.escalation_rule_ids == []
+        assert result.before["require_escalation"] is False
+        assert result.before["escalation_rule_ids"] == []
+        assert result.after == result.before
+        assert result.changed is False
+        assert alert["require_escalation"] is True
+
+
 # ---------------------------------------------------------------------------
 # Engine — evaluation
 # ---------------------------------------------------------------------------
@@ -381,7 +587,7 @@ class TestEvaluation:
 
     def test_projection_returns_only_ui_visible_fields(self) -> None:
         proj = _projection({"severity": "low", "noise": "yes", "tags": ["a"]})
-        assert set(proj.keys()) == {"severity", "route_to", "tags", "suppressed"}
+        assert set(proj.keys()) == {"severity", "route_to", "tags", "suppressed", "require_escalation", "escalation_rule_ids"}
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +742,56 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
 
 class TestEndpoints:
+    def test_crud_preserves_escalation_action(self) -> None:
+        user = _user()
+        seed = _yaml("""
+        rules:
+          - id: must-investigate
+            when: {field: source, op: eq, value: fixture-source}
+            then: {set_severity: critical, require_escalation: true}
+          - id: ordinary-route
+            when: {field: source, op: eq, value: other}
+            then: {route_to: tier1}
+        """)
+        saved = _run(endpoint.replace_rules(endpoint.ReplaceRulesRequest(yaml=seed), user, _db()))
+        assert saved.model_dump()["rules"][0]["then"]["require_escalation"] is True
+
+        updated = _run(
+            endpoint.update_rule(
+                "ordinary-route",
+                endpoint.UpdateRuleRequest(
+                    yaml="id: ordinary-route\nwhen: {field: source, op: eq, value: other}\nthen: {route_to: tier2}\n"
+                ),
+                user,
+                _db(),
+            )
+        )
+        assert load_rules_from_yaml(updated.yaml)[0].then.require_escalation is True
+        _run(endpoint.delete_rule("ordinary-route", user, _db()))
+        fetched = _run(endpoint.get_rules(user, _db()))
+        assert fetched.rules[0].then.require_escalation is True
+        assert load_rules_from_yaml(fetched.yaml)[0].then.require_escalation is True
+
+    def test_preview_returns_escalation_requirement_and_provenance(self) -> None:
+        user = _user()
+        response = _run(
+            endpoint.preview_rules(
+                endpoint.PreviewRequest(
+                    yaml="id: must-investigate\nwhen: {field: source, op: eq, value: fixture-source}\n"
+                    "then: {set_severity: critical, require_escalation: true}\n",
+                    alerts=[{"id": "synthetic", "source": "fixture-source", "severity": "medium"}],
+                ),
+                user,
+                _db(),
+            )
+        )
+        assert response.changed_count == 1
+        assert response.suppressed_count == 0
+        row = response.model_dump()["rows"][0]
+        assert row["after"]["require_escalation"] is True
+        assert row["after"]["escalation_rule_ids"] == ["must-investigate"]
+        assert row["before"]["require_escalation"] is False
+
     def test_get_returns_empty_envelope_when_no_rules(self) -> None:
         user = _user()
         env = _run(endpoint.get_rules(user, _db()))
