@@ -18,7 +18,9 @@ URL, under whatever key the connector's schema chose (``base_url``,
 the value's shape rather than a list of key names is deliberate: the census
 found 18 connectors declaring ``base_url`` and a dozen other spellings, and a
 key-name list is the kind of one-directional check that silently misses the
-next connector. Lists are walked for their string items.
+next connector. Lists are walked for their string items. Wazuh's
+``indexer_urls`` textarea is split on commas and newlines before validation;
+its entries are destinations, not one URL.
 
 Known residual, stated rather than hidden: a connector that assembles its URL
 from a bare host/subdomain field (``host``, ``domain``, ``api_hostname``,
@@ -41,6 +43,7 @@ blocklist holds regardless, exactly as it does for playbook HTTP steps.
 
 from __future__ import annotations
 
+import re
 import socket
 from typing import Any
 
@@ -66,7 +69,13 @@ def refuse_internal_destinations(kwargs: dict[str, Any]) -> None:
     not a refusal — see the module docstring.
     """
     for field_name, value in kwargs.items():
-        items = value if isinstance(value, list) else [value]
+        if field_name == "indexer_urls" and isinstance(value, str):
+            # This field's public schema accepts a list in a textarea. Keep
+            # the exception scoped to that field: commas in ordinary URL
+            # paths or query parameters are not destination separators.
+            items = [item.strip() for item in re.split(r"[,\r\n]+", value) if item.strip()]
+        else:
+            items = value if isinstance(value, list) else [value]
         for item in items:
             if not isinstance(item, str) or not item.startswith(("http://", "https://")):
                 continue

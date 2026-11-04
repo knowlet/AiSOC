@@ -197,9 +197,8 @@ class TestAdoptionIsCountedNotAssumed:
 class TestUnorderedSourcesDoNotCarryAWatermark:
     """Phase 3, finding 5.
 
-    A monotonic ``(event_time, record_id)`` high-water mark is right for an
-    ordered, time-windowed API poll — that is what the design comment on
-    ``apply_checkpoint`` describes and it is sound. It is wrong for a queue.
+    A monotonic ``(event_time, record_id)`` high-water mark assumes an
+    ordered source. It is wrong for an unordered queue or late Indexer writes.
     Neither Pub/Sub (no ordering key from a Cloud Logging sink) nor an S3
     notification over SQS is ordered, so an event older than the last batch's
     newest is an ordinary first arrival. A watermark discards it, silently,
@@ -207,10 +206,13 @@ class TestUnorderedSourcesDoNotCarryAWatermark:
     """
 
     #: Sources whose arrival order is not their event order. These dedup on a
-    #: stable identity instead; the queue itself is what guarantees no gap.
+    #: stable identity instead; each connector owns its source recovery path.
     UNORDERED = {
         "aws_cloudtrail_s3": ("object_key",),
         "gcp_pubsub": ("record_id",),
+        # Filebeat delays can make an older event newly visible. Wazuh
+        # separately tracks completed windows and replays an overlap.
+        "wazuh": ("alert_id",),
     }
 
     @pytest.mark.parametrize("connector_id", sorted(UNORDERED))

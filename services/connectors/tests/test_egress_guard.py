@@ -80,6 +80,14 @@ def test_list_values_are_walked() -> None:
         refuse_internal_destinations({"urls": ["https://93.184.216.34/", "http://169.254.169.254/"]})
 
 
+@pytest.mark.parametrize("separator", [",", "\n", ",\n"])
+def test_wazuh_fallback_text_is_checked_one_destination_at_a_time(separator: str) -> None:
+    value = f"https://93.184.216.34:9200{separator}http://169.254.169.254/latest/meta-data/"
+    with pytest.raises(EgressRefused) as refused:
+        refuse_internal_destinations({"indexer_urls": value})
+    assert refused.value.field_name == "indexer_urls"
+
+
 def test_an_unresolvable_hostname_is_not_a_refusal() -> None:
     """A gaierror is the connector's own 'DNS lookup failed' to report, and a
     host the guard cannot resolve is one the client cannot connect to either.
@@ -215,3 +223,76 @@ async def test_scheduler_owned_config_keys_do_not_reach_the_constructor(client: 
         )
     assert r.status_code == 200, r.text
     probe.assert_awaited_once()
+
+
+@pytest.mark.parametrize("separator", [",", "\n"])
+@pytest.mark.asyncio
+async def test_wazuh_test_route_accepts_public_fallback_text(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, separator: str
+) -> None:
+    from app.connectors.wazuh import WazuhConnector
+
+    probe = AsyncMock(return_value={"success": True, "connector": "wazuh"})
+    monkeypatch.setattr(WazuhConnector, "test_connection", probe)
+    async with client as c:
+        response = await c.post(
+            "/api/v1/connectors/wazuh/test",
+            headers={"Authorization": f"Bearer {_console_jwt('viewer')}"},
+            json={
+                "auth_config": {"username": "fixture-user", "password": "fixture-password"},
+                "connector_config": {
+                    "indexer_url": "https://93.184.216.34:9200",
+                    "indexer_urls": f"https://93.184.216.34:9200{separator}https://1.1.1.1:9200",
+                },
+            },
+        )
+    assert response.status_code == 200, response.text
+    probe.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"indexer_urls": "https://93.184.216.34:9200\nhttp://169.254.169.254/latest/meta-data/"},
+        {"indexer_urls": "https://93.184.216.34:9200, http://169.254.169.254/latest/meta-data/"},
+        {"excluded_rule_ids": "invalid-rule"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_wazuh_test_route_rejects_invalid_config_before_probe(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, config: dict
+) -> None:
+    from app.connectors.wazuh import WazuhConnector
+
+    probe = AsyncMock(return_value={"success": True, "connector": "wazuh"})
+    monkeypatch.setattr(WazuhConnector, "test_connection", probe)
+    async with client as c:
+        response = await c.post(
+            "/api/v1/connectors/wazuh/test",
+            headers={"Authorization": f"Bearer {_console_jwt('viewer')}"},
+            json={
+                "auth_config": {"username": "fixture-user", "password": "fixture-password"},
+                "connector_config": {"indexer_url": "https://93.184.216.34:9200", **config},
+            },
+        )
+    assert response.status_code == 422, response.text
+    assert "fixture-password" not in response.text
+    probe.assert_not_awaited()
+
+
+def test_shared_constructor_turns_wazuh_config_errors_into_422() -> None:
+    from app.api.router import _instantiate_or_422
+    from app.connectors.wazuh import WazuhConnector
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as refused:
+        _instantiate_or_422(
+            WazuhConnector,
+            {
+                "indexer_url": "https://93.184.216.34:9200",
+                "username": "fixture-user",
+                "password": "fixture-password",
+                "excluded_rule_ids": "invalid-rule",
+            },
+        )
+    assert refused.value.status_code == 422

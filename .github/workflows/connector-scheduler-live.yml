@@ -40,6 +40,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    services:
+      opensearch:
+        image: opensearchproject/opensearch:2.19.4
+        env:
+          discovery.type: single-node
+          node.store.allow_mmap: "false"
+          OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+          DISABLE_INSTALL_DEMO_CONFIG: "true"
+          DISABLE_SECURITY_PLUGIN: "true"
+        ports:
+          - 127.0.0.1:19200:9200
+        options: >-
+          --health-cmd "curl --fail --silent http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+
     env:
       # The runtime role, not the owner: a superuser ignores every RLS
       # policy even under FORCE ROW LEVEL SECURITY.
@@ -102,6 +119,32 @@ jobs:
         env:
           ISOLATION_CONNECTOR_DSN: ${{ env.CONNECTOR_DSN }}
         run: python -m pytest ../../tests/isolation/test_connector_scheduler_live.py -v --tb=short
+
+      - name: Indexer polls retain progress across incomplete reads and restarts
+        working-directory: services/connectors
+        env:
+          ISOLATION_CONNECTOR_DSN: ${{ env.CONNECTOR_DSN }}
+        run: python -m pytest ../../tests/isolation/test_wazuh_polling_live.py -v --tb=short
+
+      - name: Real search snapshots cover large windows and late documents
+        working-directory: services/connectors
+        env:
+          WAZUH_TEST_OPENSEARCH_URL: http://127.0.0.1:19200
+        run: python -m pytest tests/test_wazuh_indexer_live.py -v --tb=short
+
+      - name: Install the fusion service's locked test environment
+        run: |
+          python -m venv /tmp/fusion-context-venv
+          python scripts/service_requirements.py fusion --locked > /tmp/fusion-context-requirements.txt
+          /tmp/fusion-context-venv/bin/python -m pip install --no-deps -r /tmp/fusion-context-requirements.txt
+
+      - name: Vendor rule and log evidence survive alert persistence
+        working-directory: services/fusion
+        env:
+          PYTHONPATH: .
+          WAZUH_CONTEXT_TEST_POSTGRES: postgresql://aisoc_app:aisoc_app_ci_only@127.0.0.1:5432/aisoc
+          WAZUH_CONTEXT_TEST_POSTGRES_ADMIN: postgresql://aisoc:aisoc_ci_only@127.0.0.1:5432/aisoc
+        run: /tmp/fusion-context-venv/bin/python -m pytest tests/integration/test_wazuh_context_live.py -v --tb=short
 
       # Phase 3. Two properties that only a real socket and a real database
       # can show: that nothing reaches `:acknowledge` while ingest has not

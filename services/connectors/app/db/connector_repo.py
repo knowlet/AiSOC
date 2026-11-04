@@ -374,9 +374,11 @@ async def record_checkpoint(
 
     Used by connectors that resume from a per-source cursor (e.g. Splunk, #529).
     Merged into the existing JSONB with the ``||`` operator so the rest of the
-    config is preserved. Written only after ingest accepts the batch, so a
+    config is preserved. Completed progress is written after ingest accepts the batch, so a
     crash mid-poll leaves the previous checkpoint intact and the next poll
-    re-scans a bounded overlap rather than skipping events.
+    re-scans a bounded overlap rather than skipping events. A connector may
+    also persist an unfinished first-query lower bound before source I/O;
+    that anchors recovery and does not mark any event as accepted.
     """
     now = datetime.now(UTC)
     # Bound as a mapping with a JSONB type, serialised exactly once.

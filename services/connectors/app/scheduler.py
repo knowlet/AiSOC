@@ -586,12 +586,12 @@ class ConnectorScheduler:
         started = datetime.now(UTC)
         try:
             connector = connector_class(**kwargs)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             logger.error(
-                "connector.scheduler.bad_config id=%s type=%s err=%s",
+                "connector.scheduler.bad_config id=%s type=%s error_type=%s",
                 connector_id,
                 target.connector_type,
-                exc,
+                type(exc).__name__,
             )
             await self._record_failure(target.id)
             return
@@ -631,6 +631,22 @@ class ConnectorScheduler:
             )
         else:
             since_seconds = _coerce_poll_interval(target.connector_config)
+        try:
+            initial_checkpoint = connector.prepare_checkpoint(since_seconds=since_seconds)
+            if isinstance(initial_checkpoint, dict) and initial_checkpoint:
+                # Save an unfinished query's lower bound before its first
+                # source request. This does not advance accepted progress;
+                # it prevents a failed first poll or process crash from
+                # replacing the original window with a newer one on restart.
+                # Unlike the post-ingest best-effort write, failure here
+                # must stop the fetch because no recovery position exists.
+                async with self._engine.begin() as conn:
+                    await record_checkpoint(conn, target.id, initial_checkpoint)
+                connector.set_checkpoint(initial_checkpoint)
+        except Exception:
+            logger.exception("connector.scheduler.checkpoint_prepare_failed id=%s", connector_id)
+            await self._record_failure(target.id)
+            return
         try:
             raw_events = await connector.fetch_alerts(since_seconds=since_seconds)
         except Exception:
@@ -1107,24 +1123,40 @@ class ConnectorScheduler:
             )
             return
 
-        if not findings:
-            return
-
         try:
-            from app.vulnerabilities import sync_findings
+            if findings:
+                from app.vulnerabilities import MAX_FINDINGS_PER_SYNC, sync_findings
 
-            counts = await sync_findings(
-                self._engine,
-                tenant_id=target.tenant_id,
-                findings=findings,
-            )
-            logger.info(
-                "connector.scheduler.vulnerabilities_synced id=%s inserted=%d touched=%d skipped=%d",
-                target.id,
-                counts["findings_inserted"],
-                counts["findings_touched"],
-                counts["skipped"],
-            )
+                # The writer bounds each transaction by truncating its input.
+                # A paginated source can exceed that bound, so drain every
+                # chunk before confirming progress. A later failure replays
+                # committed chunks rather than moving past the unwritten ones.
+                counts = {"findings_inserted": 0, "findings_touched": 0, "skipped": 0}
+                for offset in range(0, len(findings), MAX_FINDINGS_PER_SYNC):
+                    batch = findings[offset : offset + MAX_FINDINGS_PER_SYNC]
+                    result = await sync_findings(
+                        self._engine,
+                        tenant_id=target.tenant_id,
+                        findings=batch,
+                    )
+                    accounted = [result.get(key) for key in counts]
+                    if any(type(count) is not int or count < 0 for count in accounted) or sum(result[key] for key in counts) != len(batch):
+                        raise RuntimeError("vulnerability sync did not account for the entire batch")
+                    for key in counts:
+                        counts[key] += result[key]
+                logger.info(
+                    "connector.scheduler.vulnerabilities_synced id=%s inserted=%d touched=%d skipped=%d",
+                    target.id,
+                    counts["findings_inserted"],
+                    counts["findings_touched"],
+                    counts["skipped"],
+                )
+            # Separate streams cannot share an unconditionally advancing
+            # cursor. Confirm only a committed sync or a complete empty
+            # search; the later ingest-acceptance gate still owns persistence.
+            confirm = getattr(connector, "confirm_vulnerability_sync", None)
+            if confirm is not None:
+                confirm()
         except Exception:
             logger.exception(
                 "connector.scheduler.vulnerability_sync_failed id=%s type=%s",

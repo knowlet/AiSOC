@@ -3711,6 +3711,14 @@
         "type": "string"
       },
       {
+        "default": "",
+        "help_text": "Additional nodes in the same Indexer cluster, separated by commas or newlines. Tried in order after transient failures.",
+        "label": "Fallback Indexer URLs",
+        "name": "indexer_urls",
+        "required": false,
+        "type": "textarea"
+      },
+      {
         "help_text": "Indexer user with read access to wazuh-alerts-*. Create a dedicated read-only role in production.",
         "label": "Indexer Username",
         "name": "username",
@@ -3733,11 +3741,35 @@
       },
       {
         "default": 7,
-        "help_text": "Drop alerts with rule.level below this value at ingest. Default 7 keeps low-signal noise out of the lake; lower to 3 for full audit coverage.",
+        "help_text": "Only ingest alerts at or above this level. Default 7 excludes levels 0\u20136, including any custom security rules there. Set 3 to include levels 3\u201315 and use explicit rule exclusions for unwanted events.",
         "label": "Minimum Rule Level",
         "name": "min_rule_level",
         "required": false,
         "type": "number"
+      },
+      {
+        "default": "",
+        "help_text": "Optional alert rule IDs to exclude, separated by commas or newlines. Empty excludes no rules.",
+        "label": "Excluded Rule IDs",
+        "name": "excluded_rule_ids",
+        "required": false,
+        "type": "textarea"
+      },
+      {
+        "default": 900,
+        "help_text": "Replay this much event time before the last completed window. Delivery delays beyond this overlap require backfill.",
+        "label": "Late Arrival Overlap (seconds)",
+        "name": "overlap_seconds",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": "@timestamp",
+        "help_text": "Default is the Manager event time. An ingestion-time field works only after you configure and map it in the Indexer pipeline.",
+        "label": "Query Timestamp Field",
+        "name": "timestamp_field",
+        "required": false,
+        "type": "string"
       },
       {
         "default": true,

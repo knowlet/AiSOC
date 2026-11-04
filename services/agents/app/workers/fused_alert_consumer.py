@@ -281,6 +281,8 @@ def build_state(message: dict[str, Any]) -> InvestigationState | None:
         # tell two different detections on the same host apart. Without it, a
         # benign prior for one detection would suppress an unrelated one.
         "title": alert.get("title"),
+        "description": alert.get("description"),
+        "external_id": alert.get("external_id"),
         "rule_id": alert.get("rule_id"),
         "rule_name": alert.get("rule_name"),
         "severity": alert.get("severity"),

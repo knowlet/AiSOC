@@ -803,6 +803,16 @@ class BaseConnector(ABC):
         if checkpoint.get("time") or checkpoint.get("id"):
             self._incoming_checkpoint = {"time": str(checkpoint.get("time") or ""), "id": str(checkpoint.get("id") or "")}
 
+    def prepare_checkpoint(self, since_seconds: int = 300) -> dict[str, Any] | None:
+        """Optionally anchor a first query's lower bound before source I/O.
+
+        This is unfinished work, not accepted progress. A connector with no
+        existing cursor can use it to resume a failed first poll after a
+        restart. The scheduler must persist it before fetching; completed
+        progress still goes through :meth:`get_checkpoint` after ingest.
+        """
+        return None
+
     def get_checkpoint(self) -> dict[str, Any] | None:
         """The advanced cursor after a fetch, or ``None`` if nothing moved.
 

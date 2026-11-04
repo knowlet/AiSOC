@@ -193,6 +193,24 @@ def _external_id(ocsf: dict) -> str | None:
     return None
 
 
+def _rule_metadata(ocsf: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Carry the connector's declared rule separately from its event id.
+
+    Ingest keeps canonical connector fields in serialized ``raw_data``.
+    ``finding.uid`` identifies a vendor event, so it must not be guessed to
+    be a rule when the connector supplies no rule metadata.
+    """
+    payload = decode_raw_data(ocsf) or {}
+    rule_id = payload.get("rule_id")
+    if isinstance(rule_id, int) and not isinstance(rule_id, bool):
+        rule_id = str(rule_id)
+    rule_name = payload.get("rule_name")
+    return (
+        (rule_id.strip() or None) if isinstance(rule_id, str) else None,
+        (rule_name.strip() or None) if isinstance(rule_name, str) else None,
+    )
+
+
 def should_promote(ocsf: dict[str, Any]) -> bool:
     """Deterministic promotion decision — see module docstring for policy."""
     class_uid = ocsf.get("class_uid")
@@ -375,6 +393,7 @@ def promote_normalized_event(message: dict[str, Any]) -> RawAlert | None:
 
     tactics, techniques = _mitre(ocsf)
     connector_id, connector_type, class_uid = extract_provenance(message, ocsf)
+    rule_id, rule_name = _rule_metadata(ocsf)
 
     title = _title(ocsf)
     description = _description(ocsf)
@@ -407,5 +426,7 @@ def promote_normalized_event(message: dict[str, Any]) -> RawAlert | None:
         connector_id=connector_id,
         connector_type=connector_type,
         ocsf_class_uid=class_uid,
+        rule_id=rule_id,
+        rule_name=rule_name,
         external_id=_external_id(ocsf),
     )

@@ -224,7 +224,7 @@ def _instantiate_or_422(cls: type, kwargs: dict[str, Any]) -> Any:
 
     Pulled out into a helper because four endpoints now share the exact
     same construction path; keeping it inline meant duplicating the
-    ``TypeError`` handling four times.
+    configuration-error handling four times.
 
     Destination validation happens here, before the constructor, so every
     route that builds a connector refuses an internal URL the same way
@@ -240,7 +240,7 @@ def _instantiate_or_422(cls: type, kwargs: dict[str, Any]) -> Any:
         ) from exc
     try:
         return cls(**kwargs)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"connector config does not match schema: {exc}",
@@ -357,7 +357,7 @@ async def test_connector_connection(connector_id: str, payload: TestConnectionRe
 
     try:
         connector = cls(**kwargs)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         # Almost always "missing 1 required positional argument" or "got
         # unexpected keyword argument", i.e. caller passed a config that
         # doesn't match this connector's schema. Surface as 422 so the
@@ -466,7 +466,7 @@ async def get_instance_resource_config(
     kwargs = {**auth, **_connector_kwargs(target.connector_config or {})}
     try:
         connector = cls(**kwargs)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"connector config does not match schema: {exc}",
@@ -505,7 +505,7 @@ async def get_resource_config(connector_id: str, payload: ResourceConfigRequest)
     kwargs = {**payload.auth_config, **payload.connector_config}
     try:
         connector = cls(**kwargs)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"connector config does not match schema: {exc}",
@@ -610,7 +610,7 @@ async def run_federated_query(connector_id: str, payload: FederatedQueryRequest)
     kwargs = {**payload.auth_config, **payload.connector_config}
     try:
         connector = cls(**kwargs)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"connector config does not match schema: {exc}",

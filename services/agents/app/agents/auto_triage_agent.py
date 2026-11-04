@@ -292,6 +292,21 @@ def _build_alert_context(state: InvestigationState, *, nonce: str) -> str:
         f"Risk Score (vendor): {sanitize_text(str(raw.get('risk_score', 'N/A')))}",
     ]
 
+    # These are evidence, not optional metadata. Alphabetically truncating
+    # the generic extras could hide the rule and the source log entirely;
+    # generic string summaries also cut log lines at 400 characters.
+    # Keep their own bounded slots inside the telemetry's untrusted fence.
+    evidence_fields = {
+        "rule_id": ("Rule ID", 256),
+        "rule_name": ("Rule Name", 500),
+        "external_id": ("External Event ID", 512),
+        "description": ("Description / log excerpt", 1000),
+    }
+    for key, (label, limit) in evidence_fields.items():
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{label}: {sanitize_text(value, max_len=limit)}")
+
     ioc_fields = {
         "src_ip": "Source IP",
         "dst_ip": "Destination IP",
@@ -310,10 +325,13 @@ def _build_alert_context(state: InvestigationState, *, nonce: str) -> str:
     if techniques:
         parts.append(f"MITRE Techniques: {', '.join(sanitize_text(str(t)) for t in techniques)}")
 
-    extra_keys = {k for k in raw if k not in {"severity", "risk_score", "mitre_techniques", *ioc_fields}}
+    extra_keys = {k for k in raw if k not in {"severity", "risk_score", "mitre_techniques", *ioc_fields, *evidence_fields}}
     if extra_keys:
         extras = {k: raw[k] for k in sorted(extra_keys)[:10]}
-        parts.append("Additional fields (summary, not raw JSON):\n" + format_extra_fields_for_llm(extras))
+        # A nested source payload may repeat the source log. It must not
+        # reintroduce unsanitized role markers after the explicit excerpt
+        # above was sanitized. Keep the existing structural/field budgets.
+        parts.append("Additional fields (summary, not raw JSON):\n" + sanitize_text(format_extra_fields_for_llm(extras), max_len=0))
 
     telemetry = wrap_untrusted("\n".join(parts), label="alert_telemetry")
 

@@ -96,7 +96,7 @@
 | trellix_helix | siem | 3 | 1 | 4 | ✅ | ✅ | ✅ |
 | trend_vision_one | edr | 2 | 1 | 5 | ✅ | ✅ | ✅ |
 | vault | iam | 4 | 1 | 2 | ✅ | ✅ | ✅ |
-| wazuh | siem | 7 | 1 | 5 | ✅ | ✅ | ✅ |
+| wazuh | siem | 11 | 1 | 5 | ✅ | ✅ | ✅ |
 | windows_event | edr | 3 | 1 | 3 | ✅ | ✅ | ✅ |
 | wiz | cloud | 7 | 1 | 2 | ✅ | ✅ | ✅ |
 | zeek_suricata | ndr | 4 | 1 | 2 | ✅ | ✅ | ✅ |
