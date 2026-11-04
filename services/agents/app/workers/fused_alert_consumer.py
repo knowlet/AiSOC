@@ -45,6 +45,7 @@ import structlog
 from app.agents.auto_triage_agent import run_auto_triage
 from app.agents.dispositions import AUTO_CLOSEABLE_DISPOSITIONS, NEEDS_REVIEW, normalize_disposition
 from app.agents.triage_agent import run_triage
+from app.closure.authorization import requires_escalation
 from app.confidence.groundedness import score_groundedness
 from app.context import cloud_posture as cloud_posture_module
 from app.context import dispositions as dispositions_module
@@ -735,6 +736,8 @@ class FusedAlertTriageWorker:
                 "matched_rule_ids": list(bc_matched),
                 "severity_before": bc.severity_before,
                 "severity_after": bc.severity_after,
+                "require_escalation": bc.require_escalation,
+                "escalation_rule_ids": list(bc.escalation_rule_ids),
             }
 
         # Phase 4.3 — the tenant's standing questions, answered from the
@@ -773,7 +776,7 @@ class FusedAlertTriageWorker:
         # prior benign/FP outcome, auto-resolve the repeat WITHOUT re-triage
         # (this is what makes alert volume actually shrink over time). Gated on
         # trust (human prior, or corroborated high-confidence AI prior).
-        if _memory_suppression_enabled():
+        if _memory_suppression_enabled() and not requires_escalation(state.business_context):
             with timer.measure("memory_suppression"):
                 suppressed = await self._maybe_suppress_from_memory(state, fingerprint, bc_matched, writer=writer)
             if suppressed is not None:
@@ -966,6 +969,16 @@ class FusedAlertTriageWorker:
         # and auto-closed with no signal that it was invented.
         with timer.measure("verification"):
             verdict, confidence = self._apply_groundedness_gate(state, verdict, confidence)
+
+        # Covers cached, deterministic and LLM results. A benign classification
+        # may remain benign, but it cannot complete a mandatory investigation.
+        if requires_escalation(state.business_context):
+            state.status = AgentStatus.RUNNING
+            state.verdict = str(verdict) if verdict else NEEDS_REVIEW
+            verdict = state.verdict
+            state.confidence = confidence
+            rule_ids = ", ".join((state.business_context or {}).get("escalation_rule_ids", []))
+            state.add_finding(f"Business-context rules require escalation: {rule_ids}. Auto-close and suppression withheld.")
 
         _METRICS["triaged"] += 1
         with timer.measure("persist"):
@@ -1455,6 +1468,8 @@ class FusedAlertTriageWorker:
         keeps the alert row open, so the analyst closes it themselves and the
         agreement is real.
         """
+        if requires_escalation(state.business_context):
+            return None
         try:
             prior = await self._reader.lookup_prior(str(state.tenant_id), signature)
         except Exception as exc:  # noqa: BLE001 — memory read is advisory

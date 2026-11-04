@@ -66,12 +66,13 @@ export function RuleBuilder({ onAppend }: RuleBuilderProps) {
   const [routeTo, setRouteTo] = useState("");
   const [tag, setTag] = useState("");
   const [suppress, setSuppress] = useState(false);
+  const [requireEscalation, setRequireEscalation] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const canSubmit =
     ruleId.trim().length > 0 &&
     value.trim().length > 0 &&
-    (setSeverity || routeTo || tag || suppress);
+    (setSeverity || routeTo || tag || suppress || requireEscalation);
 
   const buildSnippet = (): string => {
     // Try to coerce numeric / boolean literals so the generated YAML doesn't
@@ -112,6 +113,9 @@ export function RuleBuilder({ onAppend }: RuleBuilderProps) {
     if (suppress) {
       lines.push(`${indent}    suppress: true`);
     }
+    if (requireEscalation) {
+      lines.push(`${indent}    require_escalation: true`);
+    }
     return lines.join("\n");
   };
 
@@ -119,7 +123,7 @@ export function RuleBuilder({ onAppend }: RuleBuilderProps) {
     setError(null);
     if (!canSubmit) {
       setError(
-        "Need at least an id, a value, and one action (severity / route / tag / suppress).",
+        "Need at least an id, a value, and one action (severity / route / tag / suppress / require escalation).",
       );
       return;
     }
@@ -248,7 +252,21 @@ export function RuleBuilder({ onAppend }: RuleBuilderProps) {
           <label className="flex items-center gap-2 text-xs text-slate-300">
             <input
               type="checkbox"
+              checked={requireEscalation}
+              disabled={suppress}
+              onChange={(e) => setRequireEscalation(e.target.checked)}
+            />
+            Require escalation
+          </label>
+          <p className="text-xs text-slate-400">
+            Matching alerts require review and cannot be suppressed or
+            automatically closed. Set severity to establish a minimum.
+          </p>
+          <label className="flex items-center gap-2 text-xs text-slate-300">
+            <input
+              type="checkbox"
               checked={suppress}
+              disabled={requireEscalation}
               onChange={(e) => setSuppress(e.target.checked)}
             />
             Suppress matching alerts

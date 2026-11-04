@@ -37,6 +37,7 @@ export interface RuleActionWire {
   route_to?: string | null;
   tag?: string | null;
   suppress?: boolean;
+  require_escalation?: boolean;
 }
 
 export interface RuleWire {

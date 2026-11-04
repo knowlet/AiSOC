@@ -40,6 +40,7 @@ eighth and eleventh tests fail with the alert sitting at `status='resolved'`.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import UTC, datetime
@@ -215,7 +216,7 @@ async def _release_kill_switches(pool) -> None:
 async def _row(pool, alert_id: str) -> dict[str, Any]:
     async with pool.acquire() as conn:
         found = await conn.fetchrow(
-            "SELECT status, disposition, resolved_at, ai_score FROM alerts WHERE id = $1::uuid",
+            "SELECT status, severity, disposition, resolved_at, ai_score FROM alerts WHERE id = $1::uuid",
             alert_id,
         )
     return dict(found)
@@ -558,3 +559,189 @@ class TestManualClosureIsUnaffected:
         row = await _row(pool, alert_id)
         assert row["status"] == "triaged", "an alert held back from closure should still show as triaged"
         assert row["ai_score"] == pytest.approx(0.99)
+
+
+# Illustrative test input only. This is not a production Wazuh rule list.
+_MANDATORY_RULE_YAML = """
+rules:
+  - id: wazuh-test-mandatory
+    when:
+      all:
+        - {field: connector_type, op: eq, value: wazuh}
+        - {field: raw_event.finding.uid, op: in, value: ["910001"]}
+    then:
+      set_severity: critical
+      require_escalation: true
+"""
+
+
+async def _save_mandatory_rules(pool, tenant_id: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO aisoc_business_context_rule_sets (tenant_id, yaml_text, enabled)
+            VALUES ($1::uuid, $2, TRUE)
+            """,
+            tenant_id,
+            _MANDATORY_RULE_YAML,
+        )
+
+
+def _mandatory_alert(alert_id: str, **overrides: Any) -> dict[str, Any]:
+    alert = {
+        "id": alert_id,
+        "title": "Synthetic mandatory-review fixture",
+        "severity": "medium",
+        "connector_type": "wazuh",
+        # Wazuh's current external_id is the vendor rule ID. The canonical
+        # ingest profile projects it to finding.uid; fusion nests OCSF here.
+        "raw_event": {"finding": {"uid": "910001"}},
+    }
+    alert.update(overrides)
+    return alert
+
+
+class TestMandatoryBusinessContextAtTheWrite:
+    """Real saved rules and real SQL, under an otherwise permissive policy.
+
+    Default denial would hide a missing mandatory-review check, so the tenant
+    explicitly permits closures in every positive case here. The production
+    rule loader reads the actual row rather than a seeded in-memory rule set.
+    """
+
+    @pytest.mark.parametrize("tier", ["llm", "memory", "cached"])
+    async def test_saved_mandatory_rule_vetoes_every_closure_tier(self, pool, monkeypatch, tier: str) -> None:
+        from app.investigator import ledger as ledger_module
+        from app.workers.business_context import BusinessContextApplier
+
+        monkeypatch.setenv("DATABASE_DSN", _dsn())
+        monkeypatch.delenv("AISOC_BUSINESS_CONTEXT_RULES_FILE", raising=False)
+        tenant_id = await _tenant(pool)
+        alert_id = await _alert(pool, tenant_id)
+        await _policy(pool, tenant_id, enabled=True, threshold=0.5, require_grant=False)
+        await _save_mandatory_rules(pool, tenant_id)
+
+        evaluated = await BusinessContextApplier(rules_file="").apply_for_tenant(tenant_id, _mandatory_alert(alert_id))
+        context = {
+            "matched_rule_ids": evaluated.matched_rule_ids,
+            "severity_before": evaluated.severity_before,
+            "severity_after": evaluated.severity_after,
+            # Defaults let the negative control reach the old SQL write and
+            # fail on its result, not on a newly added attribute's absence.
+            "require_escalation": getattr(evaluated, "require_escalation", False),
+            "escalation_rule_ids": getattr(evaluated, "escalation_rule_ids", []),
+        }
+        run_id = uuid.uuid4()
+        written = await ledger_module.persist_auto_triage(
+            run_id=run_id,
+            alert_id=alert_id,
+            tenant_ref=tenant_id,
+            alert_summary="Synthetic mandatory-review fixture",
+            raw_alert=evaluated.alert,
+            tier=tier,
+            verdict=BENIGN,
+            confidence=0.99,
+            rationale="An otherwise closeable synthetic result",
+            findings=[],
+            proposed_actions=[],
+            auto_closed=True,
+            business_context=context,
+        )
+
+        assert written is True
+        row = await _row(pool, alert_id)
+        assert row["status"] != "resolved", "a mandatory escalation was closed by a permissive closure policy"
+        assert row["resolved_at"] is None
+        assert row["severity"] == "critical", "the durable alert retained its old severity"
+        async with pool.acquire() as conn:
+            payload = await conn.fetchval(
+                "SELECT payload FROM investigation_events WHERE run_id = $1 AND kind = 'triage_verdict'",
+                run_id,
+            )
+        event = json.loads(payload) if isinstance(payload, str) else payload
+        assert event["auto_closed"] is False
+        assert event["business_context"]["escalation_rule_ids"] == ["wazuh-test-mandatory"]
+        assert any("business_context" in finding for finding in event["findings"])
+
+    async def test_another_tenant_is_not_subject_to_the_saved_rule(self, pool, monkeypatch) -> None:
+        from app.investigator import ledger as ledger_module
+        from app.workers.business_context import BusinessContextApplier
+
+        monkeypatch.setenv("DATABASE_DSN", _dsn())
+        monkeypatch.delenv("AISOC_BUSINESS_CONTEXT_RULES_FILE", raising=False)
+        owner = await _tenant(pool)
+        other = await _tenant(pool)
+        alert_id = await _alert(pool, other)
+        await _save_mandatory_rules(pool, owner)
+        await _policy(pool, other, enabled=True, threshold=0.5, require_grant=False)
+        evaluated = await BusinessContextApplier(rules_file="").apply_for_tenant(other, _mandatory_alert(alert_id))
+        assert evaluated.matched_rule_ids == []
+
+        assert await ledger_module.persist_auto_triage(
+            run_id=uuid.uuid4(),
+            alert_id=alert_id,
+            tenant_ref=other,
+            alert_summary="Synthetic other-tenant fixture",
+            raw_alert=evaluated.alert,
+            tier="llm",
+            verdict=BENIGN,
+            confidence=0.99,
+            rationale="An explicitly permitted synthetic closure",
+            auto_closed=True,
+        )
+        row = await _row(pool, alert_id)
+        assert row["status"] == "resolved", "mandatory rules leaked across tenants"
+        assert row["severity"] == "medium"
+
+    async def test_a_saved_rule_reaches_the_worker_and_survives_a_benign_prior(self, pool, monkeypatch) -> None:
+        from app.core.cost_governor import reset_governor
+        from app.memory.outcomes import HUMAN
+        from app.workers.business_context import BusinessContextApplier
+        from app.workers.fused_alert_consumer import FusedAlertTriageWorker
+        from app.workers.triage_persistence import LiveTriageContextReader
+
+        monkeypatch.setenv("DATABASE_DSN", _dsn())
+        monkeypatch.delenv("AISOC_BUSINESS_CONTEXT_RULES_FILE", raising=False)
+        monkeypatch.setenv("AISOC_DETERMINISTIC", "1")
+        # Only the post-triage investigation graph is outside this test. The
+        # worker, rule DB read, authorization and durable write all run.
+        monkeypatch.setenv("AISOC_AGENT_ESCALATE_TO_GRAPH", "0")
+        monkeypatch.setenv("AISOC_ALERT_PLAYBOOKS_ENABLED", "0")
+        monkeypatch.setenv("AISOC_AGENT_MEMORY_SUPPRESSION", "1")
+        reset_governor()
+        tenant_id = await _tenant(pool)
+        alert_id = await _alert(pool, tenant_id)
+        await _policy(pool, tenant_id, enabled=True, threshold=0.5, require_grant=False)
+        await _save_mandatory_rules(pool, tenant_id)
+
+        class BenignPrior(LiveTriageContextReader):
+            async def lookup_prior(self, tenant_id: str, signature: str) -> dict[str, Any]:  # noqa: ARG002
+                return {
+                    "disposition": BENIGN,
+                    "confidence": 0.99,
+                    "count": 2,
+                    "author": HUMAN,
+                    "last_seen": datetime.now(UTC).isoformat(),
+                }
+
+        worker = FusedAlertTriageWorker(
+            bootstrap_servers="unused",
+            business_context=BusinessContextApplier(rules_file=""),
+            context_reader=BenignPrior(),
+        )
+        result = await worker.triage(
+            {
+                "id": alert_id,
+                "alert_row_id": alert_id,
+                "tenant_id": tenant_id,
+                "incident_id": str(uuid.uuid4()),
+                "alert": _mandatory_alert(alert_id),
+            }
+        )
+        assert result is not None
+        assert not result.get("suppressed_by_memory", False)
+        assert result["escalated"] is True
+        row = await _row(pool, alert_id)
+        assert row["status"] == "triaged"
+        assert row["severity"] == "critical"
+        assert row["resolved_at"] is None
