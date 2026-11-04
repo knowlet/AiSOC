@@ -41,6 +41,7 @@ blocklist holds regardless, exactly as it does for playbook HTTP steps.
 
 from __future__ import annotations
 
+import re
 import socket
 from typing import Any
 
@@ -66,7 +67,12 @@ def refuse_internal_destinations(kwargs: dict[str, Any]) -> None:
     not a refusal — see the module docstring.
     """
     for field_name, value in kwargs.items():
-        items = value if isinstance(value, list) else [value]
+        # Wazuh's wizard stores fallback URLs in a text field. Validate
+        # each endpoint, including nodes after a comma or newline.
+        if field_name == "indexer_urls" and isinstance(value, str):
+            items = [item.strip() for item in re.split(r"[,\n]", value)]
+        else:
+            items = value if isinstance(value, list) else [value]
         for item in items:
             if not isinstance(item, str) or not item.startswith(("http://", "https://")):
                 continue

@@ -211,6 +211,10 @@ class TestUnorderedSourcesDoNotCarryAWatermark:
     UNORDERED = {
         "aws_cloudtrail_s3": ("object_key",),
         "gcp_pubsub": ("record_id",),
+        # Indexing order need not match event time. Wazuh replays a bounded
+        # overlap of separately checkpointed query windows and drops only
+        # document identities already accepted by ingest.
+        "wazuh": ("external_id",),
     }
 
     @pytest.mark.parametrize("connector_id", sorted(UNORDERED))

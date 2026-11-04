@@ -45,6 +45,10 @@ API references
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
+import re
+import ssl
 from typing import Any
 
 import httpx
@@ -56,8 +60,44 @@ from app.connectors.base import (
     ConnectorSchema,
     Field,
 )
+from app.connectors.wazuh_checkpoint import WazuhCheckpoint
+from app.security.egress import EgressRefused, refuse_internal_destinations
 
 logger = structlog.get_logger()
+
+_FAILOVER_STATUSES = frozenset({429, 502, 503, 504})
+
+
+class WazuhSearchError(RuntimeError):
+    """The indexer did not return a complete, successful search result."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _certificate_error(exc: BaseException) -> bool:
+    """HTTP transports may retain a certificate failure only in its cause."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower().replace("_", " ")
+        if (
+            isinstance(current, ssl.SSLCertVerificationError)
+            or "certificate verify failed" in message
+            or "certificate verification failed" in message
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _request_error(exc: httpx.RequestError) -> WazuhSearchError:
+    if _certificate_error(exc):
+        return WazuhSearchError("Wazuh indexer TLS certificate validation failed")
+    retryable = isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError))
+    return WazuhSearchError(f"Wazuh indexer request failed ({type(exc).__name__})", retryable=retryable)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +208,9 @@ class WazuhConnector(BaseConnector):
     connector_id = "wazuh"
     connector_name = "Wazuh"
     connector_category = "siem"
+    # Indexed arrival can lag event time. Deduplicate document identities
+    # within the checkpoint's replay window, not a timestamp/ID ordering.
+    dedup_identity_field = ("external_id",)
 
     @classmethod
     def capabilities(cls) -> tuple[Capability, ...]:
@@ -204,6 +247,17 @@ class WazuhConnector(BaseConnector):
                     help_text=("Base URL of the Wazuh indexer (NOT the dashboard or manager). Default port is 9200."),
                 ),
                 Field(
+                    "indexer_urls",
+                    "string",
+                    "Additional Indexer URLs",
+                    required=False,
+                    default="",
+                    help_text=(
+                        "Comma- or newline-separated fallback nodes in the same Indexer cluster. "
+                        "The primary URL is tried first; every node uses the same credentials and TLS policy."
+                    ),
+                ),
+                Field(
                     "username",
                     "string",
                     "Indexer Username",
@@ -232,6 +286,17 @@ class WazuhConnector(BaseConnector):
                         "Drop alerts with rule.level below this value at "
                         "ingest. Default 7 keeps low-signal noise out of "
                         "the lake; lower to 3 for full audit coverage."
+                    ),
+                ),
+                Field(
+                    "checkpoint_overlap_seconds",
+                    "number",
+                    "Checkpoint Replay Overlap (seconds)",
+                    required=False,
+                    default=300,
+                    help_text=(
+                        "Replay this much time before the last completed window to catch late indexed events. "
+                        "Already seen document identities are deduplicated. Default 300."
                     ),
                 ),
                 Field(
@@ -273,9 +338,29 @@ class WazuhConnector(BaseConnector):
         min_rule_level: int = 7,
         verify_tls: bool = True,
         vuln_mode: str = "inventory",
+        indexer_urls: str = "",
+        checkpoint_overlap_seconds: int = 300,
     ):
-        # Strip trailing slash so URL composition is predictable.
-        self._base_url = indexer_url.rstrip("/")
+        if not isinstance(indexer_urls, str):
+            raise ValueError("Additional Wazuh Indexer URLs must be a comma- or newline-separated string")
+        nodes = [indexer_url, *re.split(r"[,\n]", indexer_urls)]
+        urls: list[str] = []
+        for node in nodes:
+            candidate = node.strip().rstrip("/")
+            if not candidate:
+                continue
+            try:
+                url = httpx.URL(candidate)
+            except httpx.InvalidURL:
+                raise ValueError("Wazuh Indexer URLs must be valid HTTP or HTTPS base URLs") from None
+            if url.scheme not in ("http", "https") or not url.host or url.username or url.password or url.query or url.fragment:
+                raise ValueError("Wazuh Indexer URLs must be HTTP or HTTPS base URLs without credentials, query or fragment")
+            if candidate not in urls:
+                urls.append(candidate)
+        if not urls:
+            raise ValueError("A Wazuh Indexer URL is required")
+        self._indexer_urls = tuple(urls)
+        self._base_url = urls[0]
         self._username = username
         self._password = password
         self._index_pattern = index_pattern or "wazuh-alerts-*"
@@ -291,6 +376,8 @@ class WazuhConnector(BaseConnector):
         # setting a value we don't honour, and silently switching an
         # established pipeline is worse than not switching it.
         self._vuln_mode = vuln_mode if vuln_mode in ("inventory", "alerts") else "alerts"
+        self._windows = WazuhCheckpoint(overlap_seconds=checkpoint_overlap_seconds)
+        self.set_checkpoint(None)
 
     # ---- helpers ------------------------------------------------------
 
@@ -305,42 +392,53 @@ class WazuhConnector(BaseConnector):
 
     # ---- runtime ------------------------------------------------------
 
+    def set_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
+        super().set_checkpoint(checkpoint)
+        self._next_checkpoint = None
+        self._windows.load(checkpoint)
+
+    def get_checkpoint(self) -> dict[str, Any] | None:
+        dedup = super().get_checkpoint()
+        seen = dedup["seen"] if dedup is not None else self._incoming_seen
+        return self._windows.snapshot(seen)
+
+    def confirm_vulnerability_sync(self) -> None:
+        self._windows.confirm_vulnerability_sync()
+
     async def test_connection(self) -> dict[str, Any]:
         """Hit the indexer's cluster-health endpoint to validate auth + reachability."""
-        try:
-            async with httpx.AsyncClient(timeout=15.0, verify=self._verify_tls) as client:
-                resp = await client.get(
-                    f"{self._base_url}/_cluster/health",
-                    headers=self._headers(),
-                )
-            if resp.status_code == 200:
-                return {"success": True, "connector": self.connector_id}
-            if resp.status_code in (401, 403):
-                return {
-                    "success": False,
-                    "connector": self.connector_id,
-                    "error": "authentication failed; check username/password",
-                }
-            return {
-                "success": False,
-                "connector": self.connector_id,
-                "error": f"unexpected status {resp.status_code}",
-            }
-        except httpx.RequestError as exc:
-            return {
-                "success": False,
-                "connector": self.connector_id,
-                "error": f"network error: {exc}",
-            }
+        error = "no reachable Wazuh indexer"
+        async with httpx.AsyncClient(timeout=15.0, verify=self._verify_tls) as client:
+            for base_url in self._indexer_urls:
+                try:
+                    refuse_internal_destinations({"indexer_url": base_url})
+                    resp = await client.get(f"{base_url}/_cluster/health", headers=self._headers())
+                except EgressRefused as exc:
+                    error = str(exc)
+                    break
+                except httpx.RequestError as exc:
+                    failure = _request_error(exc)
+                    error = f"network error: {failure}"
+                    if failure.retryable:
+                        continue
+                    break
+                if resp.status_code == 200:
+                    return {"success": True, "connector": self.connector_id}
+                if resp.status_code in (401, 403):
+                    error = "authentication failed; check username/password and role permissions"
+                    break
+                error = f"unexpected status {resp.status_code}"
+                if resp.status_code not in _FAILOVER_STATUSES:
+                    break
+        return {"success": False, "connector": self.connector_id, "error": error}
 
     async def fetch_alerts(self, since_seconds: int = 300) -> list[dict[str, Any]]:
         """Pull recent Wazuh alerts above the configured rule-level threshold.
 
-        Uses the OpenSearch ``_search`` API on ``wazuh-alerts-*`` with a
-        time-window filter so we never re-pull historical events.
-        Pagination is bounded to 1000 hits per poll because anything
-        larger means the operator should drop the polling interval, not
-        chase a single huge batch.
+        Drains a fixed query window through 1000-hit scroll pages. A saved
+        completed window expands the lookback after downtime; the bounded
+        replay overlap catches late indexed documents without dropping
+        events that share a timestamp.
 
         In ``vuln_mode=inventory`` (the default) vulnerability-detector hits
         are excluded here and returned by
@@ -350,20 +448,14 @@ class WazuhConnector(BaseConnector):
         after normalization, so dropping here is the only place the two
         streams provably cannot both claim the same event.
         """
+        window = self._windows.query_range("alerts", since_seconds)
         query: dict[str, Any] = {
             "size": 1000,
             "sort": [{"@timestamp": {"order": "asc"}}],
             "query": {
                 "bool": {
                     "must": [
-                        {
-                            "range": {
-                                "@timestamp": {
-                                    "gte": f"now-{max(int(since_seconds), 0)}s",
-                                    "lte": "now",
-                                }
-                            }
-                        },
+                        {"range": {"@timestamp": window}},
                         {"range": {"rule.level": {"gte": self._min_rule_level}}},
                     ]
                 }
@@ -379,12 +471,15 @@ class WazuhConnector(BaseConnector):
             ]
 
         hits = await self._search(query)
-        if self._vuln_mode != "inventory":
-            return [self.normalize(hit) for hit in hits if isinstance(hit, dict)]
         # belt-and-braces: the must_not above misses custom rule packs that
         # re-home detector events under a different group, so re-check the
         # document shape itself before anything reaches the alert stream.
-        return [self.normalize(hit) for hit in hits if isinstance(hit, dict) and not is_vulnerability_source(hit.get("_source") or {})]
+        events = [
+            self.normalize(hit) for hit in hits if self._vuln_mode != "inventory" or not is_vulnerability_source(hit.get("_source") or {})
+        ]
+        events = self.apply_checkpoint(events)
+        self._windows.stage("alerts", window["lte"])
+        return events
 
     async def fetch_vulnerability_findings(self, since_seconds: int = 3600) -> list[dict[str, Any]]:
         """Pull recent vulnerability-detector events as inventory findings.
@@ -396,10 +491,9 @@ class WazuhConnector(BaseConnector):
         ``(tenant, asset, cve, source)`` so repeat scans touch ``last_found``
         instead of multiplying rows.
 
-        The window is wider than the alert poll (1h vs 5min) and bounded by
-        the same 1000-hit page: the detector's own scan interval is hourly,
-        so a narrow window would drop findings between polls if the
-        connector was down, and re-scans are idempotent anyway.
+        The initial window is wider than the alert poll (1h vs 5min).
+        Subsequent polls resume the separately confirmed inventory window
+        and drain every page. Re-scans are idempotent in the inventory sink.
 
         In ``vuln_mode=alerts`` this returns nothing: that mode puts
         detector events in the alert stream (legacy behaviour), and the
@@ -408,20 +502,14 @@ class WazuhConnector(BaseConnector):
         """
         if self._vuln_mode != "inventory":
             return []
+        window = self._windows.query_range("vulnerabilities", since_seconds)
         query = {
             "size": 1000,
             "sort": [{"@timestamp": {"order": "asc"}}],
             "query": {
                 "bool": {
                     "must": [
-                        {
-                            "range": {
-                                "@timestamp": {
-                                    "gte": f"now-{max(int(since_seconds), 0)}s",
-                                    "lte": "now",
-                                }
-                            }
-                        },
+                        {"range": {"@timestamp": window}},
                         {"term": {"rule.groups": "vulnerability-detector"}},
                     ]
                 }
@@ -442,42 +530,119 @@ class WazuhConnector(BaseConnector):
             findings=len(findings),
             window_seconds=since_seconds,
         )
+        self._windows.stage("vulnerabilities", window["lte"])
         return findings
 
     async def _search(self, query: dict[str, Any]) -> list[dict[str, Any]]:
-        """POST an OpenSearch DSL query at the alert index; return raw hits.
+        """Drain a complete snapshot, retrying the same window on another node.
 
-        Shared by both fetch paths so auth, error handling and the
-        never-raise contract live once: a failed search returns ``[]`` and
-        logs, because the scheduler's failure recorder must see a fetch
-        return, not an exception escaping into the poll loop.
+        A scroll cursor belongs to its search context. Failover starts a
+        fresh search and discards the failed attempt's hits; no cursor or
+        partial batch crosses to the next node. All nodes must serve the
+        same cluster. Exceptions let the scheduler preserve its checkpoint
+        and record a failed poll; ``[]`` means a complete empty search.
         """
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_tls) as client:
+            for attempt, base_url in enumerate(self._indexer_urls):
+                try:
+                    return await self._search_node(client, base_url, query)
+                except WazuhSearchError as exc:
+                    if not exc.retryable or attempt == len(self._indexer_urls) - 1:
+                        raise
+                    logger.warning("wazuh.indexer_failover", attempt=attempt + 1, reason=str(exc))
+        raise WazuhSearchError("Wazuh indexer search exhausted all nodes")
+
+    async def _search_node(self, client: httpx.AsyncClient, base_url: str, query: dict[str, Any]) -> list[dict[str, Any]]:
+        """Drain one scroll snapshot without ever returning a partial result."""
+        # Apply the existing egress policy to the actual selected endpoint,
+        # including fallback nodes and direct callers outside the scheduler.
+        refuse_internal_destinations({"indexer_url": base_url})
+        scroll_id: str | None = None
+        hits: list[dict[str, Any]] = []
+        headers = self._headers()
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=self._verify_tls) as client:
+            resp = await client.post(
+                f"{base_url}/{self._index_pattern}/_search",
+                headers=headers,
+                params={"scroll": "1m", "allow_partial_search_results": "false"},
+                json=query,
+            )
+            while True:
+                if resp.status_code != 200:
+                    raise WazuhSearchError(
+                        f"Wazuh indexer search failed (HTTP {resp.status_code})",
+                        retryable=resp.status_code in _FAILOVER_STATUSES,
+                    )
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    raise WazuhSearchError("Wazuh indexer returned invalid JSON") from None
+                if not isinstance(payload, dict):
+                    raise WazuhSearchError("Wazuh indexer returned an invalid search response")
+
+                # Retain even a failed page's newest cursor for cleanup.
+                page_scroll_id = payload.get("_scroll_id")
+                if isinstance(page_scroll_id, str) and page_scroll_id:
+                    scroll_id = page_scroll_id
+                page = self._search_hits(payload)
+                if not page:
+                    return hits
+                if not isinstance(page_scroll_id, str) or not page_scroll_id:
+                    raise WazuhSearchError("Wazuh indexer omitted the scroll cursor")
+                hits.extend(page)
+                # A short page is not an end marker. Only an empty hits
+                # array proves that this snapshot was fully drained.
                 resp = await client.post(
-                    f"{self._base_url}/{self._index_pattern}/_search",
-                    headers=self._headers(),
-                    json=query,
+                    f"{base_url}/_search/scroll",
+                    headers=headers,
+                    json={"scroll": "1m", "scroll_id": scroll_id},
                 )
         except httpx.RequestError as exc:
-            logger.warning("wazuh.fetch_exception", error=str(exc))
-            return []
+            # Never log response bodies, URLs, credentials or query data.
+            raise _request_error(exc) from None
+        finally:
+            if scroll_id:
+                try:
+                    cleared = await client.request(
+                        "DELETE",
+                        f"{base_url}/_search/scroll",
+                        headers=headers,
+                        json={"scroll_id": [scroll_id]},
+                    )
+                    if cleared.status_code not in (200, 404):
+                        logger.warning("wazuh.scroll_cleanup_failed", status=cleared.status_code)
+                except httpx.RequestError as exc:
+                    # Cleanup must not hide the original error or
+                    # cancellation. The one-minute lease also expires.
+                    logger.warning("wazuh.scroll_cleanup_failed", error_type=type(exc).__name__)
 
-        if resp.status_code != 200:
-            logger.warning(
-                "wazuh.search_failed",
-                status=resp.status_code,
-                body=resp.text[:300],
-            )
-            return []
-
-        try:
-            payload = resp.json()
-        except ValueError:
-            logger.warning("wazuh.search_returned_non_json")
-            return []
-
-        return (payload.get("hits") or {}).get("hits") or []
+    @staticmethod
+    def _search_hits(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Reject partial or malformed pages, including HTTP-200 failures."""
+        if "error" in payload:
+            raise WazuhSearchError("Wazuh indexer returned a search error")
+        if type(payload.get("timed_out")) is not bool:
+            raise WazuhSearchError("Wazuh indexer returned invalid timeout metadata")
+        if payload["timed_out"]:
+            raise WazuhSearchError("Wazuh indexer search timed out", retryable=True)
+        shards = payload.get("_shards")
+        if not isinstance(shards, dict) or not {"total", "successful", "failed"} <= shards.keys():
+            raise WazuhSearchError("Wazuh indexer returned invalid shard metadata")
+        counts = [shards.get(field, 0) for field in ("total", "successful", "skipped", "failed")]
+        if any(type(count) is not int or count < 0 for count in counts):
+            raise WazuhSearchError("Wazuh indexer returned invalid shard metadata")
+        total, successful, skipped, failed = counts
+        if successful + failed > total or skipped > successful:
+            raise WazuhSearchError("Wazuh indexer returned invalid shard metadata")
+        # OpenSearch counts skipped shards as successful already. Adding
+        # them again would hide an unavailable shard and advance the cursor.
+        if failed or successful != total:
+            raise WazuhSearchError("Wazuh indexer search returned incomplete shard results", retryable=True)
+        result = payload.get("hits")
+        page = result.get("hits") if isinstance(result, dict) else None
+        if not isinstance(page, list) or any(not isinstance(hit, dict) for hit in page):
+            raise WazuhSearchError("Wazuh indexer returned invalid search hits")
+        return page
 
     def normalize_vulnerability(self, hit: dict[str, Any]) -> dict[str, Any] | None:
         """Project a detector hit into the ``sync_findings`` finding shape.
@@ -554,9 +719,18 @@ class WazuhConnector(BaseConnector):
         agent_id = agent.get("id")
         timestamp = source.get("@timestamp") or source.get("timestamp")
 
-        # Stable alert_id: prefer the indexer doc id, fall back to a
-        # composite of rule + agent + timestamp so retries de-duplicate.
+        # Keep the display/pivot alert_id compatible. Ingest event identity
+        # instead uses the index-scoped document ID, never the repeated
+        # Wazuh rule ID. If the document ID is absent, include all source
+        # content so different log lines with the same rule/time stay distinct.
         alert_id = raw.get("_id") or f"{rule_id or 'unknown'}::{agent_id or 'na'}::{timestamp or ''}"
+        index = raw.get("_index") or self._index_pattern
+        document_id = raw.get("_id")
+        if document_id is not None and str(document_id):
+            external_id = json.dumps([index, str(document_id)], separators=(",", ":"), ensure_ascii=False)
+        else:
+            content = json.dumps([index, source], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            external_id = f"sha256:{hashlib.sha256(content.encode()).hexdigest()}"
 
         return {
             "source": self.connector_id,
@@ -566,9 +740,10 @@ class WazuhConnector(BaseConnector):
             "title": rule_desc,
             "description": (source.get("full_log") or rule_desc)[:1000],
             "alert_id": alert_id,
-            "external_id": rule_id,
+            "external_id": external_id,
             "rule_level": rule_level,
             "rule_id": rule_id,
+            "rule_name": rule_desc,
             "rule_groups": rule.get("groups") or [],
             "hostname": hostname,
             "host": hostname,

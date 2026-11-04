@@ -586,7 +586,7 @@ class ConnectorScheduler:
         started = datetime.now(UTC)
         try:
             connector = connector_class(**kwargs)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             logger.error(
                 "connector.scheduler.bad_config id=%s type=%s err=%s",
                 connector_id,
@@ -1107,24 +1107,45 @@ class ConnectorScheduler:
             )
             return
 
-        if not findings:
-            return
-
         try:
-            from app.vulnerabilities import sync_findings
+            if findings:
+                from app.vulnerabilities import MAX_FINDINGS_PER_SYNC, sync_findings
 
-            counts = await sync_findings(
-                self._engine,
-                tenant_id=target.tenant_id,
-                findings=findings,
-            )
-            logger.info(
-                "connector.scheduler.vulnerabilities_synced id=%s inserted=%d touched=%d skipped=%d",
-                target.id,
-                counts["findings_inserted"],
-                counts["findings_touched"],
-                counts["skipped"],
-            )
+                # The inventory writer bounds a transaction by truncating
+                # its input. A paginated source can exceed that bound, so
+                # drain it in sink-sized transactions before confirming any
+                # cursor. A later failure replays already committed chunks.
+                counts = {"findings_inserted": 0, "findings_touched": 0, "skipped": 0}
+                for offset in range(0, len(findings), MAX_FINDINGS_PER_SYNC):
+                    batch = findings[offset : offset + MAX_FINDINGS_PER_SYNC]
+                    result = await sync_findings(
+                        self._engine,
+                        tenant_id=target.tenant_id,
+                        findings=batch,
+                    )
+                    accounted = 0
+                    for key in counts:
+                        count = result.get(key)
+                        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                            raise RuntimeError("vulnerability sync returned invalid counts")
+                        counts[key] += count
+                        accounted += count
+                    if accounted != len(batch):
+                        raise RuntimeError("vulnerability sync did not account for the entire batch")
+                logger.info(
+                    "connector.scheduler.vulnerabilities_synced id=%s inserted=%d touched=%d skipped=%d",
+                    target.id,
+                    counts["findings_inserted"],
+                    counts["findings_touched"],
+                    counts["skipped"],
+                )
+            # A source with separate alert and inventory cursors must not
+            # advance both merely because the alert batch reached ingest.
+            # Confirm only a committed sync (or a complete empty search).
+            # The existing ingest-acceptance gate still owns persistence.
+            confirm = getattr(connector, "confirm_vulnerability_sync", None)
+            if confirm is not None:
+                confirm()
         except Exception:
             logger.exception(
                 "connector.scheduler.vulnerability_sync_failed id=%s type=%s",

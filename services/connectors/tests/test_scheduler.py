@@ -482,14 +482,15 @@ async def test_poll_one_decrypt_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poll_one_constructor_typeerror(monkeypatch):
+@pytest.mark.parametrize("error_type", [TypeError, ValueError])
+async def test_poll_one_constructor_config_error(monkeypatch, error_type):
     inst = _make_instance(
         connector_type="fake_connector",
         auth_config={"unexpected_kwarg": "x"},
     )
 
     def bad_ctor(**_kwargs: Any) -> Any:
-        raise TypeError("got unexpected keyword argument")
+        raise error_type("invalid connector configuration")
 
     monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": bad_ctor})
 

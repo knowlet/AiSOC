@@ -44,9 +44,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = structlog.get_logger(__name__)
 
-#: One poll must not be able to write an unbounded number of rows: a
-#: misconfigured scan filter would otherwise turn a 5-minute schedule into a
-#: write amplifier against the shared database.
+#: Bound each writer transaction. The scheduler chunks a complete source
+#: poll at this limit and confirms its inventory cursor only after every
+#: chunk commits; a direct caller still receives the bounded writer's counts.
 MAX_FINDINGS_PER_SYNC = 2_000
 
 _FIND_ASSET = text(

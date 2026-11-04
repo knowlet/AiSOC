@@ -137,6 +137,17 @@ reason = "Connector conformance matrix — one row per shipped connector id."
 
 [[allow]]
 paths = [
+  "docs/research/wazuh-reliable-triage.md",
+  "services/fusion/tests/test_promoter_wazuh_context.py",
+  "services/agents/tests/test_wazuh_triage_context.py",
+  "tests/isolation/test_alert_occurrences_live.py",
+  "tests/isolation/test_wazuh_checkpoint_live.py",
+]
+names = ["Wazuh"]
+reason = "Evidence and regressions for the existing connector's polling, durable checkpoints, and rule/log propagation into triage."
+
+[[allow]]
+paths = [
   "marketplace/index.json",
   "apps/web/public/marketplace/index.json",
   # The third copy, inside the API's Docker build context. Byte-identical to

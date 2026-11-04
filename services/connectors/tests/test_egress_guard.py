@@ -80,6 +80,13 @@ def test_list_values_are_walked() -> None:
         refuse_internal_destinations({"urls": ["https://93.184.216.34/", "http://169.254.169.254/"]})
 
 
+@pytest.mark.parametrize("separator", [",", "\n", ",\n"])
+def test_wazuh_fallback_url_strings_validate_every_node(separator: str) -> None:
+    with pytest.raises(EgressRefused) as raised:
+        refuse_internal_destinations({"indexer_urls": f"https://93.184.216.34:9200{separator}http://169.254.169.254/"})
+    assert raised.value.field_name == "indexer_urls"
+
+
 def test_an_unresolvable_hostname_is_not_a_refusal() -> None:
     """A gaierror is the connector's own 'DNS lookup failed' to report, and a
     host the guard cannot resolve is one the client cannot connect to either.
@@ -152,6 +159,29 @@ async def test_the_test_route_refuses_internal_destinations(client: httpx.AsyncC
         )
     assert r.status_code == 422, r.text
     assert "destination refused" in r.text
+
+
+@pytest.mark.asyncio
+async def test_wazuh_test_route_refuses_a_hidden_metadata_fallback(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.connectors.wazuh import WazuhConnector
+
+    probe = AsyncMock(return_value={"success": True, "connector": "wazuh"})
+    monkeypatch.setattr(WazuhConnector, "test_connection", probe)
+    async with client as c:
+        response = await c.post(
+            "/api/v1/connectors/wazuh/test",
+            headers={"Authorization": f"Bearer {_console_jwt('viewer')}"},
+            json={
+                "auth_config": {"username": "fixture-user", "password": "fixture-password"},
+                "connector_config": {
+                    "indexer_url": "https://93.184.216.34:9200",
+                    "indexer_urls": "https://93.184.216.34:9201, http://169.254.169.254/",
+                },
+            },
+        )
+    assert response.status_code == 422, response.text
+    assert "destination refused" in response.text
+    probe.assert_not_awaited()
 
 
 @pytest.mark.asyncio

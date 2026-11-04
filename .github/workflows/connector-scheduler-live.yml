@@ -116,6 +116,12 @@ jobs:
           ISOLATION_CONNECTOR_DSN: ${{ env.CONNECTOR_DSN }}
         run: python -m pytest ../../tests/isolation/test_queue_acknowledgement_live.py -v --tb=short
 
+      - name: Indexer checkpoints survive restarts and only follow confirmed writes
+        working-directory: services/connectors
+        env:
+          ISOLATION_CONNECTOR_DSN: ${{ env.CONNECTOR_DSN }}
+        run: python -m pytest ../../tests/isolation/test_wazuh_checkpoint_live.py -v --tb=short
+
       # Depth-2 item 8.1. `posture_findings` had one writer in the whole tree:
       # a route a human calls by hand. Four of the properties the collector
       # now has to hold are properties of Postgres rather than of the Python —

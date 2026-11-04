@@ -42,9 +42,11 @@ down, polls fail loudly and the scheduler records that in
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -65,6 +67,11 @@ _DEFAULT_TIMEOUT_S = 30.0
 # ``test_max_batch_size_matches_ingest_service_config``, which reads the Go
 # default out of config.go rather than trusting this comment.
 MAX_BATCH_SIZE = 1000
+
+# A page can contain fewer than MAX_BATCH_SIZE large log records and still
+# exceed the server's independent request-body cap. Budget the exact bytes
+# sent, including the envelope, rather than truncating source evidence.
+MAX_BODY_BYTES = 10 * 1024 * 1024
 
 
 def resolve_max_batch_size() -> int:
@@ -89,6 +96,21 @@ def resolve_max_batch_size() -> int:
             return parsed
         logger.warning("MAX_BATCH_SIZE=%d is not positive; chunking at the default %d", parsed, MAX_BATCH_SIZE)
     return MAX_BATCH_SIZE
+
+
+def resolve_max_body_bytes() -> int:
+    """Read the same body ceiling as Go ingest; invalid overrides fall back."""
+    raw = os.getenv("INGEST_MAX_BODY_BYTES", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            logger.warning("INGEST_MAX_BODY_BYTES=%r is not an integer; using the default %d", raw, MAX_BODY_BYTES)
+            return MAX_BODY_BYTES
+        if parsed > 0:
+            return parsed
+        logger.warning("INGEST_MAX_BODY_BYTES=%d is not positive; using the default %d", parsed, MAX_BODY_BYTES)
+    return MAX_BODY_BYTES
 
 
 def resolve_service_token() -> str:
@@ -124,6 +146,7 @@ class IngestClient:
         timeout_seconds: float = _DEFAULT_TIMEOUT_S,
         service_token: str | None = None,
         max_batch_size: int | None = None,
+        max_body_bytes: int | None = None,
     ) -> None:
         # Strip trailing slash so we can append paths without doubling up.
         self._base_url = base_url.rstrip("/")
@@ -133,6 +156,10 @@ class IngestClient:
         if resolved_batch_size < 1:
             raise ValueError(f"max_batch_size must be >= 1, got {resolved_batch_size}")
         self._max_batch_size = resolved_batch_size
+        resolved_body_bytes = max_body_bytes if max_body_bytes is not None else resolve_max_body_bytes()
+        if not isinstance(resolved_body_bytes, int) or isinstance(resolved_body_bytes, bool) or resolved_body_bytes < 1:
+            raise ValueError("max_body_bytes must be a positive integer")
+        self._max_body_bytes = resolved_body_bytes
         self._client: httpx.AsyncClient | None = None
         if not self._service_token:
             # Warned once here rather than per poll. Every push will be
@@ -179,14 +206,14 @@ class IngestClient:
         "rejected": 0}`` without making a network call — this is the common
         case (a poll cycle that found no new alerts).
 
-        If the event list exceeds MAX_BATCH_SIZE, it is split into chunks and
-        pushed separately. The returned counts are summed across all chunks.
-        This prevents oversized polls from being refused with HTTP 413.
+        Large polls are split by both event count and encoded request bytes.
+        The returned counts are summed across validated responses. A single
+        event that cannot fit the body ceiling raises without being dropped.
         """
         if not events:
             return {"accepted": 0, "rejected": 0}
 
-        # Chunk the event list if it exceeds the ingest service's cap. Each
+        # Chunk the event list if it exceeds either ingest service cap. Each
         # chunk is pushed separately and the accepted/rejected counts are
         # summed, so the scheduler's "advance only if everything was accepted"
         # rule continues to work unchanged.
@@ -200,21 +227,54 @@ class IngestClient:
         # its acks.
         total_accepted = 0
         total_rejected = 0
-        chunk_size = self._max_batch_size
+        metadata = {
+            "connector_id": str(connector_id),
+            "connector_type": connector_type,
+            "source_format": source_format,
+        }
 
-        for i in range(0, len(events), chunk_size):
-            chunk = events[i : i + chunk_size]
+        for chunk, encoded_body in self._encoded_batches(metadata, events):
             result = await self._push_chunk(
                 tenant_id=tenant_id,
                 connector_id=connector_id,
                 connector_type=connector_type,
                 events=chunk,
                 source_format=source_format,
+                encoded_body=encoded_body,
             )
-            total_accepted += int(result.get("accepted", 0) or 0)
-            total_rejected += int(result.get("rejected", 0) or 0)
+            total_accepted += result["accepted"]
+            total_rejected += result["rejected"]
 
         return {"accepted": total_accepted, "rejected": total_rejected}
+
+    def _encoded_batches(self, metadata: dict[str, str], events: list[dict[str, Any]]) -> Iterator[tuple[list[dict[str, Any]], bytes]]:
+        """Encode each event once and yield exactly the bytes budgeted."""
+        # Retain the locked HTTP client's JSON representation. Sending the
+        # encoded body directly avoids a second serialization whose escaping
+        # or separators could put a supposedly bounded request over the cap.
+        prefix = json.dumps(metadata)[:-1].encode("utf-8") + b', "events": ['
+        suffix = b"]}"
+        overhead = len(prefix) + len(suffix)
+        chunk: list[dict[str, Any]] = []
+        encoded_events: list[bytes] = []
+        size = overhead
+        for event in events:
+            try:
+                encoded = json.dumps(event).encode("utf-8")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise IngestClientError("ingest event cannot be JSON encoded") from exc
+            if overhead + len(encoded) > self._max_body_bytes:
+                raise IngestClientError(f"single event exceeds ingest body limit of {self._max_body_bytes} bytes")
+            if chunk and (len(chunk) >= self._max_batch_size or size + 2 + len(encoded) > self._max_body_bytes):
+                yield chunk, prefix + b", ".join(encoded_events) + suffix
+                chunk = []
+                encoded_events = []
+                size = overhead
+            size += len(encoded) + (2 if chunk else 0)
+            chunk.append(event)
+            encoded_events.append(encoded)
+        if chunk:
+            yield chunk, prefix + b", ".join(encoded_events) + suffix
 
     async def _push_chunk(
         self,
@@ -224,6 +284,7 @@ class IngestClient:
         connector_type: str,
         events: list[dict[str, Any]],
         source_format: str,
+        encoded_body: bytes | None = None,
     ) -> dict[str, Any]:
         """Push one chunk of events (at most MAX_BATCH_SIZE) to ingest.
 
@@ -254,7 +315,10 @@ class IngestClient:
         }
 
         try:
-            resp = await client.post(url, headers=headers, json=payload)
+            if encoded_body is None:
+                resp = await client.post(url, headers=headers, json=payload)
+            else:
+                resp = await client.post(url, headers=headers, content=encoded_body)
         except httpx.HTTPError as exc:
             raise IngestClientError(f"ingest service unreachable at {url}: {exc}") from exc
 
@@ -277,7 +341,28 @@ class IngestClient:
             data = resp.json()
         except ValueError as err:
             raise IngestClientError("ingest service returned non-JSON response") from err
+        if not isinstance(data, dict):
+            raise IngestClientError("ingest service returned invalid acceptance counts")
+        accepted, rejected = data.get("accepted"), data.get("rejected")
+        if (
+            not isinstance(accepted, int)
+            or isinstance(accepted, bool)
+            or not isinstance(rejected, int)
+            or isinstance(rejected, bool)
+            or accepted < 0
+            or rejected < 0
+            or accepted + rejected != len(events)
+        ):
+            raise IngestClientError("ingest service returned invalid acceptance counts")
         return data
 
 
-__all__ = ["MAX_BATCH_SIZE", "IngestClient", "IngestClientError", "resolve_max_batch_size", "resolve_service_token"]
+__all__ = [
+    "MAX_BATCH_SIZE",
+    "MAX_BODY_BYTES",
+    "IngestClient",
+    "IngestClientError",
+    "resolve_max_batch_size",
+    "resolve_max_body_bytes",
+    "resolve_service_token",
+]

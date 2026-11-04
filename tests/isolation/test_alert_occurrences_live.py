@@ -192,6 +192,66 @@ async def _read(pool, tenant: uuid.UUID):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_wazuh_rule_and_log_survive_promotion_and_storage(pool, make_tenant) -> None:
+    """Synthetic Wazuh evidence, written and read through real Postgres.
+
+    The original log is longer than the connector's canonical excerpt. Both
+    must survive: the excerpt in description, the complete source in raw_event.
+    """
+    from app.models.alert import FusedAlert, FusionDecision
+    from app.services.alert_sink import PersistOutcome
+    from app.services.promoter import promote_normalized_event
+
+    tenant = await make_tenant("wazuh-evidence")
+    full_log = "Synthetic Wazuh log: " + "x" * 1100 + " original-log-tail"
+    external_id = json.dumps(["wazuh-alerts-fixture", "doc-1"], separators=(",", ":"))
+    payload = {
+        "source": "wazuh",
+        "rule_id": "5710",
+        "rule_name": "Synthetic SSH authentication rule",
+        "external_id": external_id,
+        "description": full_log[:1000],
+        "raw_event": {"rule": {"id": "5710"}, "full_log": full_log},
+    }
+    ocsf = {
+        "class_uid": 2001,
+        "severity_id": 4,
+        "message": payload["rule_name"],
+        "metadata": {"product": {"name": "wazuh", "vendor_name": "wazuh"}},
+        "finding": {"uid": external_id},
+        # Ingest publishes raw_data as JSON text, not a nested object.
+        "raw_data": json.dumps(payload),
+    }
+    alert = promote_normalized_event({"tenant_id": str(tenant), "connector_type": "wazuh", "ocsf_event": ocsf})
+    assert alert is not None
+    alert.id = alert.deterministic_id()
+    fused = FusedAlert(id=alert.id, tenant_id=tenant, fusion_decision=FusionDecision.NEW_ALERT, alert=alert)
+
+    sink = await _sink(pool)
+    result = await sink.persist(fused)
+    assert result.outcome is PersistOutcome.INSERTED
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT rule_id, rule_name, description, external_id, raw_event
+              FROM alerts
+             WHERE tenant_id = $1 AND id = $2
+            """,
+            tenant,
+            fused.id,
+        )
+
+    assert row is not None
+    assert row["rule_id"] == "5710"
+    assert row["rule_name"] == payload["rule_name"]
+    assert row["description"] == payload["description"]
+    assert row["external_id"] == external_id
+    stored = json.loads(row["raw_event"]) if isinstance(row["raw_event"], str) else row["raw_event"]
+    assert stored == ocsf
+    assert json.loads(stored["raw_data"])["raw_event"]["full_log"] == full_log
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_a_vendor_repeating_a_finding_79_times_is_one_alert_that_says_79(pool, tenant_id) -> None:
     """The plan's sentence, executed.
 

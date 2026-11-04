@@ -3711,6 +3711,14 @@
         "type": "string"
       },
       {
+        "default": "",
+        "help_text": "Comma- or newline-separated fallback nodes in the same Indexer cluster. The primary URL is tried first; every node uses the same credentials and TLS policy.",
+        "label": "Additional Indexer URLs",
+        "name": "indexer_urls",
+        "required": false,
+        "type": "string"
+      },
+      {
         "help_text": "Indexer user with read access to wazuh-alerts-*. Create a dedicated read-only role in production.",
         "label": "Indexer Username",
         "name": "username",
@@ -3736,6 +3744,14 @@
         "help_text": "Drop alerts with rule.level below this value at ingest. Default 7 keeps low-signal noise out of the lake; lower to 3 for full audit coverage.",
         "label": "Minimum Rule Level",
         "name": "min_rule_level",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": 300,
+        "help_text": "Replay this much time before the last completed window to catch late indexed events. Already seen document identities are deduplicated. Default 300.",
+        "label": "Checkpoint Replay Overlap (seconds)",
+        "name": "checkpoint_overlap_seconds",
         "required": false,
         "type": "number"
       },
