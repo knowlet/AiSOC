@@ -100,6 +100,8 @@ jobs:
       # one CI never ran was the broken one.
       - name: Install the reader
         run: python -m pip install --quiet 'pyyaml>=6,<7'
+      - name: Small runtime and broken-install regression controls
+        run: python -m pytest tests/test_runtime_requirements.py -v --tb=short
       - name: The gate detects each divergence, and refuses a tree with nothing to compare
         run: python scripts/check_ci_install_parity.py --self-test
       - name: Every job grading a service installs what that service's image ships
@@ -340,12 +342,22 @@ jobs:
             echo "::error::two builds of $svc at the same commit resolved different versions"
             exit 1
           fi
-          # Two empty files also diff clean. A service image that installs
-          # nothing is a broken build reported as a reproducible one.
-          [ "$(wc -l < first.txt)" -ge 20 ] || {
-            echo "::error::pip freeze in $svc returned $(wc -l < first.txt) packages — too few to be a real install"
+          # Equality alone also accepts two identically incomplete installs.
+          # A universal package-count floor rejects the deliberately small
+          # escalations service, while padding can hide missing dependencies.
+          # Instead require every applicable main-lock pin in each image.
+          [ -s first.txt ] || {
+            echo "::error::pip freeze in $svc returned no packages"
             exit 1
           }
+          python3 scripts/service_requirements.py "$svc" --locked --only main > expected-runtime.txt
+          for attempt in first second; do
+            docker run --rm --network none --entrypoint python \
+              --mount "type=bind,src=$PWD/scripts/verify_runtime_requirements.py,dst=/tmp/verify_runtime_requirements.py,readonly" \
+              --mount "type=bind,src=$PWD/expected-runtime.txt,dst=/tmp/expected-runtime.txt,readonly" \
+              "aisoc-$svc:$attempt" /tmp/verify_runtime_requirements.py /tmp/expected-runtime.txt
+            docker run --rm --network none --entrypoint pip "aisoc-$svc:$attempt" check
+          done
           echo "$svc: identical, $(wc -l < first.txt) packages" >> "$GITHUB_STEP_SUMMARY"
 
   twice-lockonly:
