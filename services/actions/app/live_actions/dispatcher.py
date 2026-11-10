@@ -46,6 +46,7 @@ import structlog
 
 from app.models.action import ActionRequest, ActionType
 from app.security.ssrf_guard import SSRFError, validate_outbound_url
+from app.security.vaid_verifier import BadgeDenied, verify_badge_for_dispatch
 from app.services.approval_matrix import evaluate_contract
 from app.services.asset_lookup import asset_criticality_for_target
 from app.services.autonomy_safety import (
@@ -485,6 +486,45 @@ def _stopped_by_kill_switch(request: LiveActionRequest, state: KillSwitchState) 
     )
 
 
+def _ungovernable_reason(request: LiveActionRequest, action_type: ActionType | None) -> str | None:
+    """Why this request cannot be graded, or ``None`` if it can.
+
+    Checked before any executor runs and only for would-be real executions --
+    an explicit dry run is already the safest mode and changes nothing, so
+    refusing one would stop an operator previewing a verb they are about to
+    be told they may not run.
+    """
+    if request.tenant_id is None:
+        return (
+            "the request names no tenant, so neither the tenant's autonomy tier nor its kill "
+            "switch can be resolved; set tenant_id on the dispatch"
+        )
+    if action_type is None and request.capability not in CAPABILITY_CONTRACTS:
+        return (
+            f"capability '{request.capability}' has neither a legacy ActionType nor an entry in "
+            "CAPABILITY_CONTRACTS, so its impact, reversibility and approval requirement are "
+            "undeclared; add a contract in capability_contracts.py"
+        )
+    return None
+
+
+def _refusal(reason: str) -> AutonomyDecision:
+    """A blocked verdict for a request governance could not grade.
+
+    CRITICAL blast radius and the lowest tier deliberately: the fields are
+    read by callers deciding how loudly to report, and an ungraded request is
+    not a low-risk one -- it is one whose risk nobody measured.
+    """
+    return AutonomyDecision(
+        mode=AutonomyMode.BLOCKED,
+        blast_radius=BlastRadius.CRITICAL,
+        tier=MaturityTier.L0_OBSERVE,
+        rollback=RollbackCapability.UNSUPPORTED,
+        requires_verification=False,
+        reason=reason,
+    )
+
+
 def _not_executed(request: LiveActionRequest, status: LiveActionStatus, decision: AutonomyDecision) -> LiveActionResult:
     return LiveActionResult(
         request_id=request.request_id,
@@ -573,6 +613,41 @@ async def dispatch(request: LiveActionRequest) -> LiveActionResult:
         )
         return _stopped_by_kill_switch(request, switch)
 
+    # ── The VAID badge (beenuar/AiSOC#1739), before anything else that
+    # would spend a vendor call ──────────────────────────────────────────
+    #
+    # A no-op when the plugin is disabled (the default) — see
+    # `app.security.vaid_verifier.vaid_plugin_enabled`. When enabled, this
+    # is the response-dispatch half of the two boundaries named on the
+    # issue; the other half is `ToolRegistry.execute` in the agents
+    # service, which cannot be reached from here because that is a
+    # different process.
+    # The `except Exception` is deliberate and matches the agents service's
+    # own hook in `ToolRegistry.execute`. `BadgeDenied` alone was not enough:
+    # vaid-mint 0.11.0's `assemble_lineage` opens with a bare
+    # `leaf["vaid_id"]`, so a request body carrying `"vaid_badge": {}` raised
+    # `KeyError` straight out of this function — past a route that documents
+    # it "never returns 5xx for executor failures" because "the agent loop
+    # relies on a uniform success-shape". `vaid_verifier` now refuses a
+    # malformed badge properly; this stays as the backstop, because the thing
+    # that made that reachable was a verifier promise about a third-party
+    # library, and the next version of that library is not bound by it.
+    try:
+        verify_badge_for_dispatch(request.vaid_badge, request.capability, tenant_id=request.tenant_id)
+    except Exception as denied:  # noqa: BLE001 — fail closed, name the reason
+        if not isinstance(denied, BadgeDenied):
+            log.exception("live_action.vaid_verifier_raised", error_type=type(denied).__name__)
+            denied = BadgeDenied(f"VAID badge check failed unexpectedly ({type(denied).__name__}); refusing fail-closed")
+        log.warning("live_action.vaid_badge_denied", reason=str(denied))
+        return LiveActionResult(
+            request_id=request.request_id,
+            status=LiveActionStatus.FAILED,
+            capability=request.capability,
+            vendor_id=request.vendor_id,
+            summary=f"'{request.capability}' on {request.target or 'target'}: refused — {denied}",
+            error=str(denied),
+        )
+
     # ── Where the caller may point this service ──────────────────────────
     #
     # Two separate controls, because the reported defect had two halves
@@ -644,7 +719,34 @@ async def dispatch(request: LiveActionRequest) -> LiveActionResult:
     # possible — so governance applies to would-be real executions only.
     decision: AutonomyDecision | None = None
     action_type = _action_type_for(request, executor)
-    if not request.dry_run and (action_type is not None or request.capability in CAPABILITY_CONTRACTS):
+    if not request.dry_run:
+        # Two ways a real execution used to escape governance entirely, and
+        # both are the same shape: the gate was opt-in, and whatever fell
+        # outside the vocabulary it knew ran unchecked (GHSA-fm3f-p5jv-6hcg).
+        #
+        # F07 -- no tenant. `resolve_tenant_policy(None)` returns the
+        # deployment's `AISOC_MATURITY_TIER`, and `kill_switch_state(None)`
+        # matches only the global row, so a tenantless request is graded by an
+        # environment variable and no tenant's stop button can reach it.
+        # `_govern` even papered over it with `tenant_id=request.tenant_id or
+        # uuid4()`, inventing a tenant to build the ActionRequest with.
+        #
+        # F81 -- no contract and no ActionType. 22 of the 95 known
+        # capabilities are in that gap. None of the 167 registered executors
+        # is, today, so this was latent rather than exploitable -- but the
+        # gate was opt-in by vocabulary and a test
+        # (`test_unmapped_capability_is_not_governed`) pinned the fail-open as
+        # intended behaviour, which is how it would have stayed true for the
+        # first write capability added without a contract.
+        #
+        # Both now refuse. "Unverifiable means not autonomous" is this
+        # service's own stated rule for verification probes; a verdict nobody
+        # can compute is not a verdict that permits.
+        ungovernable = _ungovernable_reason(request, action_type)
+        if ungovernable is not None:
+            log.warning("live_action.refused_ungovernable", reason=ungovernable)
+            return _not_executed(request, LiveActionStatus.BLOCKED, _refusal(ungovernable))
+
         decision = await (_govern(request, action_type) if action_type is not None else _govern_by_contract_alone(request))
         log = log.bind(autonomy_mode=decision.mode.value, blast=decision.blast_radius.value)
         if decision.mode is AutonomyMode.BLOCKED:

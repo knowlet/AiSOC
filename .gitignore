@@ -1,7 +1,17 @@
 # Environment
+#
+# Default-deny across the whole `.env` namespace, with the published template
+# as the one exception. The previous rules named `.env`, `.env.local` and
+# `.env.*.local` and nothing else, so a backup written beside the real file
+# was not ignored and `git add -A` took it — which is how two copies of a
+# working `.env` came to be committed and are now permanently in the history
+# of every clone (GHSA-57rw-w33m-cp5v). Enumerating the backup spellings
+# would have closed those two names; denying the namespace closes the next
+# one too. `scripts/check_env_backup_files.py` holds both halves to it,
+# because `.gitignore` has no effect on a file that is already tracked.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Dependencies
 node_modules/
@@ -169,3 +179,10 @@ docker-compose.ports.yml
 # work in.
 plugins/*/go/*-test
 *.test
+
+# Pre-upgrade database dumps written by `make upgrade`. A dump holds every
+# `vault:v1:` connector credential, every alert and every case in the
+# deployment, so committing one would publish the lot — and the directory
+# only exists on a host that has actually been upgraded, which is never a
+# contributor's checkout.
+/backups/

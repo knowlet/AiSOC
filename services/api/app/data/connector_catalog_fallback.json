@@ -836,7 +836,7 @@
     "category": "network",
     "connector_id": "cloudflare_zt",
     "connector_name": "Cloudflare WAF + Zero Trust",
-    "description": "Cloudflare data-plane events: WAF / firewall decisions (per-zone) and Zero Trust Access audit log (per-account). Auth is an account-scoped API token with Zone:Firewall Services:Read and Account:Access Audit Logs:Read.",
+    "description": "Cloudflare data-plane events: WAF / firewall decisions (per-zone, via the GraphQL firewallEventsAdaptive dataset) and Zero Trust Access audit log (per-account). Auth is an API token with Zone:Analytics:Read and Account:Access Audit Logs:Read.",
     "docs_url": "/docs/connectors/cloudflare_zt",
     "fields": [
       {
@@ -873,7 +873,7 @@
         "type": "string"
       },
       {
-        "help_text": "Account-scoped token with Zone:Firewall Services:Read (WAF) AND Account:Access Audit Logs:Read (Zero Trust).",
+        "help_text": "Token with Zone:Analytics:Read (WAF \u2014 this is what the GraphQL analytics dataset reads, not Firewall Services:Read) AND Account:Access Audit Logs:Read (Zero Trust).",
         "label": "API Token",
         "name": "api_token",
         "required": true,
@@ -1006,7 +1006,7 @@
     "category": "edr",
     "connector_id": "crowdstrike",
     "connector_name": "CrowdStrike Falcon",
-    "description": "CrowdStrike Falcon detections via the Falcon REST API.",
+    "description": "CrowdStrike Falcon alerts via the Falcon Alerts API.",
     "docs_url": "/docs/connectors/crowdstrike",
     "fields": [
       {
@@ -1782,7 +1782,7 @@
     "category": "vcs",
     "connector_id": "gitlab",
     "connector_name": "GitLab",
-    "description": "GitLab group audit events and security vulnerability findings. Requires a Personal Access Token with the 'api' scope; the authenticating user must own the group. Self-managed GitLab works too \u2014 set gitlab_url to your instance base URL.",
+    "description": "GitLab group audit events and security vulnerabilities. Requires a Personal Access Token with the 'api' scope; the authenticating user must own the group. Vulnerabilities are read from the group security dashboard and need Ultimate \u2014 without it you get audit events only. Self-managed GitLab works too \u2014 set gitlab_url to your instance base URL.",
     "docs_url": "/docs/connectors/gitlab",
     "fields": [
       {
@@ -1801,7 +1801,7 @@
         "type": "string"
       },
       {
-        "help_text": "PAT with the 'api' scope. The authenticating user must be a group Owner to read audit events. Security findings require Ultimate.",
+        "help_text": "PAT with the 'api' scope. The authenticating user must be a group Owner to read audit events. Vulnerabilities additionally require Ultimate; on any lower plan the connector still polls audit events and says so in its logs.",
         "label": "Personal Access Token (scope: api)",
         "name": "token",
         "required": true,

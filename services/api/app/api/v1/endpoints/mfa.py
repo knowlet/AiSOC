@@ -67,7 +67,15 @@ from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-from app.api.v1.deps import AuthUser, DBSession, bearer_scheme, get_current_user, require_permission
+from app.api.v1.deps import (
+    AuthUser,
+    DBSession,
+    SessionUser,
+    bearer_scheme,
+    get_current_user,
+    require_interactive_session,
+    require_permission,
+)
 from app.core.config import settings
 from app.core.role_grants import known_roles
 from app.core.security import create_access_token, create_refresh_token
@@ -297,9 +305,24 @@ async def _principal_for_enrolment(
     than decoded here. A second decoder would be a second place for the
     `type == "access"` rule to be forgotten, and that rule is what stops a
     challenge token being presented as a session.
+
+    That is also why the bearer branch has to narrow afterwards.
+    `get_current_user` accepts an `aisoc_` API key and resolves it to its
+    owner's id and role, so this dependency admitted one and a key scoped to
+    `alerts:read` could plant a TOTP secret it controls on the owner's
+    account (GHSA-jfvq-94hv-4wrj). `require_interactive_session` is the same
+    refusal the passkey routes take, applied at the one place the bearer
+    becomes a principal here.
+
+    The challenge branch below is deliberately *not* narrowed: that caller
+    holds no session precisely because the tenant has just started requiring
+    a factor, and refusing it would lock every such user out of their own
+    account. It proves possession of a purpose-scoped, short-lived token,
+    which is a narrower credential than a session rather than a wider one.
     """
     if credentials is not None:
         user = await get_current_user(request=request, credentials=credentials, db=db)
+        user = await require_interactive_session(user)
         return EnrolmentPrincipal(user_id=user.user_id, tenant_id=user.tenant_id, email=user.email)
 
     body = await _maybe_json(request)
@@ -539,13 +562,36 @@ async def verify(body: VerifyRequest, db: DBSession, request: Request) -> Sessio
     await set_rls_context(db, row["tenant_id"])
     step = totp.verify_totp(_decrypt_secret(row["secret_encrypted"]), body.code, last_used_step=row["last_used_step"])
     if step is not None:
-        await db.execute(
-            text("UPDATE aisoc_user_mfa SET last_used_step = :s, updated_at = now() WHERE user_id = :u AND tenant_id = :t").bindparams(
-                s=step, u=user_id, t=row["tenant_id"]
-            )
+        # The step is *claimed*, not recorded (GHSA-6465-rp4f-ppj6).
+        #
+        # `verify_totp` enforces single use correctly, against the mark it was
+        # handed. The mark was read above, and the write below used to be
+        # unconditional — so ten requests carrying one code all read the same
+        # value before any of them wrote, all verified, and all ten were
+        # handed a session. A code read over a shoulder is worth one sign-in
+        # for its window; it was worth as many as the holder asked for.
+        #
+        # The predicate is the prior state the verification depended on, so
+        # under READ COMMITTED a concurrent writer blocks on the row, then
+        # re-evaluates against the committed value and matches nothing. The
+        # row count is the decision — the same claim pattern a dispatched
+        # action uses before it touches a vendor.
+        claimed = await db.execute(
+            text(
+                "UPDATE aisoc_user_mfa SET last_used_step = :s, updated_at = now() "
+                "WHERE user_id = :u AND tenant_id = :t "
+                "AND (last_used_step IS NULL OR last_used_step < :s)"
+            ).bindparams(s=step, u=user_id, t=row["tenant_id"])
         )
         await db.commit()
-        return SessionTokens(**await _issue_session(db, user_id, row["tenant_id"]))
+        if claimed.rowcount == 1:
+            return SessionTokens(**await _issue_session(db, user_id, row["tenant_id"]))
+        # Lost the race: another request spent this step. Answered as a bad
+        # code rather than a conflict, because to the caller that is what it
+        # is, and a distinct status would tell an attacker their replay
+        # arrived a moment too late rather than that it was wrong.
+        logger.warning("mfa.verify_step_already_spent user=%s step=%s", _sanitize(user_id), _sanitize(step))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="That code is not valid.")
 
     if await _consume_recovery_code(db, user_id=user_id, tenant_id=row["tenant_id"], code=body.code, request=request):
         return SessionTokens(**await _issue_session(db, user_id, row["tenant_id"]))
@@ -735,13 +781,19 @@ async def _issue_session(db: Any, user_id: uuid.UUID, tenant_id: uuid.UUID) -> d
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
-async def disable(body: DisableRequest, current_user: AuthUser, db: DBSession, request: Request) -> None:
+async def disable(body: DisableRequest, current_user: SessionUser, db: DBSession, request: Request) -> None:
     """Remove your own second factor, proving you still hold it.
 
     A current code is required. Without it, a stolen session could strip
     the factor it was supposed to be protected by, which makes the factor
     worth exactly as much as the session.
     """
+    # `SessionUser` for the same reason the enrolment routes take it: this used
+    # to admit an API key, and a key that had planted a TOTP secret knew the
+    # code it would be asked for here (GHSA-jfvq-94hv-4wrj).
+    # In a comment rather than the docstring, which is published as this
+    # operation's `description` in `docs/openapi.yaml`.
+
     await require_current_factor(
         db,
         user_id=current_user.user_id,
