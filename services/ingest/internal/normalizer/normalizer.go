@@ -429,6 +429,34 @@ var connectorProfiles = map[string]connectorProfile{
 			"critical": 5, "high": 4, "medium": 3, "normal": 3, "low": 2, "info": 1, "informational": 1,
 		},
 	},
+	// A tripped honeytoken, pushed by services/honeytokens
+	// (GHSA-9q6p-m345-h3hj). Without an entry here the event falls to the
+	// lenient fallback, which files it as category 4 Network Activity with
+	// an empty severity map, and `should_promote()` requires category 2 or
+	// severity_id >= 4 — so the trip would be archived to the lake and
+	// silently never become an alert. That is the same invisible outcome the
+	// advisory is about, one layer down, which is why the profile ships with
+	// the push rather than after it.
+	//
+	// 2001 Security Finding, and the severity is not read from the payload:
+	// nothing legitimately touches a honeytoken. There is no benign reading
+	// of the event, so there is no ladder to map and the floor is `critical`.
+	"honeytoken": {
+		product:   OcsfProduct{Name: "Honeytokens", VendorName: "AiSOC"},
+		classUID:  2001,
+		className: "Security Finding",
+		fieldMap: map[string]string{
+			"token_name":    "finding.title",
+			"trigger_id":    "finding.uid",
+			"token_type":    "activity_name",
+			"source_ip":     "src_endpoint.ip",
+			"triggered_at":  "time",
+			"honeytoken_id": "finding.related_events[0].uid",
+		},
+		severityMap: map[string]int{
+			"critical": 5,
+		},
+	},
 	"kubernetes_audit": {
 		product:   OcsfProduct{Name: "Kubernetes Audit", VendorName: "Kubernetes"},
 		classUID:  6003,
@@ -564,8 +592,24 @@ var _canonicalAliases = []struct {
 	sources []string
 }{
 	{"actor.user.name", []string{"actor", "actor.name", "actor.displayName", "actor.username", "username", "user", "user.name", "user.username", "user_name"}},
-	{"device.name", []string{"hostname", "host", "host.name", "device_name", "device", "device.name", "device.hostname"}},
+	{"device.name", []string{"hostname", "host", "host.name", "device_name", "device", "device.name", "device.hostname", "target_hostname"}},
 	{"src_endpoint.ip", []string{"src_ip", "source_ip", "client_ip", "src_endpoint.ip", "client.ipAddress"}},
+	// Issue #1718. A directory-audit event names the object that *changed*
+	// separately from the principal that changed it, and nothing read those
+	// fields: the fusion promoter builds an alert's username from
+	// `actor.user.name` and its hostname from `device.name`, so a connector's
+	// target reached no column, no entity and no correlation key. Ten alerts
+	// measured from one Entra tenant named the Microsoft service that
+	// performed the change and nothing else.
+	//
+	// `target_hostname` above, and deliberately not `target_name`: the latter
+	// is the display name of whatever the target happens to be, so reading it
+	// as a device would put a person's name in the host column of every
+	// user-management event. Deciding which targets are devices belongs to
+	// the connector, which knows its vendor's type vocabulary; this layer
+	// reads a name that means exactly one thing. It sits last in that list,
+	// so a connector that identifies its own actor device keeps it.
+	{"target_user.name", []string{"target_user", "target_username", "target_user.name"}},
 	// Not identity, but the same fill-the-blank rule and the same reason to
 	// run everywhere. A vendor profile names the field its vendor's rows use
 	// — crowdstrike_falcon reads event_simpleName, not title — so a pushed
