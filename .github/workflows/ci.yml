@@ -353,6 +353,30 @@ jobs:
         run: python scripts/check_module_reachability.py --self-test
       - name: Verify every service module has a production importer
         run: python scripts/check_module_reachability.py
+      # A connector's poll window is contiguous: it runs from `now -
+      # since_seconds` to `now`, the scheduler passes the poll interval, and
+      # nothing re-reads an earlier window. So a page a connector does not
+      # read is a page nothing reads later — the vendor's cap becomes silent
+      # data loss rather than lag. Five connectors shipped that shape inside
+      # two days (Duo, Entra, Defender, Sentinel and the three Google ones),
+      # and most order newest-first, so what went missing was the *start* of
+      # whatever burst overflowed the window.
+      - name: Connector paging — self-test
+        run: python scripts/check_connector_paging.py --self-test
+      - name: Verify every connector reads its poll window to the end
+        run: python scripts/check_connector_paging.py
+      # The sibling defect to the one above, and it has now shipped three
+      # times: a connector polls a URL the vendor does not serve, and the
+      # 404 is handled in the same branch as a 403, so "our path is wrong"
+      # is reported as "the customer has not bought this" and nobody
+      # debugs it. Cloudflare WAF (#1686), the decommissioned CrowdStrike
+      # Detects API, and GitLab vulnerability findings (#1754) each ran
+      # that way for their whole life. A pairing is allowed only when the
+      # vendor publishes 404 in that endpoint's own response list.
+      - name: 404 is not 403 — self-test
+        run: python scripts/check_connector_404_conflation.py --self-test
+      - name: Verify no connector files a 404 as a permissions problem
+        run: python scripts/check_connector_404_conflation.py
       # Two permission models shipped side by side: 275 route dependencies
       # read the hardcoded ROLE_PERMISSIONS map while 27 read the
       # user_roles / role_permissions tables the console's RBAC screen
@@ -517,6 +541,18 @@ jobs:
       # locally if this check fails.
       - name: Verify vendored narrative builder is in sync
         run: python scripts/sync_vendored_narrative.py --check
+      # `app.services.alert_status` owns which statuses mean an alert is
+      # finished. Fusion's alert sink needs that list to decide whether a
+      # repeat should reopen a closed alert (GHSA-qp9f-459j-w89c), and it
+      # cannot import across the service boundary — its Docker build context
+      # is `services/fusion`. The vendored copy is rendered rather than
+      # byte-copied, because the canonical module pulls in SQLAlchemy for two
+      # query helpers fusion has no use for. If this fails, the console and
+      # fusion disagree about what "closed" means, which either misses a
+      # recurrence or churns an alert an analyst is working. Re-run
+      # `python scripts/sync_vendored_alert_status.py` locally to fix.
+      - name: Verify vendored alert-status vocabulary is in sync
+        run: python scripts/sync_vendored_alert_status.py --check
       # The fifth vendored mirror, and the only one that had no gate. The
       # redactor strips internal IPs, emails, paths and secret-shaped strings
       # before untrusted text reaches a prompt; a copy that silently drifts
@@ -540,9 +576,12 @@ jobs:
       # key" differently about the same text is the drift this prevents.
       - name: Verify vendored AI redaction patterns are in sync
         run: python scripts/sync_vendored_ai_redaction.py --check
-      # The GPU preflight's own self-test. The real verdict depends on the
-      # host, so CI can only assert that the refusals fire and say something
-      # actionable -- which is the part that rots, since the advice is prose.
+      # The prompt-injection patterns, generated from the agents guard's own
+      # rule table rather than hand-copied. The repository scanner (wave-2
+      # 7.2) flags an agent-instruction file or a skill whose text tries to
+      # steer an agent; a hand-picked subset would silently miss whatever
+      # pattern was added to the guard after the next incident. Needs the
+      # agents service importable, so it runs after that install step.
       - name: GPU preflight — self-test
         run: python3 scripts/check_gpu_runtime.py --self-test
       # Gap-closure Phase 2.2. The sixth mirror, and the one where drift is a
@@ -572,10 +611,47 @@ jobs:
       #   2. apps/web/src/data/connectorCount.ts matches the JSON
       #   3. README, ROADMAP, docs/architecture and apps/docs all carry the
       #      same number as the registry
+      #   4. no component under apps/web/src renders the figure as a literal
       # If this fails, run `python scripts/generate_connector_count.py` and
       # commit the result.
+      #
+      # (4) exists because (3) only ever looked at markdown: the landing hero
+      # and the onboarding hero both rendered a hardcoded 26 against a
+      # registry of 91, the latter 35 lines below a correct dynamic use in
+      # the same file, and this gate reported OK throughout.
+      - name: Connector-count gate self-test (the defect, and two near misses)
+        run: python scripts/generate_connector_count.py --self-test
+
       - name: Verify connector count is in sync (Phase 1.1)
         run: python scripts/generate_connector_count.py --check
+      # Same shape again, for the self-hosted webfonts. `apps/web` used to
+      # load five faces through `next/font/google`, which resolves them by
+      # fetching from Google *during `next build`* — so every build surface,
+      # including the published image and a contributor's laptop, depended on
+      # a third party being reachable and on its response not changing. Both
+      # failed: an unreachable fonts.gstatic.com fails the build with
+      # `Can't resolve '@vercel/turbopack-next/internal/font/google/font'`,
+      # and when Google began serving one shared variable file for the two
+      # Source Code Pro weights this app asks for, Turbopack could not
+      # resolve that either and `main` went red with no commit having touched
+      # the web app.
+      #
+      # The faces are vendored under apps/web/public/fonts now. This check is
+      # offline on purpose — it compares the generated stylesheet and preload
+      # lists against the manifest, and every vendored file against its own
+      # content hash, so a hand-edited fonts.css or a swapped binary fails
+      # here. Refreshing from Google is a deliberate act
+      # (`scripts/fetch_web_fonts.py`), never a build-time accident.
+      #
+      # The self-test runs first and hand-breaks each comparison in turn — a
+      # drifted unicode-range, a manifest face naming a missing file, a woff2
+      # whose bytes no longer match its filename hash, an orphan file — so a
+      # green check below means the comparison still happens rather than that
+      # it found nothing.
+      - name: Webfont gate — self-test
+        run: python3 scripts/generate_web_font_css.py --self-test
+      - name: Verify self-hosted webfonts are in sync
+        run: python3 scripts/generate_web_font_css.py --check
       # Same shape, for the detection / marketplace figures. The landing page
       # carried three different wrong answers to "how many detections" — 6,998
       # in four places, 7,117 for the marketplace, 218 on the contributor
@@ -589,6 +665,32 @@ jobs:
         run: python3 scripts/generate_corpus_stats.py --self-test
       - name: Verify detection / marketplace counts are in sync
         run: python3 scripts/generate_corpus_stats.py --check
+      # `aisoc-sandbox` is a zero-dependency wheel installed from PyPI with
+      # no checkout, so it cannot read the artefact above at runtime. Its
+      # copy of the figure is generated at commit time instead, and this is
+      # the half that stops it going stale — which it had, by a factor of
+      # three, while the ledger printed `rule_count: "800+"`.
+      - name: Sandbox ruleset figure — self-test
+        run: python3 scripts/sync_sandbox_corpus_figures.py --self-test
+      - name: Sandbox ruleset figure matches the corpus artefact
+        run: python3 scripts/sync_sandbox_corpus_figures.py --check
+      # The offline sandbox may not assert a finding it did not compute.
+      # Reported by a community reviewer who fed it a harmless login —
+      # same user, same address, same city, eight hours apart — and got
+      # "physically impossible" travel at 83/100, then relabelled genuine
+      # impossible travel `info` and got "L4 — fully autonomous closure".
+      # All three decision functions were keyed on strings the input file
+      # declared and none could see the events.
+      #
+      # The package's own suite pins the behaviour, but it runs in a job
+      # filtered on `packages/aisoc-sandbox/**`; this job has no path
+      # filter. The gate also refuses the *shape* statically — a table
+      # mapping a technique or a severity to a sentence or a score — which
+      # catches a reintroduction in a new module before anything calls it.
+      - name: Sandbox honesty — self-test
+        run: python3 scripts/check_sandbox_honesty.py --self-test
+      - name: Sandbox asserts nothing it did not compute
+        run: python3 scripts/check_sandbox_honesty.py
       # Prose cannot be generated the way a count can, so the retraction of
       # the 75.3% alert-reduction figure is gated instead. `benchmark.md`
       # withdrew the claim; `BenchmarkResults.tsx` went on rendering a "Real
@@ -600,6 +702,75 @@ jobs:
         run: python3 scripts/check_alert_reduction_claims.py --self-test
       - name: Verify the retracted alert-reduction figure stays retracted
         run: python3 scripts/check_alert_reduction_claims.py --check
+      # Wave-2 plan 4.6. The three outcomes a buyer asks for first can only be
+      # measured by replaying somebody's real closed alerts, no design partner
+      # has offered a window, and all three are recorded as *not measured*.
+      # This gate is what stops that record becoming a number — including the
+      # worse version, a `0`, which reads as "measured and reduced nothing".
+      # It reads the state off the replay page rather than carrying its own
+      # copy, so publishing a real measurement retires the prohibition without
+      # anyone editing the gate.
+      - name: Customer-outcome claims — self-test
+        run: python3 scripts/check_outcome_claims.py --self-test
+      - name: No customer-outcome figure nobody measured
+        run: python3 scripts/check_outcome_claims.py
+      # Wave 2, Phase 9.5 prerequisite. A caveat saying a console page is
+      # "not built" reads as modesty and works as an exemption: a surface
+      # recorded as absent needs no claim row and no gate. Three shipped
+      # pages were sitting behind one such sentence, and one of them —
+      # /settings/users — had no test at all. `check_claim_gate_matrix`
+      # cannot see this: it counts rows and statuses and does not read a
+      # caveat's prose.
+      - name: 'Unbuilt-surface claims — self-test'
+        run: python3 scripts/check_unbuilt_claims.py --self-test
+      - name: Every 'not built' claim about a console page is still true
+        run: python3 scripts/check_unbuilt_claims.py
+      # Wave 2, Phase 5.5. The published retro-hunt ceiling is derived from
+      # MAX_BYTES_PER_SWEEP, so moving the product's budget must move the
+      # page or red the build: a published limit that quietly describes a
+      # budget the product no longer has is worse than no limit at all.
+      - name: Retro-hunt scale claims — self-test
+        run: python3 scripts/check_retro_hunt_scale_claims.py --self-test
+      - name: The published retro-hunt scale figures are the measured ones
+        run: python3 scripts/check_retro_hunt_scale_claims.py
+      # Wave-2 plan 4.3. A business-context rule is authored and validated in
+      # `services/api` and evaluated on the triage hot path in
+      # `services/agents`. The two ship as separate images, cannot import each
+      # other, and so declare the operator grammar twice. Drift is silent in
+      # the direction that matters: the console accepts the rule, the worker
+      # has no branch for the operator and falls through to False, and the
+      # tenant gets a saved rule that never fires and no diagnostic.
+      - name: Business-context grammar — self-test
+        run: python3 scripts/check_business_context_grammar.py --self-test
+      - name: Both business-context engines agree on the operator grammar
+        run: python3 scripts/check_business_context_grammar.py --check
+      # A translation catalogue rots in two directions and only one is
+      # visible. A key the base has and a locale lacks falls back to English
+      # — correct, and invisible, so the gap reaches a customer. A key a
+      # locale has and the base does not renders nowhere at all, so no
+      # amount of using the console finds it; that is the direction nobody
+      # checks, and it is fatal here. Untranslated keys are ratcheted
+      # instead, because a gate that reds the build on a partial locale gets
+      # the locale deleted rather than finished.
+      - name: 'i18n catalogue keys — self-test'
+        run: python3 scripts/check_i18n_keys.py --self-test
+      - name: Every locale is checked against the base catalogue, both ways
+        run: python3 scripts/check_i18n_keys.py
+      # And the mirror: a caveat saying a console surface is "not built"
+      # reads as modesty and works as an exemption, since an absent surface
+      # needs no claim row and no gate. Three of the six the matrix called
+      # unbuilt had shipped.
+      - name: Unbuilt-surface claims — self-test
+        run: python3 scripts/check_unbuilt_claims.py --self-test
+      - name: Verify every 'not built' claim is still true
+        run: python3 scripts/check_unbuilt_claims.py
+      # Wave-2 plan 4.3. A business-context rule is authored and validated in
+      # `services/api` and evaluated on the triage hot path in
+      # `services/agents`. The two ship as separate images, cannot import each
+      # other, and so declare the operator grammar twice. Drift is silent in
+      # the direction that matters: the console accepts the rule, the worker
+      # has no branch for the operator and falls through to False, and the
+      # tenant gets a saved rule that never fires and no diagnostic.
       # `llms.txt` is the machine-first summary crawlers and LLM-backed tools
       # read instead of the rendered docs nav, so a stale figure there is
       # consumed with no human in the loop to sanity-check it. It is generated
@@ -931,6 +1102,16 @@ jobs:
         run: python3 scripts/check_replay_contract_parity.py --self-test
       - name: Replay contract parity gate
         run: python3 scripts/check_replay_contract_parity.py
+      # Alert-text keyword matching (#1607). Two arms: the severity
+      # vocabulary is declared once and imported by every scorer, and no
+      # keyword in any corpus fires on a real cloud identifier. "c2" as a
+      # substring matched every AWS private hostname, scored the alert
+      # critical at 0.9, and 0.9 clears the model cascade's escalation
+      # floor — so the alert was never sent to a model at all.
+      - name: Keyword matching gate — self-test
+        run: python3 scripts/check_keyword_matching.py --self-test
+      - name: Keyword matching gate
+        run: python3 scripts/check_keyword_matching.py
       # The finding-count comparison itself lives in the three scanner jobs in
       # security.yml, where the reports are. This runs the half that needs no
       # scanner — the allow-list's own schema, its expiry dates, and whether
@@ -1077,6 +1258,17 @@ jobs:
         run: |
           python3 scripts/check_profile_service_counts.py --self-test
           python3 scripts/check_profile_service_counts.py
+      # `make up` exited 2 after 62 seconds with 10 of the 16 CORE services
+      # still in `Created`, because litellm waited on the model-pull one-shot
+      # with `service_completed_successfully` and the download failed. Compose
+      # aborts the whole `up` on that and collects every service it has not
+      # started yet — api, web, fusion, ingest, agents, none of which has any
+      # relationship to a model. The local model is a convenience; nothing
+      # about it may stop the product starting.
+      - name: A failed model download cannot stop the stack
+        run: |
+          python3 scripts/check_llm_optional_at_boot.py --self-test
+          python3 scripts/check_llm_optional_at_boot.py
       # The Project maturity table published a status for fifteen
       # capabilities and nothing checked any of them: no definition of
       # Stable existed anywhere, no gate parsed the table, and the labels
@@ -1113,6 +1305,17 @@ jobs:
         run: |
           python3 scripts/sync_packaged_detection_rulesets.py --self-test
           python3 scripts/sync_packaged_detection_rulesets.py --check
+      # And the third instance of it. `hunts/` is at the repository root while
+      # the agents image is built from `services/agents`, so the 68-hunt
+      # library the README calls Stable reached no container: `ls /app/hunts`
+      # answered "No such file or directory" and the scheduler logged
+      # `corpus_loaded count=0`. Nothing caught it because the loader fell
+      # back to "the conventional host layout" — a source checkout, which is
+      # what every test runs in.
+      - name: The agents image ships the hunt library
+        run: |
+          python3 scripts/sync_packaged_hunt_corpus.py --self-test
+          python3 scripts/sync_packaged_hunt_corpus.py --check
       - name: Every Stable capability has earned the label
         run: |
           python3 scripts/check_maturity_table.py --self-test
@@ -1417,6 +1620,35 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/service_requirements.py api agents | xargs pip install --quiet
+
+      # The sibling of `check_raw_sql_columns.py`, in the other direction:
+      # that one asks whether raw SQL names columns the migrations create,
+      # this one asks whether the ORM agrees with them about NULL.
+      #
+      # `tenants.mssp_role` was NOT NULL DEFAULT 'standalone' in the schema
+      # and `nullable=True` with no default in the model. Those read as
+      # compatible and are not: a column the ORM thinks is nullable is named
+      # in the INSERT with an explicit NULL, and a named column does not
+      # receive the column DEFAULT. So every insert that omitted the field
+      # failed, which is `pnpm aisoc:demo` dying at its seed step on a brand
+      # new database (#1693) -- the first environment to insert a tenant,
+      # not a seed bug.
+      #
+      # It lives in *this* job and not in Lint & Type-check for the same
+      # reason the injection-pattern check above does: reading the mapper
+      # imports `app.models`, which pulls SQLAlchemy in. The first attempt
+      # put it in the lint job and it died on `No module named 'sqlalchemy'`.
+      #
+      # The self-test runs first, and this parser has already been wrong
+      # twice in ways only a check caught -- it read a re-add of an existing
+      # column as a redefinition, and it saw only the first clause of a
+      # multi-column ALTER TABLE, which is exactly how `mssp_role` is
+      # declared. The gate missed the column it was written for until its
+      # negative control was run.
+      - name: Verify the ORM and the migrations agree about NULL
+        run: |
+          python3 scripts/check_orm_nullability.py --self-test
+          python3 scripts/check_orm_nullability.py
       # Boot-test: verify the FastAPI app can actually import without
       # NameError / ImportError before spending time on the full pytest
       # suite.  PR #152 fixed two import-time NameErrors (model_validator,
@@ -1729,6 +1961,26 @@ jobs:
         run: python scripts/check_console_route_contract.py --self-test
       - name: Verify every console API path resolves to a route or a rewrite
         run: python scripts/check_console_route_contract.py
+      # The other half of the same contract. The route check proves a console
+      # path reaches a route; it says nothing about what comes back, and that
+      # is the half that drifted. #1648: POST /api/v1/hunt/search sends
+      # `took_ms`, `raw`, `highlights`, `event_type`, `source`, `query` and
+      # `notice` while the hand-written client type declared `took`, `fields`,
+      # `highlight` and a `severity` no response has ever carried — and
+      # `request<T>` asserts T rather than validating it, so the type checker
+      # believed all of them right up to a TypeError in the browser.
+      #
+      # It had no spec coverage of any kind either: docs/openapi.yaml is
+      # exported from services/api alone and this route is served by
+      # services/agents, so every gate keyed on the published document
+      # covered nothing here.
+      #
+      # Both directions, and nothing is skipped: an unresolvable service,
+      # path, schema, $ref or interface is an error rather than a pass.
+      - name: Console wire contract — self-test
+        run: python scripts/check_console_wire_contract.py --self-test
+      - name: Verify every declared wire type matches its service's schema
+        run: python scripts/check_console_wire_contract.py --list
       # Two call sites named a provider model directly, so on CORE they
       # reached LiteLLM, which knows the `aisoc-*` aliases and not that id,
       # and both degraded silently to a deterministic answer. Neither broke
@@ -2402,6 +2654,14 @@ jobs:
         run: python3 scripts/lint_playbooks.py
       - name: Schema/engine parity (both directions, with self-test)
         run: python3 scripts/check_playbook_schema_parity.py --self-test
+      - name: A step promising approval is an approval step (with self-test)
+        # Three packs modelled their gate as a `condition`, which the engine
+        # evaluates once and walks past, so a live run reached `completed`
+        # with the password reset the gate exists to hold already done.
+        # Nothing compared the promise in a step's name against its type.
+        run: |
+          python3 scripts/check_playbook_approval_gates.py --self-test
+          python3 scripts/check_playbook_approval_gates.py
       - name: Parity gate tests
         run: python3 -m pytest tests/test_playbook_schema_parity_gate.py -q
       - name: The documented upgrade command runs, and its output validates

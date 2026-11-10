@@ -4,10 +4,10 @@
 // Every `connector_type` the ingest normalizer resolves, derived from the
 // registry that decides what the platform can ingest:
 //
-//    90  connector ids declared in services/connectors (_CONNECTOR_CLASSES)
-//     6  connectorProfiles keys no connector declares under that spelling
+//    91  connector ids declared in services/connectors (_CONNECTOR_CLASSES)
+//     7  connectorProfiles keys no connector declares under that spelling
 //     5  alternate spellings connectorTypeCanonical folds onto a declared id
-//   101  total
+//   103  total
 //
 // The union used to be written by hand, which is how ten members came to name
 // nothing: `ibm_qradar` reached no profile and no connector, so strict mode
@@ -53,6 +53,7 @@ export const CONNECTOR_TYPES = [
   "elastic",            // registry
   "email_inbox",        // registry
   "exabeam",            // registry
+  "extrahop",           // registry
   "falco",              // registry
   "fleetdm",            // registry
   "gcp_cloud_audit",    // registry
@@ -63,6 +64,7 @@ export const CONNECTOR_TYPES = [
   "google_chronicle",   // canonical-fold
   "google_workspace",   // registry
   "greynoise",          // registry
+  "honeytoken",         // profile
   "ibm_qradar",         // canonical-fold
   "imperva",            // registry
   "jira",               // registry

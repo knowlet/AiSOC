@@ -39,6 +39,7 @@ PERMISSIONS: Final[tuple[tuple[str, str, str], ...]] = (
     ("cases:delete", "Delete cases", "cases"),
     ("cases:assign", "Assign cases to people", "cases"),
     ("cases:note", "Add notes to cases", "cases"),
+    ("approvals:write", "Raise an approval request for a human to decide", "cases"),
     ("detections:read", "View detections", "detections"),
     ("detections:write", "Manage detections", "detections"),
     ("detections:delete", "Delete detections", "detections"),
@@ -105,6 +106,21 @@ PERMISSIONS: Final[tuple[tuple[str, str, str], ...]] = (
     # tenant administrator holds — would have handed that reach to all of
     # them. Seeded by migration 123; see `endpoints/kill_switch.py`.
     ("platform_kill_switch:write", "Engage or release the platform-wide kill switch", "system"),
+    # The managed-beta operator surface, and deployment-wide for the same
+    # reason the switch above is: `GET /admin/tenants` selects every tenant on
+    # the deployment with no predicate, and the waitlist is one global table of
+    # prospect PII. Both routes gated on these names OR `settings:write`, and
+    # because neither name existed here, no role could resolve them and the
+    # fallback was the only reachable branch -- which handed the whole
+    # deployment to every `tenant_admin` (GHSA-6cwm-cx8p-h7f5).
+    #
+    # Granted to no tenant-scoped role, so only the wildcard roles hold them.
+    # That is the decision `platform_kill_switch:write` and
+    # `workload_identities:*` already record, and the one case where "nothing
+    # scoped holds this" is deliberate rather than the oversight it usually is.
+    # Seeded by migration 159.
+    ("admin:tenants", "List and provision tenants across the deployment", "system"),
+    ("admin:waitlist", "Read and modify the deployment-wide signup waitlist", "system"),
     ("*", "Every permission (wildcard; admin role)", "system"),
 )
 
@@ -148,6 +164,7 @@ _INFOSEC: Final[frozenset[str]] = _VIEWER | frozenset(
         "cases:write",
         "cases:assign",
         "cases:note",
+        "approvals:write",
         "playbooks:read",
         "playbooks:execute",
         "threat_intel:write",

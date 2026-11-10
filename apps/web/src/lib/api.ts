@@ -875,6 +875,195 @@ export const brandingApi = {
     }
     return response.blob();
   },
+
+  /**
+   * Write branding for the organisation the caller's tenant belongs to.
+   *
+   * A tenant in no operator organisation gets a 409 from the route, which is
+   * a real answer and not an error: there is nothing to brand. Callers
+   * branch on it rather than rendering a failure.
+   */
+  async update(body: BrandingUpdate): Promise<Branding> {
+    return request<Branding>("/api/v1/branding", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
+
+  /**
+   * Upload a logo or favicon.
+   *
+   * Multipart, so the JSON content type `apiHeaders` sets by default has to
+   * go — the browser must write its own `multipart/form-data` header with
+   * the boundary it generated, and overriding it produces a body the server
+   * cannot parse.
+   */
+  async uploadAsset(kind: "logo" | "favicon", file: File): Promise<BrandAsset> {
+    const headers = apiHeaders();
+    delete headers["Content-Type"];
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(`${API_BASE}/api/v1/branding/assets/${kind}`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      // The route's 422 messages name the reason (wrong magic bytes, an SVG
+      // the sanitiser refused, an unsupported type). Surfacing that verbatim
+      // is the difference between "upload failed" and an operator knowing to
+      // re-export the file.
+      let detail = `branding asset upload failed (${response.status})`;
+      try {
+        const parsed = JSON.parse(text) as { detail?: string };
+        if (parsed.detail) detail = parsed.detail;
+      } catch {
+        /* a non-JSON body is already covered by the status-code fallback */
+      }
+      throw new ApiError(detail, response.status, text);
+    }
+    return JSON.parse(text) as BrandAsset;
+  },
+
+  async deleteAsset(kind: "logo" | "favicon"): Promise<void> {
+    return request<void>(`/api/v1/branding/assets/${kind}`, { method: "DELETE" });
+  },
+};
+
+/** The writable subset of {@link Branding}; `logo_url` is set by upload. */
+export interface BrandingUpdate {
+  product_name?: string | null;
+  primary_color?: string | null;
+  accent_color?: string | null;
+  support_email?: string | null;
+  support_url?: string | null;
+  sender_name?: string | null;
+  footer_text?: string | null;
+}
+
+export interface BrandAsset {
+  id: string;
+  kind: string;
+  content_type: string;
+  bytes: number;
+  sanitized: boolean;
+  removed?: { elements: string[]; attributes: string[] };
+}
+
+// ─── Data lifecycle: retention (wave 2, Phase 9.5) ──────────────────────────
+//
+// `/data-lifecycle/retention` has had GET and PUT since migration 049 and no
+// console binding at all, so a tenant's retention was settable only by curl.
+
+export interface RetentionPolicy {
+  raw_events_days: number;
+  alerts_days: number;
+  audit_days: number;
+  /**
+   * Whether this deployment actually deletes on these windows.
+   *
+   * `RETENTION_WORKER_ENABLED` defaults to false, so the console must be able
+   * to say "this is a stated policy, nothing is deleting yet" rather than
+   * implying a deletion that does not happen.
+   */
+  purge_worker_enabled: boolean;
+  purge_worker_dry_run: boolean;
+}
+
+export const retentionApi = {
+  get: () => request<RetentionPolicy>("/api/v1/data-lifecycle/retention"),
+
+  /**
+   * Partial by design: the route merges each absent field with what is
+   * stored, so sending one window never silently resets the other two.
+   */
+  update: (body: Partial<RetentionPolicy>) =>
+    request<RetentionPolicy>("/api/v1/data-lifecycle/retention", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+};
+
+// ─── MSSP rule packs and delegations (wave 2, Phase 9.5) ────────────────────
+
+export interface RulePack {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PackAssignment {
+  id: string;
+  pack_id: string;
+  child_tenant_id: string;
+  enabled: boolean;
+  parameter_overrides: Record<string, unknown>;
+  created_at: string;
+}
+
+export const rulePacksApi = {
+  list: () => request<RulePack[]>("/api/v1/mssp/rule-packs"),
+
+  create: (body: { name: string; description?: string | null; category?: string | null; is_default?: boolean }) =>
+    request<RulePack>("/api/v1/mssp/rule-packs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  update: (id: string, body: Partial<{ name: string; description: string | null; category: string | null; is_default: boolean }>) =>
+    request<RulePack>(`/api/v1/mssp/rule-packs/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  remove: (id: string) => request<void>(`/api/v1/mssp/rule-packs/${id}`, { method: "DELETE" }),
+
+  /**
+   * Assign a pack to one managed tenant.
+   *
+   * Assignment is what makes a pack take effect, so a console that only
+   * created packs would leave an operator with a library that detects
+   * nothing — which is why this is on the panel and not deferred.
+   */
+  assign: (id: string, body: { child_tenant_id: string; enabled?: boolean; parameter_overrides?: Record<string, unknown> }) =>
+    request<PackAssignment>(`/api/v1/mssp/rule-packs/${id}/assign`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+};
+
+export interface Delegation {
+  id: string;
+  parent_tenant_id: string;
+  child_tenant_id: string;
+  granted_role: string;
+  granted_by_user: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export const delegationsApi = {
+  /** Live grants only; the route filters revoked rows out server-side. */
+  list: () => request<Delegation[]>("/api/v1/mssp/delegations"),
+
+  /**
+   * The route refuses a role the caller does not itself hold — 403 when the
+   * role exists and is above them, 422 when it is not a role at all. Both
+   * messages are written for an operator, so callers surface them verbatim.
+   */
+  create: (body: { child_tenant_id: string; granted_role: string; expires_at?: string | null }) =>
+    request<Delegation>("/api/v1/mssp/delegations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  revoke: (id: string) => request<void>(`/api/v1/mssp/delegations/${id}`, { method: "DELETE" }),
 };
 
 export interface RetroHuntSettings {
@@ -2874,11 +3063,21 @@ export interface FunnelMetrics {
   events_of_interest: number;
   correlation_instances: number;
   alerts_generated: number;
-  /** 0..1 ratio: 1 − (FP / total dispositioned alerts). */
+  /** 0..1 ratio: true positives / alerts with a *decided* verdict. */
   signal_to_noise: number;
   /** Mean time-to-detect in seconds (Alert.created_at → first_seen_at). */
   mttd_seconds: number;
-  /** Active alerts owned by analysts (`status in new/triaging/in_progress`). */
+  /**
+   * The denominator behind each figure above. Zero means unmeasured, not
+   * zero: the server sends `0.0` for both rather than `null` (a breaking
+   * change for every existing client), so the pair *is* the measurement.
+   * Read them together or the tile claims a perfect signal/noise ratio and
+   * instant detection for a tenant where nobody has looked at anything.
+   * Optional so the console still works against an API that predates them.
+   */
+  signal_to_noise_sample_count?: number;
+  mttd_sample_count?: number;
+  /** Alerts that are neither terminal nor dispositioned. */
   analyst_queue_depth: number;
   /** Alerts produced per correlation instance, clamped to [0, 1]. */
   correlation_efficiency: number;
@@ -2925,6 +3124,12 @@ export interface PipelineStage {
    * full instrumentation.
    */
   unmeasured?: string[];
+  /**
+   * What the stage observed when the observation is not a backlog. The
+   * correlate stage reported its single-event alert count under `backlog`,
+   * so the strip read "Backlog 7" on a tenant with nothing queued.
+   */
+  detail?: string | null;
 }
 
 export interface PipelineHealth {
@@ -2951,7 +3156,10 @@ export interface SOCKpis {
   alert_volume_7d: number;
   cases_opened_7d: number;
   cases_closed_7d: number;
+  /** Alerts a **human** dispositioned, from the lifecycle events carrying an actor. */
   analyst_overrides_7d: number;
+  /** The agent's own dispositions over the same window. */
+  ai_dispositions_7d?: number;
   /**
    * How many rows each mean above was averaged over. Zero means the figure is
    * unmeasured rather than zero — render "not measured", not "0.0 hrs".
@@ -2964,7 +3172,9 @@ export interface SOCKpis {
    * The denominator each rate above was computed over. Zero means the rate is
    * undefined rather than 0% — a tenant that has resolved nothing has not
    * achieved a 0% false-positive rate. Optional for the same reason as the
-   * sample counts.
+   * sample counts. The false-positive denominator counts *decided* verdicts
+   * only: `needs_review` is the agent declining to decide, and a rate that
+   * counts abstentions scores it on questions it refused to answer.
    */
   false_positive_rate_sample_count?: number;
   escalation_rate_sample_count?: number;
@@ -3828,7 +4038,28 @@ export const oauthApi = {
 
 // ─── Threat Intel ─────────────────────────────────────────────────────────────
 
-export type IndicatorType = "ip" | "domain" | "hash" | "url" | "email";
+/**
+ * The indicator kinds the console renders a badge for.
+ *
+ * `vulnerability` is in this list because it is what the one real feed a
+ * default install ships — the CISA KEV catalogue — emits, and leaving it
+ * out badged all 1,766 of its CVEs as IPs.
+ *
+ * The union is deliberately open. `type` arrives from a feed payload and
+ * the threat-intel service does not constrain it, so a closed union would
+ * be a claim about other people's data: a loader added tomorrow emits
+ * whatever it emits, and the console's job is to render that honestly
+ * rather than to coerce it into the nearest known value.
+ */
+export type KnownIndicatorType =
+  | "ip"
+  | "domain"
+  | "hash"
+  | "url"
+  | "email"
+  | "vulnerability";
+
+export type IndicatorType = KnownIndicatorType | (string & {});
 
 /**
  * A canonical threat indicator surfaced by the threatintel service.
@@ -4168,21 +4399,143 @@ export interface HuntQuery {
   limit?: number;
 }
 
+/**
+ * The wire shape of one hit from `POST /api/v1/hunt/search`.
+ *
+ * @wire agents POST /api/v1/hunt/search#hits[]
+ */
+export interface HuntHitWire {
+  id: string;
+  timestamp: string;
+  source: string;
+  event_type: string;
+  raw: Record<string, unknown>;
+  highlights: string[];
+}
+
+/**
+ * The wire shape of `POST /api/v1/hunt/search`.
+ *
+ * Field for field what `services/agents/app/api/hunt_search.py` serialises —
+ * note *agents*, not `services/api`, which is why no spec gate covered it.
+ * `scripts/check_console_wire_contract.py` holds this interface against that
+ * service's own OpenAPI document in both directions, so a rename on either
+ * side fails CI instead of resolving to `undefined` in a browser.
+ *
+ * It had drifted on seven names at once (#1648): the handler sends `took_ms`,
+ * `query`, `source` and `notice` where the client declared `took` and nothing
+ * else, and sends `raw`, `highlights` and `event_type` per hit where the
+ * client declared `fields`, `highlight` and a `severity` no response has ever
+ * carried. `request<T>` asserts the shape rather than validating it, so the
+ * type checker believed every one of them.
+ *
+ * @wire agents POST /api/v1/hunt/search
+ */
+export interface HuntSearchWire {
+  query: string;
+  total: number;
+  /** `null` when no query ran. Never 0 for an unmeasured read. */
+  took_ms: number | null;
+  hits: HuntHitWire[];
+  /**
+   * `live` — the tenant's event lake answered. `unavailable` — no query ran.
+   *
+   * The backend no longer emits `sample`: it used to return five fabricated
+   * CrowdStrike events unconditionally, and that generator is deleted.
+   * `sample` survives on {@link HuntResponse} because the console's own
+   * demo-gated fallback still constructs it client-side.
+   *
+   * Not optional. The handler sets it on every path — it used to carry a
+   * default, which is why this was `source?:` — and declaring it optional
+   * makes a caller guard a case the service cannot produce.
+   */
+  source: "live" | "unavailable";
+  notice?: string | null;
+}
+
+/** One hunt hit as the console uses it — see {@link normalizeHuntResponse}. */
 export interface HuntResult {
   id: string;
   timestamp: string;
   source: string;
+  eventType: string | null;
+  /**
+   * Client-side only. The search endpoint does not classify, so this is
+   * absent on every real hit and the row renders a neutral "event" badge.
+   * Sample hits carry one.
+   */
   severity?: AlertSeverity;
   fields: Record<string, unknown>;
-  highlight?: string;
+  highlights: string[];
 }
 
 export interface HuntResponse {
+  query: string;
   total: number;
-  took: number;
+  /**
+   * Latency the backend measured, in milliseconds, or `null` when it
+   * reported none. Absent is not zero: `?? 0` here would print "0ms" beside
+   * a hit count for something nobody timed.
+   */
+  tookMs: number | null;
   hits: HuntResult[];
+  /**
+   * `live` — these hits came from the tenant's lake; zero of them is a
+   * result. `unavailable` — no query ran, and `notice` says why; zero hits
+   * is not a result and must not read as one. `sample` — the console's own
+   * demo-gated fallback, never the backend.
+   */
+  source: "sample" | "live" | "unavailable";
+  notice: string | null;
 }
 
+function normalizeHuntHit(raw: unknown): HuntResult {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const fields = r.raw;
+  return {
+    id: typeof r.id === "string" ? r.id : "",
+    timestamp: typeof r.timestamp === "string" ? r.timestamp : "",
+    source: typeof r.source === "string" ? r.source : "unknown",
+    eventType: typeof r.event_type === "string" ? r.event_type : null,
+    fields:
+      fields !== null && typeof fields === "object" && !Array.isArray(fields)
+        ? (fields as Record<string, unknown>)
+        : {},
+    highlights: Array.isArray(r.highlights) ? r.highlights.map(String) : [],
+  };
+}
+
+/**
+ * The one place the hunt wire shape becomes the shape the console reads.
+ *
+ * Same remedy as {@link normalizeAlert}: one canonical name per value,
+ * resolved once at the boundary. Adding `took` beside `took_ms` and `fields`
+ * beside `raw` would have left two live declarations of each value, which is
+ * the condition that drifted in the first place.
+ */
+export function normalizeHuntResponse(raw: unknown): HuntResponse {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const hits = Array.isArray(r.hits) ? r.hits.map(normalizeHuntHit) : [];
+  return {
+    query: typeof r.query === "string" ? r.query : "",
+    total: typeof r.total === "number" ? r.total : hits.length,
+    tookMs: typeof r.took_ms === "number" ? r.took_ms : null,
+    hits,
+    // A backend that did not say is not a backend that said "live". The
+    // honesty marker defaults to the claim that costs nothing to be wrong
+    // about — and `unavailable` is carried through rather than collapsed
+    // into `sample`, because "we could not look" and "here are invented
+    // events" are different things to put in front of an analyst.
+    source: r.source === "live" ? "live" : r.source === "unavailable" ? "unavailable" : "sample",
+    notice: typeof r.notice === "string" ? r.notice : null,
+  };
+}
+
+/**
+ * A saved hunt search, as `POST /api/v1/hunt/saved` returns it.
+ *
+ * @wire agents POST /api/v1/hunt/saved
+ */
 export interface SavedSearch {
   id: string;
   name: string;
@@ -4223,11 +4576,11 @@ export const huntApi = {
       body: JSON.stringify({ hypothesis }),
     }),
 
-  search: (query: HuntQuery) =>
-    request<HuntResponse>("/api/v1/hunt/search", {
+  search: (query: HuntQuery): Promise<HuntResponse> =>
+    request<HuntSearchWire>("/api/v1/hunt/search", {
       method: "POST",
       body: JSON.stringify(query),
-    }),
+    }).then(normalizeHuntResponse),
 
   listSaved: () => request<{ searches: SavedSearch[] }>("/api/v1/hunt/saved"),
 
@@ -4467,9 +4820,58 @@ export interface NlQueryTranslateResponse {
   grammar_validated: boolean;
 }
 
+export interface NlQueryResult {
+  columns: string[];
+  rows: unknown[][];
+  total_rows: number;
+  took_ms?: number | null;
+}
+
+export interface NlQueryExecuteResponse extends NlQueryTranslateResponse {
+  result: NlQueryResult | null;
+  execution_error: string | null;
+  /**
+   * Which store answered. "Nothing matched in your SIEM" and "nothing
+   * matched in AiSOC's own lake" are different findings and an analyst must
+   * be able to tell them apart.
+   */
+  executed_against: "elasticsearch" | "lake" | null;
+  /**
+   * Translator fields the lake does not store. A hunt that quietly drops
+   * half its filters returns more rows than was asked for, which reads as
+   * "nothing was filtered out".
+   */
+  unsupported_filters: string[];
+  /**
+   * The query text actually sent to the store.
+   *
+   * For a lake execution this is **not** the ES|QL translation — the lake
+   * speaks SQL and the question is compiled separately. Showing the ES|QL
+   * beside lake rows would be a query that did not produce them.
+   */
+  executed_query: string | null;
+  executed_query_language: "sql" | "esql" | null;
+  /** Bound values, kept apart from the text rather than interpolated into it. */
+  executed_query_params: Record<string, unknown>;
+}
+
 export const nlQueryApi = {
   translate: (data: NlQueryTranslateRequest) =>
     request<NlQueryTranslateResponse>("/api/v1/nl-query/translate", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Translate *and run*, against the tenant's SIEM when one is connected and
+   * otherwise against AiSOC's own lake.
+   *
+   * `translate` alone returns an ES|QL/SPL/KQL triple and runs nothing; the
+   * explorer used to call it and then post the ES|QL to the lake's SQL
+   * endpoint, which are different languages.
+   */
+  execute: (data: NlQueryTranslateRequest & { max_rows?: number }) =>
+    request<NlQueryExecuteResponse>("/api/v1/nl-query/execute", {
       method: "POST",
       body: JSON.stringify(data),
     }),
@@ -5607,6 +6009,12 @@ export interface ContextualStreamFrame {
   confidence?: number;
   /** Error frame. */
   error?: string;
+  /**
+   * Whether asking again could succeed. `false` means the deployment has no
+   * model configured, which no retry reaches — the frame used to say
+   * "Streaming failed. Please try again." for that case too.
+   */
+  retryable?: boolean;
 }
 
 export const contextualApi = {
@@ -6492,7 +6900,7 @@ export interface LlmCredentialView {
  * VRAM or a usable driver, so this is the outcome rather than the intent.
  */
 export interface LlmRuntime {
-  placement: "gpu" | "partial" | "cpu" | "unknown" | "unreachable" | "not_local";
+  placement: "gpu" | "partial" | "cpu" | "no_model" | "unknown" | "unreachable" | "not_local";
   detail: string;
   base_url: string;
   /** What an operator can do about the answer. Never empty for a CPU verdict. */

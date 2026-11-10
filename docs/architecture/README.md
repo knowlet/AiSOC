@@ -59,8 +59,8 @@ fails CI if any name in either direction stops resolving.
 
 The profile also decides the **OCSF class**. There are 17 of them in
 [`ocsf_classes.go`](../../services/ingest/internal/normalizer/ocsf_classes.go),
-verified against the published OCSF schema; of the 87 declared connector types,
-45 name a class of their own and the other 42 sit on the generic `2001` mapping
+verified against the published OCSF schema; of the 91 declared connector types,
+46 name a class of their own and the other 45 sit on the generic `2001` mapping
 **with a recorded reason each**. That decision is load-bearing rather than
 cosmetic: promotion reads the class, so a connector silently left on a category-4
 default archives its events and never raises an alert.
@@ -93,8 +93,8 @@ cannot drift from what the Go binary actually loads.
 independent: anything can consume the spine without ingest knowing about it.
 
 **4. Fusion consumes it and evaluates detections.**
-[`services/fusion`](../../services/fusion) runs the 2,535 executable rules
-against the event — 765 native and 1,770 imported Sigma rules, each of which
+[`services/fusion`](../../services/fusion) runs the 2,966 executable rules
+against the event — 1,196 native and 1,770 imported Sigma rules, each of which
 was replayed through its real connector and this engine and watched to fire
 before it was allowed into the compiled ruleset. Separately it decides whether the event is *promotable* —
 a vendor finding (OCSF category 2) or anything at severity ≥ high becomes an
@@ -133,7 +133,7 @@ alerts while the console showed it disabled — the worst shape a defect can
 have, because it tells the operator the problem is solved.
 
 It is an overlay rather than a per-tenant ruleset: the *difference* applied
-over one shared corpus, not N copies of 2,535 rules rebuilt whenever anyone
+over one shared corpus, not N copies of 2,966 rules rebuilt whenever anyone
 edits anything. Suppression is applied **after** the match so the dropped hit
 is logged with the tuning, its author and its reason — "no alert" with no
 explanation is indistinguishable from a rule that simply did not match. A
@@ -434,7 +434,7 @@ flowchart TD
     C --> E["OCSF-shaped envelope"]
     D --> E
     E --> F[("Kafka aisoc.raw_events")]
-    F --> G["Detection engine<br/>2,535 executable rules<br/>+ 76 windowed"]
+    F --> G["Detection engine<br/>2,966 executable rules<br/>+ 76 windowed"]
     F --> H{"Promotable?<br/>category 2, or severity >= high"}
     G -->|rule fires| I["Alert"]
     H -->|yes| I
@@ -446,6 +446,34 @@ flowchart TD
     M --> N
     N --> O[("Kafka aisoc.alerts.fused")]
 ```
+
+The first box carries the guarantee that the rest of the diagram depends on,
+and it is the easiest one to get wrong. A poll window is derived from the
+clock — `[now - interval, now]` — so consecutive windows abut exactly and
+**nothing is ever re-read**: anything a vendor does not return on the first
+attempt never reaches Kafka, and the loss is silent, because a short answer
+and a quiet estate look identical at every box downstream. Three mechanisms
+break it — truncation (a page cap with a continuation nobody follows),
+availability delay (the vendor withholds recent records on purpose) and
+indexing lag — and they take different fixes: follow the continuation to the
+end, end the window where the vendor has actually published, or offset by a
+per-vendor amount established from that vendor's own documentation.
+Continuations go through the shared
+[`_paging.py`](../../services/connectors/app/connectors/_paging.py), and
+[`check_connector_paging.py`](../../scripts/check_connector_paging.py) makes
+it a gate: every connector either follows a continuation or carries a written
+reason citing what the vendor documents it returns, with no silent third
+state.
+
+The `Kafka aisoc.raw_events` box has the matching property on the consuming
+side. Fusion's worker supervises itself — a transient fault retries with
+capped exponential backoff and readiness recovers on its own, while a
+permanent one (a refused credential, a missing ACL, an unsupported SASL
+mechanism) stops and names the operator action rather than retrying a
+misconfiguration forever. A detached consumer is visible: `/readyz` answers
+503 naming the subscription, and the broker probe is a bounded metadata fetch
+rather than a read of the "am I iterating" flag, because iteration does not
+stop during an outage.
 
 ---
 

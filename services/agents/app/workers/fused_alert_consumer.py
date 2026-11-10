@@ -46,11 +46,14 @@ from app.agents.auto_triage_agent import run_auto_triage
 from app.agents.dispositions import AUTO_CLOSEABLE_DISPOSITIONS, NEEDS_REVIEW, normalize_disposition
 from app.agents.triage_agent import run_triage
 from app.confidence.groundedness import score_groundedness
+from app.context import cloud_posture as cloud_posture_module
 from app.context import dispositions as dispositions_module
 from app.context import identity as identity_module
-from app.context import knowledge_base
+from app.context import knowledge_base, vendor_evidence
 from app.context import privilege as privilege_module
+from app.context import triage_questions as triage_questions_module
 from app.context.tenant_skills import select_skill
+from app.context.triage_questions_store import TriageQuestionStore
 from app.core.cost_governor import Decision, get_governor
 from app.core.cost_telemetry import CostSummary, CostTracker
 from app.core.kafka_security import kafka_client_kwargs
@@ -58,6 +61,7 @@ from app.graph.runner import default_budget, run_escalation
 from app.investigator import ledger as ledger_module
 from app.investigator.bundle_prompt import prefetch_context_bundle_dict
 from app.llm.factory import llm_override
+from app.memory import precedent
 from app.memory.outcomes import AI, suppression_refusal
 from app.models.state import AgentStatus, InvestigationState
 from app.playbook import alert_trigger
@@ -113,6 +117,13 @@ _METRICS = {
     "outcome_suppressed": 0,
     "ungrounded_demoted": 0,
     "llm_failed_held_for_review": 0,
+    # Phase 4.4(a). Counted so a deployment can tell "nothing resembled this
+    # alert" from "precedent never ran".
+    "precedent_cited": 0,
+    # Phase 4.5. Counted rather than inferred from the ledger, so a
+    # deployment that turned the pre-fetch on can tell "no vendor answered"
+    # from "the pre-fetch never ran".
+    "vendor_reads_executed": 0,
     "persist_retries": 0,
     "dead_lettered": 0,
     "approvals_raised": 0,
@@ -140,6 +151,7 @@ _METRICS = {
     "runbooks_refused_for_injection": 0,
     "recent_dispositions_read": 0,
     "identity_context_read": 0,
+    "cloud_posture_read": 0,
     "privilege_context_read": 0,
     "errors": 0,
 }
@@ -416,6 +428,10 @@ class FusedAlertTriageWorker:
         # Phase B4 — environment-specific noise reduction applied post-fusion →
         # pre-triage. None = disabled (no rules file / flag off).
         self._business_context = business_context
+        # Phase 4.3. One store for the worker's lifetime so the per-tenant
+        # cache survives between alerts; with one per alert it would read
+        # Postgres on every message and the cache would buy nothing.
+        self._triage_questions = TriageQuestionStore()
         # Parity 6.9. Concurrency across entities, order within one.
         # Declared here rather than created in `start` so a test that
         # builds this worker without a broker still has lanes — the same
@@ -617,6 +633,40 @@ class FusedAlertTriageWorker:
         """Whether the consume loop is currently iterating the subscription."""
         return self._attached
 
+    async def broker_reachable(self) -> bool:
+        """Ask the broker, instead of asking the loop whether it is still looping.
+
+        :attr:`attached` answers "am I consuming"; this answers "can I reach
+        the broker". They are different facts and only the second can describe
+        an outage. Under aiokafka the reconnect lives inside ``__anext__``, so
+        a stopped broker never ends the ``async for`` and the flag never
+        clears: a live pass measured this service answering **200** with
+        ``{"status": "ready"}`` at 35 s and again at 105 s into a Kafka outage
+        while its own log carried ``KafkaConnectionError: Connection at
+        kafka:29092 closed``, and fusion, ingest and realtime all answered 503
+        with a reason in the same window.
+
+        This service hosts ``FusedAlertTriageWorker``, so a replica reporting
+        ready while nothing can reach it is the worst case available: a load
+        balancer has no reason to route away from it and no fused alert gets
+        triaged.
+
+        Copied from ``FusionWorker.broker_reachable`` deliberately, down to
+        the metadata call — two services answering the same question two ways
+        makes a fleet-wide readiness answer unreadable.
+        ``fetch_all_metadata`` (which ``topics()`` drives) builds its own
+        ``ClusterMetadata``, so a probe cancelled by the caller's deadline
+        cannot corrupt the client's shared view of the cluster. The caller
+        (``app/_health.py``) bounds this at 1.5 s and treats a raise as "not
+        reachable", which is the honest reading: if asking whether the broker
+        is there is itself unanswerable, the answer is not yes.
+        """
+        consumer = self._consumer
+        if consumer is None:
+            return False
+        await consumer.topics()
+        return True
+
     async def stop(self) -> None:
         self._running = False
         self._attached = False
@@ -687,6 +737,27 @@ class FusedAlertTriageWorker:
                 "severity_after": bc.severity_after,
             }
 
+        # Phase 4.3 — the tenant's standing questions, answered from the
+        # evidence already collected. Deterministic: the model is never asked
+        # anything here, and the free-text label decides nothing. After the
+        # business-context block above, because a rule may have changed the
+        # alert the questions are asked of.
+        with timer.measure("triage_questions"):
+            answers, skipped = await self._answer_triage_questions(state)
+        if answers or skipped:
+            block = triage_questions_module.render_for_prompt(answers, skipped)
+            if block:
+                state.triage_questions = {
+                    "block": block,
+                    "answered": sum(1 for a in answers if not a.unanswerable),
+                    # Counted separately because "we looked and the answer is
+                    # no" and "we had no evidence" are different facts, and an
+                    # operator deciding whether their questions are earning
+                    # their keep needs the second number.
+                    "unanswerable": sum(1 for a in answers if a.unanswerable),
+                    "skipped": list(skipped),
+                }
+
         governor = get_governor()
         fingerprint = governor.evidence_fingerprint(str(state.tenant_id), state.raw_alert)
 
@@ -721,6 +792,7 @@ class FusedAlertTriageWorker:
         decision = governor.check(str(state.tenant_id), fingerprint)
 
         tier: str
+        verdict: str | None
         # None, not 0.0: a cached or deterministic verdict placed no LLM call,
         # and "no call was made" is a different fact from "the call was free".
         cost: CostSummary = CostSummary()
@@ -731,8 +803,18 @@ class FusedAlertTriageWorker:
         # happened.
         if decision.decision is Decision.DEDUPLICATED and decision.cached_verdict and writer.uses_dedup_cache:
             _METRICS["deduplicated"] += 1
-            verdict = decision.cached_verdict.get("verdict")
-            confidence = float(decision.cached_verdict.get("confidence", 0.0))
+            verdict = normalize_disposition(decision.cached_verdict.get("verdict"), default=NEEDS_REVIEW)
+            confidence = max(0.0, min(1.0, float(decision.cached_verdict.get("confidence") or 0.0)))
+            # Persistence and source writeback read the state, not these locals.
+            # A cached verdict never carries authorization to close this alert.
+            state.verdict = verdict
+            state.confidence = confidence
+            state.status = AgentStatus.RUNNING
+            state.confidence_basis = [
+                f"Cached prior assessment: {verdict}; confidence={confidence:.2f}. "
+                "The evidence fingerprint matched a previous assessment; no new model call was made. "
+                "This is not evidence of remediation or authorization to close the alert."
+            ]
             tier = "cached"
         else:
             cfg = await self._resolve_tenant_llm(state.tenant_id)
@@ -765,6 +847,12 @@ class FusedAlertTriageWorker:
                     # here.
                     await self._attach_recent_dispositions(state)
                     await self._attach_identity_context(state)
+                    # Depth-2 8.1: and what a CNAPP already knows is wrong
+                    # with the resource. Same cutoff-frozen shape as the two
+                    # above, so it takes no point in time from here either.
+                    await self._attach_cloud_posture(state)
+                    await self._attach_precedent(state, fingerprint)
+                    await self._attach_vendor_evidence(state)
                     # Depth 2 wave 2, 1.1. Unlike the three above, this one
                     # *does* take a point in time, and it is the alert's own:
                     # the posture store is versioned precisely so "what could
@@ -910,6 +998,7 @@ class FusedAlertTriageWorker:
                     # stops a disposition derived from attacker-reachable
                     # text from auto-closing the next one.
                     injection_suspected=bool(getattr(state, "injection_suspected", False)),
+                    alert=state.raw_alert,
                 )
                 _METRICS["outcome_written"] += 1
 
@@ -993,6 +1082,30 @@ class FusedAlertTriageWorker:
             "stage_timings_ms": stage_timings,
             "decision_contract": contract,
         }
+
+    async def _answer_triage_questions(self, state: InvestigationState) -> tuple[list[triage_questions_module.QuestionAnswer], list[str]]:
+        """Answer this tenant's standing questions from the collected evidence.
+
+        Never raises. A question channel that cannot answer must not stop an
+        alert being triaged: the cost of failing soft is an analyst missing an
+        answer, and the cost of failing hard is an untriaged alert.
+
+        The evidence bundle is the alert the agent is about to reason over,
+        *after* business-context rules have had their turn — a question about
+        a severity should see the severity triage will.
+        """
+        try:
+            questions = await self._triage_questions.for_tenant(str(state.tenant_id) if state.tenant_id else None)
+            if not questions:
+                return [], []
+            return triage_questions_module.answer_all(
+                questions,
+                state.raw_alert,
+                alert_type=(state.raw_alert or {}).get("alert_type") or (state.raw_alert or {}).get("rule_id"),
+            )
+        except Exception as exc:  # noqa: BLE001 — never break triage
+            logger.warning("triage_questions.answer_failed", error=str(exc))
+            return [], []
 
     async def _sink_for(self, state: InvestigationState, fingerprint: str) -> TriageWriter:
         """The sink this alert's writes go to: the tenant's live one, or a shadow wrapper.
@@ -1189,6 +1302,58 @@ class FusedAlertTriageWorker:
         state.recent_dispositions = found.as_state()
         _METRICS["recent_dispositions_read"] += len(found.decisions)
 
+    async def _attach_precedent(self, state: InvestigationState, signature: str) -> None:
+        """Decisions this organisation made on alerts *like* this one (4.4a).
+
+        Distinct from `_maybe_suppress_from_memory`, which has already run
+        and matched on identity. This is similarity, it produces **context
+        only**, and it closes nothing: a similar alert is not the same
+        alert, and closing one on a neighbour's verdict is the false
+        negative `canonical_evidence` calls "much worse" than a missed
+        repeat.
+
+        The exact-match prior is excluded, or it would appear as precedent
+        for itself.
+        """
+        try:
+            found = await precedent.find_similar(
+                str(state.tenant_id),
+                state.raw_alert,
+                exclude_signature=signature,
+            )
+        except Exception as exc:  # noqa: BLE001 — precedent is advisory
+            logger.debug("auto_triage_worker.precedent_failed", error=str(exc)[:200])
+            return
+        if not found:
+            return
+        state.precedent = [p.as_dict() for p in found]
+        state.confidence_basis.extend(precedent.basis(found))
+        _METRICS["precedent_cited"] += len(found)
+
+    async def _attach_vendor_evidence(self, state: InvestigationState) -> None:
+        """Ask the vendors that raised this alert what they know (Phase 4.5).
+
+        Off unless `AISOC_TRIAGE_VENDOR_EVIDENCE` is set: this reaches the
+        customer's vendor API on every fused alert, which is the condition
+        the plan reserves for opt-in, and auto-triage is the hot path.
+
+        In the context stage rather than inside `run_auto_triage` so it sits
+        with the other context fetches and shares their failure posture —
+        additive, never the verdict. A vendor that is down must cost the
+        alert nothing, and the renderer says COULD NOT CHECK rather than
+        letting an absent answer read as a clean one.
+        """
+        if not vendor_evidence.enabled():
+            return
+        try:
+            state.vendor_evidence = await vendor_evidence.collect(
+                state.raw_alert,
+                tenant_id=str(state.tenant_id or ""),
+            )
+            _METRICS["vendor_reads_executed"] += len(state.vendor_evidence.executed_capabilities)
+        except Exception as exc:  # noqa: BLE001 — context is additive
+            logger.warning("auto_triage_worker.vendor_evidence_failed", error=str(exc)[:200])
+
     async def _attach_identity_context(self, state: InvestigationState) -> None:
         """Record who is behind the accounts this alert names, if anyone knows.
 
@@ -1208,6 +1373,27 @@ class FusedAlertTriageWorker:
             return
         state.identity_context = found.as_state()
         _METRICS["identity_context_read"] += len(found.identities)
+
+    async def _attach_cloud_posture(self, state: InvestigationState) -> None:
+        """Record what is already known to be wrong with this alert's resources.
+
+        A tenant with no CNAPP connected gets nothing here and nothing in the
+        prompt. That is the correct outcome and it is not the same as a clean
+        estate: an empty block is silence, while a block saying the resource
+        has no findings is a claim, and an exculpatory one.
+        """
+        resources = cloud_posture_module.resources_for(state.raw_alert)
+        if not resources:
+            return
+        try:
+            found = await self._reader.fetch_cloud_posture_context(str(state.tenant_id), resources=resources)
+        except Exception as exc:  # noqa: BLE001 - posture context is advisory, triage is not
+            logger.warning("auto_triage_worker.cloud_posture_lookup_failed", error=str(exc)[:200])
+            return
+        if not found.findings:
+            return
+        state.cloud_posture_context = found.as_state()
+        _METRICS["cloud_posture_read"] += len(found.findings)
 
     @staticmethod
     def _event_time_of(state: InvestigationState) -> datetime | None:
@@ -1324,6 +1510,7 @@ class FusedAlertTriageWorker:
                 confidence=confidence,
                 author=author,
                 alert_id=(state.raw_alert or {}).get("id"),
+                alert=state.raw_alert,
             )
         with contextlib.suppress(Exception):
             await writer.record_suppression(
@@ -1520,6 +1707,11 @@ class FusedAlertTriageWorker:
             proposed_actions=recommendations,
             business_context=state.business_context,
             business_impact=state.business_impact,
+            # Phase 4.5. The reads that happened, as ledger rows, in the same
+            # transaction as the verdict they informed. `None` when the
+            # pre-fetch is off, which writes no rows and restores the
+            # previous shape exactly.
+            vendor_reads=(state.vendor_evidence.as_state()["reads"] if getattr(state, "vendor_evidence", None) is not None else None),
             auto_closed=state.status is AgentStatus.COMPLETED,
             iterations=state.iteration_count,
             tokens=tokens,

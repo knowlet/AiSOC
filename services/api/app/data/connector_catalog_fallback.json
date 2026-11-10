@@ -836,7 +836,7 @@
     "category": "network",
     "connector_id": "cloudflare_zt",
     "connector_name": "Cloudflare WAF + Zero Trust",
-    "description": "Cloudflare data-plane events: WAF / firewall decisions (per-zone) and Zero Trust Access audit log (per-account). Auth is an account-scoped API token with Zone:Firewall Services:Read and Account:Access Audit Logs:Read.",
+    "description": "Cloudflare data-plane events: WAF / firewall decisions (per-zone, via the GraphQL firewallEventsAdaptive dataset) and Zero Trust Access audit log (per-account). Auth is an API token with Zone:Analytics:Read and Account:Access Audit Logs:Read.",
     "docs_url": "/docs/connectors/cloudflare_zt",
     "fields": [
       {
@@ -873,7 +873,7 @@
         "type": "string"
       },
       {
-        "help_text": "Account-scoped token with Zone:Firewall Services:Read (WAF) AND Account:Access Audit Logs:Read (Zero Trust).",
+        "help_text": "Token with Zone:Analytics:Read (WAF \u2014 this is what the GraphQL analytics dataset reads, not Firewall Services:Read) AND Account:Access Audit Logs:Read (Zero Trust).",
         "label": "API Token",
         "name": "api_token",
         "required": true,
@@ -1006,7 +1006,7 @@
     "category": "edr",
     "connector_id": "crowdstrike",
     "connector_name": "CrowdStrike Falcon",
-    "description": "CrowdStrike Falcon detections via the Falcon REST API.",
+    "description": "CrowdStrike Falcon alerts via the Falcon Alerts API.",
     "docs_url": "/docs/connectors/crowdstrike",
     "fields": [
       {
@@ -1461,6 +1461,47 @@
   },
   {
     "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "ndr",
+    "connector_id": "extrahop",
+    "connector_name": "ExtraHop RevealX 360",
+    "description": "Network detections from ExtraHop RevealX 360, with the vendor's own risk bands preserved. Read-only: nothing here changes a detection's status or assignee.",
+    "docs_url": "/docs/connectors/extrahop",
+    "fields": [
+      {
+        "help_text": "The API Endpoint shown on the RevealX 360 API Access page. Do not include the /oauth2/token suffix.",
+        "label": "API endpoint",
+        "name": "api_host",
+        "placeholder": "https://example.api.cloud.extrahop.com",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "label": "REST API credential ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Generated on the RevealX 360 API Access page. An API key works against a sensor or console but is not compatible with the RevealX 360 REST API.",
+        "label": "REST API credential secret",
+        "name": "client_secret",
+        "required": true,
+        "type": "secret"
+      },
+      {
+        "default": 1,
+        "help_text": "Only detections at or above this risk score are pulled. 1 is every scored detection; the vendor's bands are 1-30, 31-79 and 80-99.",
+        "label": "Minimum risk score",
+        "name": "risk_score_min",
+        "required": false,
+        "type": "number"
+      }
+    ]
+  },
+  {
+    "capabilities": [
       "pull_alerts",
       "pull_logs"
     ],
@@ -1741,7 +1782,7 @@
     "category": "vcs",
     "connector_id": "gitlab",
     "connector_name": "GitLab",
-    "description": "GitLab group audit events and security vulnerability findings. Requires a Personal Access Token with the 'api' scope; the authenticating user must own the group. Self-managed GitLab works too \u2014 set gitlab_url to your instance base URL.",
+    "description": "GitLab group audit events and security vulnerabilities. Requires a Personal Access Token with the 'api' scope; the authenticating user must own the group. Vulnerabilities are read from the group security dashboard and need Ultimate \u2014 without it you get audit events only. Self-managed GitLab works too \u2014 set gitlab_url to your instance base URL.",
     "docs_url": "/docs/connectors/gitlab",
     "fields": [
       {
@@ -1760,7 +1801,7 @@
         "type": "string"
       },
       {
-        "help_text": "PAT with the 'api' scope. The authenticating user must be a group Owner to read audit events. Security findings require Ultimate.",
+        "help_text": "PAT with the 'api' scope. The authenticating user must be a group Owner to read audit events. Vulnerabilities additionally require Ultimate; on any lower plan the connector still polls audit events and says so in its logs.",
         "label": "Personal Access Token (scope: api)",
         "name": "token",
         "required": true,
@@ -3762,7 +3803,8 @@
   },
   {
     "capabilities": [
-      "pull_alerts"
+      "pull_alerts",
+      "pull_vulnerabilities"
     ],
     "category": "cloud",
     "connector_id": "wiz",
@@ -3797,6 +3839,30 @@
         "name": "auth_url",
         "required": false,
         "type": "string"
+      },
+      {
+        "default": false,
+        "help_text": "Pull per-asset CVE findings into the vulnerability inventory (not the alert queue). Needs the read:vulnerabilities scope.",
+        "label": "Collect vulnerability findings",
+        "name": "collect_vulnerabilities",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "default": false,
+        "help_text": "Pull failed cloud-configuration checks as posture context for triage (not the alert queue). Needs the read:cloud_configuration scope.",
+        "label": "Collect configuration findings",
+        "name": "collect_configuration_findings",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "default": false,
+        "help_text": "Pull runtime threat detections as posture context for triage (not the alert queue). Needs the read:detections scope.",
+        "label": "Collect runtime detections",
+        "name": "collect_runtime_detections",
+        "required": false,
+        "type": "boolean"
       }
     ]
   },

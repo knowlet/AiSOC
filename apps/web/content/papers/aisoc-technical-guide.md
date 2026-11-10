@@ -2,8 +2,8 @@
 title: "AiSOC Technical Guide"
 subtitle: "Install, operate and integrate — on a workstation and on a server"
 author: "AiSOC project"
-version: "v1.2"
-date: "2026-10-31"
+version: "v1.3"
+date: "2026-11-05"
 license: "MIT (same as the AiSOC project)"
 abstract: |
   A complete operator's guide to AiSOC: installing it on a laptop and on a
@@ -57,7 +57,7 @@ connector / ingest API
         ├──────────► graph writer ──► Neo4j       (entity graph)
         │
         ▼
-    fusion  ──────── 2,530 executable detection rules, your tenant's tuning,
+    fusion  ──────── 2,966 executable detection rules, your tenant's tuning,
         │            correlation into alerts
         ▼
    Postgres ──────── the alert, the case, the audit chain
@@ -134,17 +134,20 @@ curl -s localhost:8000/api/v1/llm/runtime -H "Authorization: Bearer $TOKEN"
 docker compose exec ollama ollama ps     # SIZE and the GPU/CPU split
 ```
 
-Five answers, and **not loaded right now** is one of them: Ollama unloads after
-a few minutes idle, so an empty answer means nobody has asked it anything yet.
-That is not the same as CPU, and reporting CPU there would be a guess about the
-exact thing you are deciding on.
+**Not loaded right now** is one of the answers: Ollama unloads after a few
+minutes idle, so an empty answer means nobody has asked it anything yet. That
+is not the same as CPU, and reporting CPU there would be a guess about the
+exact thing you are deciding on. It is also not the same as having no model at
+all, which is why `no_model` is its own answer — a first run whose one-time
+download failed needs `docker compose run --rm ollama-pull`, not a triage.
 
 | `placement` | Means |
 |---|---|
 | `gpu` | the whole model is in VRAM |
 | `partial` | split; `detail` says what fraction, which explains the latency |
 | `cpu` | entirely on the CPU |
-| `unknown` | nothing loaded, so it cannot say |
+| `no_model` | Ollama holds no model at all — the one-time download never completed |
+| `unknown` | a model exists but none is loaded, so it cannot say where one would run |
 | `unreachable` | nothing answered — expected on a hosted-provider deployment |
 
 ---
@@ -332,6 +335,9 @@ is the one misconfiguration here that cannot be made quietly.
 | Events ingest but no alerts appear | The fallback classifies events as OCSF category 4, and promotion needs category 2 or `severity_id >= 4` | Same cause as above. A vendor finding that already passed the vendor's correlation belongs at `class_uid: 2001` |
 | `/api/docs` returns 404 | `make up` starts a production-class stack with the spec disabled | This is intended. Use `docs/openapi.yaml` in the repository |
 | Everything is slow under load | One connection acquire per alert write | Current releases batch; check you are not pinned to an older image |
+| Fusion is `running` but processes nothing, forever | A broker fault escaped the consume loop and ended the task | Fixed in current releases: the worker supervises itself and recovers. Confirm with `curl localhost:8003/readyz` — a detached consumer answers 503 naming the subscription, never a silent 200 |
+| Fusion logs the same broker error every 60s and never recovers | A permanent fault — a refused credential, a missing ACL, an unsupported SASL mechanism — being retried as though it were transient | Current releases stop on these and name the operator action in the log line. Fix the credential or ACL; no amount of retrying clears it |
+| A connector's feed looks plausible but the start of each burst is missing | A page cap with a continuation that was not followed, on a query ordered newest-first | Fixed in current releases for the affected connectors. See *Connecting real data → Pull* |
 
 ### Upgrading
 
@@ -397,6 +403,26 @@ at rest with Fernet before they touch the database.
 Connecting a source is meant to be the only manual step: the scheduler polls
 on a five-minute default, events flow to ingest, fusion promotes what matters,
 and the agent triages every fused alert. No further intervention.
+
+**What the poll window guarantees, and the failure mode to know about.** A
+connector derives its window from the clock — `[now - interval, now]` — so
+consecutive windows abut exactly and nothing is ever re-read. Whatever a
+vendor does not hand over on the first attempt is gone permanently, and the
+loss is silent: a short answer and a quiet estate look identical downstream.
+Three things break that window and each takes a different fix — a page cap
+with a continuation nobody follows, a vendor that deliberately withholds
+recent records, and a record that exists but is not yet queryable by the time
+filter used. Continuations now go through one shared helper that keeps a
+partial read rather than discarding it when a later page fails, announces a
+page cap when it binds, and requests the continuation link verbatim.
+`scripts/check_connector_paging.py` makes it a gate: a connector either
+follows a continuation or carries a written reason citing what the vendor
+documents it returns.
+
+If you are operating a busy tenant, the symptom worth watching for is a feed
+whose volume looks plausible but whose *earliest* events in any burst are
+missing — several vendor queries are ordered newest-first, so truncation
+removes the beginning of a burst, which is the part an investigation needs.
 
 ### Bringing existing detections
 
@@ -613,7 +639,7 @@ investigation.*
 
 ## 6. The REST API
 
-**518 operations across 417 paths.** The specification is
+**662 operations across 535 paths.** The specification is
 `docs/openapi.yaml` in the repository, regenerated on every change and gated
 against breaking changes in CI.
 

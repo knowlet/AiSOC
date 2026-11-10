@@ -118,6 +118,14 @@ class InvestigationState(BaseModel):
     # `{"matched_rule_ids": [...], "severity_before": ..., "severity_after": ...}`.
     business_context: dict[str, Any] | None = None
 
+    # The tenant's standing questions, answered from collected evidence
+    # before the prompt was built (app/context/triage_questions.py). Carried
+    # as the rendered block rather than as structure because the renderer is
+    # what wraps every tenant string in the untrusted envelope — a caller
+    # re-rendering it from parts is a caller that can forget to.
+    # `{"block": str, "answered": int, "unanswerable": int, "skipped": [...]}`.
+    triage_questions: dict[str, Any] | None = None
+
     # The verdict's business-impact element, kept only when every citation it
     # carries resolves to supplied context (rule ids, identity accounts). An
     # uncited impact statement is dropped, not rendered — same discipline as
@@ -159,7 +167,28 @@ class InvestigationState(BaseModel):
     # rather than the dataclasses for the same import-cycle reason as above.
     recent_dispositions: dict[str, Any] | None = None
     identity_context: dict[str, Any] | None = None
+    #: Depth-2 8.1. Open cloud-security findings on the resources this
+    #: alert names, with the `collected` flag that tells an absent CNAPP
+    #: apart from a clean estate.
+    cloud_posture_context: dict[str, Any] | None = None
 
+    # Phase 4.5. What the vendors that raised or observe this alert said when
+    # asked, just before triage reasoned over it. Carried as the
+    # `VendorEvidence` dataclass rather than as a dict, because the guard on
+    # fabricated tool claims reads `executed_capabilities` off it — the list
+    # of verbs a vendor really answered, which is not recoverable from a
+    # rendered block. `Any` for the same import-cycle reason as above, and
+    # excluded from the serialised state for the same reason the retrieval
+    # dicts are shaped the way they are.
+    vendor_evidence: Any = None
+    # Phase 4.2. What the reviewer pass did, including when it abstained.
+    # `None` means the pass did not run; an abstention is a dict saying so,
+    # and the two must not be collapsed.
+    reviewer_outcome: dict[str, Any] | None = None
+    # Phase 4.4(a). Past decisions on alerts *like* this one, matched by
+    # similarity rather than by the exact evidence fingerprint. Context only
+    # — nothing here closes an alert; suppression stays exact-match.
+    precedent: list[dict[str, Any]] = Field(default_factory=list)
     # What those principals could do *at the alert's event time*, as
     # `app.context.privilege.PrivilegeContext.as_state()` renders it (depth
     # plan wave 2, 1.1). Distinct from `identity_context`, which says who

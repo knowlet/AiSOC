@@ -46,8 +46,12 @@ from now on; `DEPTH_PROGRESS.md` gains a cross-reference rather than a tick.
 
 | Item | State | Where |
 |---|---|---|
-| 1.6 Anonymizer and hosting classes at ingest | **done**, in review | PR #1586 |
+| 1.6 Anonymizer and hosting classes at ingest | **done and MERGED** 2026-11-01 | PR #1586 |
 | 1.3 HR and device context | **done for three of six connectors**, in review | PR #1589 |
+| 8.1 CNAPP depth | **blocked** on unreachable Wiz docs; depth check recorded, two findings in it | item log |
+| 8.2 NDR connectors | **ExtraHop done**, in review; Corelight blocked (D8) | PR #1591 |
+| 8.3 Enrichment per tenant, cited | **rate limiting shipped**; provider gate built and held for its caller | item log + `depth2/lane-b-enrichment-tenant` |
+| 1.6 Anonymizer and hosting classes at ingest | **done**, in review | PR #1586 |
 | 8.1 CNAPP depth | not started, gap reproduced | item log |
 | 8.2 NDR connectors | not started; ExtraHop buildable, Corelight blocked | item log |
 | 8.3 Enrichment per tenant, cited | not started, gap reproduced | item log |
@@ -66,6 +70,11 @@ claimed the same migration number simultaneously and one had to renumber.
 | Number | Kind | Lane / item | Claimed | File |
 |---|---|---|---|---|
 | 0015 | ADR | Wave 0 / Phase 0.4 | 2026-11-01 | `docs/decisions/0015-siem-replacement-scope.md` |
+| 151–158 | migration | Lane F (analyst: 3.2, 3.3, 4.x, 5.x, 9.x) | 2026-11-01 | reserved block, see below |
+| 0022 | ADR | Lane F | 2026-11-01 | reserved |
+
+Highest at kickoff: migration `123`, ADR `0014`. Next free: migration `124`,
+ADR `0016`.
 | 142 | migration | Lane D / Phase 6.3 | 2026-11-01 | tenant response schedule (business hours, on-call) |
 | 143 | migration | Lane D / Phase 6.3 | 2026-11-01 | approval timeout outcomes on the durable pause |
 | 144 | migration | Lane D / Phase 6.4 | 2026-11-01 | reserved — ticket-sync state, if 6.4 reproduces a gap |
@@ -98,14 +107,44 @@ close, never by a second lane assuming it is free.
 | 131 | migration | Lane B / 1.3 | 2026-11-01 | `services/api/migrations/131_workforce_context.sql` |
 | 132 | migration | Lane B / 8.3 | 2026-11-01 | `services/api/migrations/132_tenant_enrichment_providers.sql` |
 | 133 | migration | Lane B / 8.1 | 2026-11-01 | `services/api/migrations/133_cloud_security_findings.sql` |
+| 159 | migration | Lane C / 2.4 | 2026-11-01 | `services/api/migrations/159_api_endpoint_profiles.sql` |
+| 160 | migration | Lane C / 2.5 | 2026-11-01 | reserved — detection coverage gaps, if the existing proposal tables do not carry them |
+| 161 | migration | Lane C / 2.3 | 2026-11-01 | reserved — weak-signal accumulation, if the Redis baseline store cannot hold it |
+| 0023 | ADR | Lane C / 2.2 | 2026-11-01 | `docs/decisions/0023-long-horizon-identity-aggregates.md` |
 
 Lane B holds an exclusive pre-allocated block: migrations `130`-`137` and ADR
 `0018`. Numbers `134`-`137` are reserved and unused unless an item below
 claims one here first.
 
+Lane C holds migrations `159`-`161` and ADR `0023`. Numbers `142`-`158` are
+Lane D, Lane E and Lane F blocks; Lane C starts above all of them so a lane
+that has not yet pushed its claim cannot collide.
+
 Highest at kickoff: migration `123`, ADR `0014`. Next free outside Lane B's
 block: migration `124`, ADR `0016`.
 
+Highest at kickoff: migration `123`, ADR `0014`. Next free sequential number:
+migration `124`, ADR `0016`. Outside that sequence, Lane E holds the exclusive
+block migrations `146`–`150` and ADR `0021`, and Lane F holds `151`–`158` and
+ADR `0022` (below).
+
+### Lane F block (exclusive, pre-allocated)
+
+Lane F holds migrations `151`–`158` and ADR `0022`. The block is pre-allocated
+rather than taken from the next-free counter so that Lane F's many items cannot
+collide with lanes A, B, D and E, which take theirs sequentially. Files as they
+land:
+
+| Number | File | Item |
+|---|---|---|
+| 151 | `services/api/migrations/151_alert_occurrences.sql` | 3.3 linked occurrences |
+| 152 | `services/api/migrations/152_root_cause_findings.sql` | 3.3 cross-vendor root cause |
+| 153 | `services/api/migrations/153_attack_stories.sql` | 3.2 stories |
+| 154 | `services/api/migrations/154_triage_questions.sql` | 4.3 questions — **landed** |
+| 155 | `services/api/migrations/155_hunt_source_reports.sql` | 5.1 source reports |
+| 156 | `services/api/migrations/156_software_inventory.sql` | 5.4 inventory |
+| 157 | unused | — |
+| 158 | unused | — |
 Highest at kickoff: migration `123`, ADR `0014`. Lane A claimed migrations
 `124`–`129` and ADRs `0016`–`0017`, and **used 124, 125, 128 and 0016**.
 The rest are released: a claimed-and-unused number is kept in this table
@@ -314,6 +353,57 @@ the scoreboard row for the 8B model is untouched.
 - [~] **7.4** AI rule pack — four of the listed targets shipped and replayed
       ([#1585](https://github.com/beenuar/AiSOC/pull/1585)); the rest need a
       producer or 7.3's baselines, each recorded below.
+### D5 — Lane F did not reach eleven of its sixteen items, and this is where they stand
+### D5 — Where Lane F's remaining items stand
+
+*Updated 2026-11-01 after a second pass: 9.5's prerequisite, 4.5, 4.4, 3.3's second half, 4.2 and 5.5 have since landed and are in the item log. The rows below are what is still open, and each is measured state rather than a guess.*
+
+~~Originally recorded as eleven unreached items.~~
+
+Recorded rather than left implicit. Lane F covered 4.2–4.6, 5.1–5.5, 9.1–9.5
+and 3.2–3.3. Five landed (3.2, 3.3 first half, 5.2, 4.6, 9.2/9.4 records);
+eleven did not. The reproduction work for each was done before the lane ran
+out of time, so what follows is **measured state, not a guess**, and is worth
+more to whoever picks them up than a fresh grep would be.
+
+| Item | Measured state on this tree | What is actually left to build |
+|---|---|---|
+| **3.3** second half | first half shipped | Cross-vendor root-cause collapse (migration 152 is claimed and unused). `alerts.external_id` is the natural anchor; `parent_alert_id` / `child_alert_ids` / `is_merged` have existed since migration 042 with **no writer**, so check that vocabulary before minting a new one. |
+| **4.2** reviewer pass | not started | The decision contract is assembled by `reflex_observability.decision_contract` and is **not persisted** — absent from `persist_auto_triage`'s 24 kwargs. A reviewer pass needs it durable first. Closure is chokepointed at `closure/authorization.authorize_auto_closure`, so a reviewer cannot reach closure by accident. Ship only if it moves balanced accuracy or auto-close precision without lowering malicious recall. |
+| **4.3** questions + rules | **done** | Reproduced before building: all three operator sets (API `ALLOWED_OPS`, agents `COMPARATOR_OPS`, the matcher's own branches) were measured identical at 13, and **`neq` is not one of them** — a rule using it parses as a field name and silently never matches. Lockstep was therefore a *preservation* requirement, now held by `check_business_context_grammar.py` in three directions and proven by two injected controls against this tree. Plain-language rules compile deterministically — **no model anywhere on the path** — into the same structured rule both engines run, round-tripped through the real parser and previewed with per-field coverage against the tenant's own last 50 alerts. Questions split at rest into a free-text label that decides nothing and a closed-schema lookup that produces the answer; unanswerable is a distinct answer from no. Migration 154 landed, and triage reads it: a per-tenant store answers the standing questions from the collected evidence and the rendered block reaches the prompt preamble. |
+| **4.4** precedent + re-triage | **verified, not built** | See D3. Precedent reaches triage by two routes but matches only on exact fingerprint or rule/entity string; `semantic_memory.py` is a complete Qdrant recall with provenance that the triage path never touches. Re-triage is genuinely absent, and `run_id` is `uuid5(alert_row_id:WORKFLOW_VERSION)` with `ON CONFLICT (run_id, seq) DO NOTHING`, so a naive re-triage writes **nothing** — it needs a re-triage discriminator in the run id, and seq 0/1 are taken. |
+| **4.5** vendor evidence | **verified, not built** | See D3. `investigation_reads.py` exists with 5 verbs over 7 vendors. Two real gaps: no GuardDuty finding-read verb (the alias resolves GuardDuty to a CloudTrail read), and `run_auto_triage` has **no tool channel at all** and says so in a comment, so a vendor alert that auto-triages never pulls vendor evidence. A deterministic context fetch, like `_attach_identity_context`, is a better shape than a tool channel: the ledger citation is then real because the fetch happened. |
+| **5.1** hunt from a report | **done** | Every piece exists separately: `ssrf_guard.validate_outbound_url` (**a validator, not a fetcher — it does not bound response size**, so 5.1 must add its own `max_bytes` and timeout), `EvidenceEnvelope.wrap` for nonce fences (use it, not `wrap_untrusted`), and the closed hunt schema in `hunt/plan.py` with `hunt_plan_sql.py` binding every value as a parameter. Migration 155 has a reader: `POST /hunt/from-report` on the agents router drafts from a fetched report and stops there, deliberately — the indicators came out of a document somebody else published. Wiring it found the defect the module's own suite could not, because that suite supplies its own `allowed_fields`: `INDICATOR_FIELDS` named `destination_ip`, `destination_domain` and `file_hash`, the schema carries `dest_ip`, `dst_hostname` and `hash_sha256`, so every indicator in every report was refused. Fixed at the map, with a test comparing the two sets directly. |
+| **5.3** explorer | **done** | **The recorded measurement understated this and is corrected here.** It said the explorer "already shows the generated query" and named the `res.esql` assignment as a latent bug. Reproduction showed the natural-language path could not work *at all*: `/nl-query/translate` runs nothing and returns an ESQL/SPL/KQL triple, and the ESQL was posted to the lake's **SQL** endpoint — different languages. So the query on screen was never the query that ran, and `/nl-query/execute` had shipped the whole capability with no caller. The predecessor test pinned the defect as intended, its fixture putting literal SQL in the `esql` field. Shipped: the correct endpoint, the executed query with its language and its bound values shown separately, which store answered, unapplied filters with their direction, cross-filters, per-entity view, CSV export and the graph pivot. |
+| **5.4** software inventory | **done (PARTIAL row)** | No connector reads a code-platform SBOM API. `packs/aisoc-inventory-baseline.yaml` queries `deb_packages`, `rpm_packages` and `homebrew_packages` — and now the Windows `programs` table, whose absence meant the largest estate in most tenants produced no rows at all. `assets` and `asset_vulnerabilities` stay host-level; migration 156 is the package-level table and has readers: four routes under `/software-inventory` ingest the osquery rows and an SBOM, and report where a package runs with its end-of-life verdict. Zero rows distinguishes `nothing_reported` from `no_match`, because 'no packages' reads as 'clean'. |
+| **5.5** retro-hunt at scale | **absent** | The retro-hunt subsystem is substantial and sweeps two stores with honest failure states. `scripts/perf/` is ingest/throughput oriented; nothing measures sweep cost against indicator volume. Needs recorded hardware. |
+| **9.1** voice | **half shipped, half recorded** | **Shipped:** the recognise -> show -> confirm -> send flow (`voice_session.ts`, 11 cases, negative control adding an auto-send edge reddens 5), and `check_no_audio_egress.py` extended with a third arm — hosted speech SDKs denied by name, on-device ones allowlisted by name, proven against the real tree by importing `@google-cloud/speech` into `voice.ts`. **Not shipped, deliberately:** no React Native screen renders the flow; no on-device recogniser package is installed (adding one I cannot run on a handset would be an unverified dependency, and the gate now refuses any cloud-capable alternative); and **voice approval is not built at all**, rather than half-wired — an approval path reaching anything but the real API with separation of duties intact would be worse than none. `expo-local-authentication` is already installed and `app/approval/[id].tsx` already names the exact action in its biometric prompt, so the approval half is a wiring task on top of a screen that does not exist yet. **Needs:** a handset or emulator to verify a recogniser against; the ledger entry naming approver and channel is unwritten. Original note (see D4): `expo-local-authentication` is already installed and `app/approval/[id].tsx` already names the exact action in its biometric prompt, which is the 9.1 requirement. `@react-native-voice/voice` is **already denied** by `check_no_audio_egress.py` as cloud-capable — an on-device package must be added *and* allowlisted, with the self-test extended, since the self-test is what makes that gate non-vacuous. |
+| **9.3** i18n | **done (PARTIAL row)** | Nothing at all: no library, no `messages/`, no RTL, no gate. Scope is the five surfaces gap-closure 13.4 names (~690 strings), not the whole console (~72k lines). Note parity 4.7's axe-core extension targets the **same five surfaces**, so the two share a blast radius. |
+| **9.5** operator pages | **done — all 7 built and gated** | SCIM tokens **is built** (`ScimTokensPanel.tsx`, wired at `SettingsView.tsx:424`) and organisation members is built, but the claim row at `CLAIM_TO_GATE_MATRIX.md:299` still lists both as not built. Branding, retention, rule packs, delegations and the console over-limit state are genuinely absent. The enforcement bullet of parity 4.5 is already GATED and done. |
+
+### D3 — Four Lane F items did not reproduce as the plan describes them
+
+Recorded under the "reproduce before building" rule: a grep is a hint, and
+four of Lane F's gaps turned out to be narrower than the plan's wording, or
+already closed. Nothing was rebuilt on the strength of the plan's sentence.
+
+| Item | Plan says | Measured on this tree |
+|---|---|---|
+| 4.4(a) | analyst reclassifications do not reach triage | **They do, by two independent routes.** `human_priors.record_human_prior` writes `author: "human"`, `confidence: 1.0` into `aisoc_institutional_memory` under `outcome:<evidence_fingerprint>`, and `context/dispositions.py` renders the last five analyst decisions into the triage preamble. The real gap is narrower: matching is **exact fingerprint** (SHA-256 over 18 canonical fields) or rule-id/entity string, never similarity. `services/api/app/services/semantic_memory.py` is a complete Qdrant-backed vector recall with tenant filtering and provenance — and the triage path never touches it; its only consumers are `/kb/query` (opt-in), `remember_closed_case` and its own router. |
+| 4.5 | read verbs "in `investigation_reads.py`" are to be added | **The file exists**, at exactly that path, 987 lines, 5 read verbs across 7 vendors with contracts, executors, a closed agent allowlist, a parameter allowlist and autospec'd signature tests. Defender/EDR evidence pulling is fully built. The two real gaps: no GuardDuty finding-read verb (only an alias that resolves GuardDuty to a CloudTrail read), and reads are reachable **only from the escalation path** — `run_auto_triage` has no tool channel at all, and says so in a comment, so a vendor-originated alert that auto-triages never pulls the vendor's evidence. |
+| 5.2 | the hunt scheduler is "Elasticsearch only" | **Splunk is a live registered provider.** `SUPPORTED_PROVIDERS` held two drivers, and backend choice is driven by what the tenant connected rather than by the translation. Separately, the plan's "scheduled hunts resolved their SIEM from process settings that were never declared fields" defect is **already fixed** and documented at length in `event_warehouse/credentials.py`. The real gap was the half that fix could not reach: a tenant who has connected nothing. |
+| 5.2 tail | "add the missing link from a hunt into the governed detection-proposal flow" | **The link exists.** `hunt_scheduler._propose_detection_from_hunt` inserts a DRAFT into `detection_rule_proposals` with `source='hunt-finding'`, gated by `AISOC_HUNT_TO_DETECTION` (default on), since wave 1. |
+
+### D4 — The mobile README claimed voice input that does not exist
+
+Not a plan defect; a tree defect found while reproducing 9.1/9.2. The
+capability table read *"Voice input — **Transcription is on-device by
+construction**"*, which is true of the module and reads as a working
+feature. `apps/mobile/src/lib/voice.ts` has **no recogniser behind it and no
+screen importing it**: the only file in the repository that mentions it is
+that README. Corrected to say so, and the `mobile.yml` README-honesty guard
+extended to pin both the voice row and the handset row, with the guard's
+own vacuous-pass case (an empty README) asserted.
 ### D3 - Three of the five anonymizer classes have no redistributable source
 
 Item 1.6 names five classes and anticipates that one of them (residential
@@ -429,6 +519,32 @@ The lesson is the one this programme keeps paying for: a local suite
 passing is not evidence that the specific question was asked. The original
 entry named a test by title and did not read what it asserted.
 
+### D8 - Corelight is blocked on documentation nobody can read
+
+Item 8.2 names two NDR connectors. ExtraHop RevealX 360 is built; Corelight
+is not, and the reason is outside the repository.
+
+Measured 2026-11-01:
+
+    $ curl -sL -o /dev/null -w "%{http_code}" https://docs.corelight.com/
+    401
+
+There is no public API reference, so there is no document from which an
+honest mock payload can be written, and the plan's own rule for exactly
+this case is to record it rather than invent one.
+
+**Needed, specifically:** a Corelight documentation account, **or** one
+recorded (redacted) detection payload together with the endpoint path and
+the authentication shape the sensor expects.
+
+One thing that must not be mistaken for closing it. Corelight's **Zeek
+output** is open, and `services/connectors/app/connectors/zeek_suricata.py`
+already ingests it. That is a different thing from the sensor's own
+detection API: Zeek logs are network telemetry, and a Corelight detection
+has passed Corelight's correlation. Shipping the first while the item asks
+for the second, and calling the item done, would be the kind of
+substitution this plan exists to catch.
+
 ### D7 - Zero check runs was a conflicted PR, not a saturated pool, and the two look identical from outside
 
 **Corrected.** This entry first recorded the wrong cause, and the
@@ -477,6 +593,196 @@ before.
 One entry per item as it lands: what failed before, the change, the negative
 control, and the measurement delta.
 
+### 8.2 NDR connectors - Lane B - ExtraHop shipped, Corelight blocked
+
+**Reproduced, in the two places this item can be wired wrong.** The
+connector half:
+
+    ModuleNotFoundError: No module named 'app.connectors.extrahop'
+
+The ingest half, which is the one that fails quietly:
+
+    extrahop_profile_test.go:22: extrahop has no connectorProfiles entry;
+      its detections would fall to the lenient 4001 fallback and never
+      promote
+
+and the normalizer saying so itself in the same run:
+
+    {"level":"warn","connector_type":"extrahop",
+     "message":"Using generic profile for unknown connector"}
+
+**Shipped.** All seven registration surfaces plus the ingest profile:
+
+| Surface | Where |
+|---|---|
+| Registry class | `ExtraHopConnector` in `_CONNECTOR_CLASSES` |
+| `schema()` with `secret=True` | `client_secret` only; asserted by test |
+| Marketplace manifest | `plugins/extrahop/plugin.yaml`, index regenerated |
+| Docs page | `apps/docs/docs/connectors/extrahop.md`, sidebar entry `connectors/extrahop` |
+| Count gate | regenerated, not edited: 90 -> **91** |
+| Scheduler polling | `test_scheduler.py` asserts a non-null `next_run_time` |
+| Severity ladder | three bands, no invented `critical` |
+| **Ingest profile** | `connectorProfiles["extrahop"]`, class 2001 / category 2 |
+| Read verbs | `lookup_network_flows`, `lookup_network_device` |
+
+**The severity decision, because a reviewer will ask why this connector
+never emits critical.** ExtraHop publishes three risk bands and no fourth.
+From the vendor's own detections page, verbatim: the icon is "color coded
+by severity as red (80-99), orange (31-79), or yellow (1-30)". The same
+page draws the contrast itself, because CrowdStrike detections in the same
+view use red for *Critical* while ExtraHop's red is just 80-99.
+
+So 80-99 maps to `high` and stops. Promoting it would assert a tier the
+vendor does not publish, which is the mirror of collapsing a vendor's real
+`critical` into `high`. Promotion does not depend on it: class 2001 is
+category 2 and promotes unconditionally.
+
+**Negative control.** Removing the `connectorProfiles["extrahop"]` entry
+fails all three Go tests and the normalizer logs `Using generic profile for
+unknown connector`. Restored, they pass.
+
+**Numbers, from the generators.**
+
+| Figure | Value | Source |
+|---|---|---|
+| Registered connectors | 90 -> **91** | `generate_connector_count.py --check` |
+| Conformance matrix | 91/91 | `connector_conformance.py` |
+| Marketplace plugins | 83 -> **84** | `build_marketplace.py` |
+| Executor arms | 97 -> **99** | `check_action_contract.py` |
+| Claim matrix | 336/331/5 -> **337/332/5** | `check_claim_gate_matrix.py` |
+
+**A real defect the contract gate caught, from the previous item.**
+`check_action_contract.py` compares the connectors `Capability` enum
+against `KNOWN_CAPABILITIES` in the actions service in both directions, and
+reported that `pull_workforce` and `pull_device_inventory` -- added by 1.3
+-- were missing from the mirror. Fixed here rather than left, because the
+gate is right: the two sets are mirrors and a one-way addition is drift.
+
+**No live suite was added**, and that is a decision rather than an
+omission. There is no containerised ExtraHop to stand up, so a job in
+`integration.yml` would have nothing to drive; the tests run in the
+ordinary `ci.yml` jobs against a mock transport and recorded vendor shapes.
+What that does not prove is stated in the claim-matrix row: no live tenant
+has been exercised.
+
+**Deviation:** D8 (Corelight blocked on 401 documentation).
+
+### 8.1 CNAPP depth - Lane B - **BLOCKED on vendor documentation**, with the depth check recorded
+
+**Reproduced.** `services/connectors/app/connectors/wiz.py` declares exactly
+one GraphQL operation, `query IssuesTable`. No vulnerability query, no
+configuration-finding query, no secrets query, no runtime-detection query.
+
+**Blocked, and this is not a scoping choice.** The item asks for queries
+the vendor's current public reference must support an honest mock for.
+Measured 2026-11-01, repeatedly and with a browser user agent, with a
+twenty-second pause between attempts:
+
+    429  https://docs.wiz.io/
+    429  https://win.wiz.io/reference/wiz-api
+    429  https://docs.wiz.io/wiz-docs/docs/welcome
+    000  https://integrate.wiz.io/
+
+Every attempt was rate-limited or unreachable, so the GraphQL schema for
+vulnerabilities, configuration findings, secrets and runtime detections
+could not be read. The one query already in the tree predates this work and
+is not evidence about the others.
+
+Writing those four queries from memory or by pattern-matching the issues
+query would be inventing a payload shape, which the plan names as the thing
+to refuse. **Needed:** the Wiz API reference reachable, or the GraphQL
+schema document (`wizQueryTable` / `vulnerabilityFindings` /
+`configurationFindings` / `secrets` / `threatDetections` field definitions),
+or one recorded (redacted) response per query type.
+
+**The depth check for the other four, as the item asks.** What each
+connector reads today is established from the code and is exact. What each
+API offers is marked unverified where the vendor's reference could not be
+reached, rather than asserted from recollection.
+
+| Connector | Reads today (verified from the tree) | Vendor reference | Verdict |
+|---|---|---|---|
+| `wiz` | one GraphQL operation, `IssuesTable` | `docs.wiz.io` **429**, `integrate.wiz.io` **000** | depth unverifiable; blocked |
+| `orca` | `GET /api/alerts` (plus `/api/user/session` for auth) | `api-docs.orcasecurity.io` **000** | alerts only; depth unverifiable |
+| `prisma_cloud` | `POST /alert/v1/alert` (plus `/login`) | `pan.dev/prisma-cloud/api/cspm/` **200**, overview only: the page describes authorisation and request shape and enumerates no endpoint groups | alerts only; depth needs the endpoint index, not the overview |
+| `lacework` | `GET /api/v2/Alerts` **and** `POST /api/v2/Configs/ComplianceEvaluations/search` | `docs.lacework.net` **000** | **already deeper than issues**: it reads compliance evaluations as well as alerts, which is the configuration-findings half of this item |
+| `sysdig` | `GET /api/v1/secureEvents` | `docs.sysdig.com/en/sysdig-secure/` **200** | runtime events only |
+
+Two things in that table are worth more than the blocked verdict.
+
+`lacework` already reads compliance evaluations, so the plan's premise that
+every cloud-security connector reads issues only is **wrong for one of the
+five**. That is the "do not build what exists" rule paying for itself: the
+depth check was supposed to be a formality and found a connector a third of
+the way through this item already.
+
+`sysdig` reads `secureEvents`, which is Sysdig's **runtime** detection
+stream rather than a posture issue list. So the runtime-detections half of
+this item is partly covered there too, by a connector nobody counted.
+
+**Not started, and distinct from the blocked half:** findings as *triage
+context* keyed on the resource an alert touched, rather than as alerts. That
+needs no new vendor read -- it can be built over what these five already
+ingest -- and it is the half of 8.1 that is not blocked on anything. It is
+the first thing the next pass should take.
+
+### 8.3 Enrichment per tenant, cited - Lane B - rate limiting shipped, the rest split and in flight
+
+**Reproduced, and the gap is wider than the plan's wording.** Measured on
+this tree:
+
+  * `grep -c tenant` over `internal/enricher/enricher.go` and
+    `internal/config/config.go` returns **0** and **0**. There is no tenant
+    dimension anywhere in this service, so per-tenant opt-in is absent
+    rather than partial. Keys are per deployment, which means a deployment
+    holding a VirusTotal key sends **every** tenant's indicators to
+    VirusTotal whether that tenant agreed or not. An indicator is the
+    customer's own address, domain or file hash, so that is a disclosure
+    nobody consented to.
+  * `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST` are parsed at `config.go:59-60`,
+    assigned to struct fields at `92-93`, and **read by nothing else**.
+  * No reference to the credential vault anywhere under
+    `services/enrichment/`.
+  * `URLSCAN_API_KEY` is a config field with no client.
+  * No enrichment result is cited in the ledger.
+
+**Shipped in the NDR pull request**, because it is complete, wired and
+regresses nothing:
+
+  * a per-tenant token-bucket limiter applied in the real handler, on both
+    `/enrich` and `/enrich/bulk`, with one token per *item* on the bulk path
+    so a hundred-indicator call cannot be the way around the limit;
+  * a tenant-scoped cache key, because two tenants legitimately enable
+    different providers and a shared key would serve tenant A's verdict from
+    a provider tenant B switched off straight to tenant B;
+  * six tests, every grant with a partner refusal, driven through the real
+    handler with the real `Enricher` rather than a nil one, so the granted
+    path is exercised too.
+
+**Held back deliberately, on `depth2/lane-b-enrichment-tenant`:** the
+default-deny provider gate. It is built, tested and negative-controlled
+(`TenantPolicy`, `runFanOutForTenant`, and an AST wiring test that fails
+naming the call site when any fan-out bypasses the gate).
+
+It is not in the pull request because **threading a default-deny gate into
+`Enrich` while no caller sends a policy would stop enrichment on every
+deployment.** That is a regression, and shipping it to satisfy an item
+would be the exact substitution this plan exists to catch. It lands with
+the caller.
+
+**Remaining scope, so the next pass starts from a decision rather than a
+survey:**
+
+| Piece | What it needs |
+|---|---|
+| Per-tenant provider table | Migration (Lane B block has `132`-`137` free), RLS, and a row seeded per existing tenant from the deployment's current providers, mirroring migration 122's treatment of closure policy: new tenants default-deny, existing ones keep what they had |
+| Tenant's own key in the vault | The API owns the vault write path and this is a Go service, so either it learns a vendored read-path `decrypt_dict` (the pattern `services/connectors` already uses) or the fan-out moves behind an API route that resolves credentials first. **This is the design decision to make first**; everything else follows from it |
+| Console settings surface | API routes plus a settings panel. A table nothing writes is the same defect as a console nothing reads |
+| Caller wiring | `services/fusion/app/services/alert_enricher.py` resolves the tenant's policy and sends it; the held-back gate then binds in production |
+| Ledger citations | Every enrichment result triage uses, with provider and time |
+| URLScan client | The config key exists and no client does |
+| Breached-credential source | One source, off by default per tenant |
+| Docs | Say plainly that enrichment needs the `full` profile |
 ### 6.1 Verb breadth — done
 
 **What failed before.** `scripts/check_executor_arm_count.py --check` on the
@@ -932,7 +1238,6 @@ asserted for all four facts.
 
 **Numbers, from the generators.**
 
-| Figure | Value | Source |
 |---|---|---|
 | Registered connectors | 87 -> **90** | `generate_connector_count.py --check` |
 | Connector docs | 90 documented, 41 generated / 49 hand-written | `generate_connector_docs.py --check` |
@@ -1395,6 +1700,20 @@ half would key it on whatever field happened to be present, which is how
 short-lived credentials and least-privilege tool scopes first, then baselines
 keyed on them (tools, resources, volume, token spend, hours) reading the
 existing `cost_telemetry.py` rather than a second meter.
+| Date | Item | Entry |
+|---|---|---|
+| 2026-11-01 | 3.3 | Reproduced: 5 of 7 cases in `services/fusion/tests/test_alert_occurrences.py` fail on the pre-change tree with "no statement touched alert_occurrences". A repeat's only residue was a `source_event_ids` append — capped at 200 and shared with multi-event correlation, so its length is not a repeat count — and `alerts.first_seen`/`last_seen` have had no writer since `001_init.sql`. Shipped migration 151 (`alert_occurrences`, a rollup keyed `(tenant_id, alert_id)`: exact count including the survivor, real window, newest-first bounded payload-id window), the sink write, and the measurement as **its own labelled row**: 28.4 % repeat folding (1000 → 716, 284 folded) published beside 33.3 % and 24.5 % correlation and never added to either. **The reduction is identical before and after**, which the docs state: folding is not new, keeping what it folded is. Balance asserted four ways summing to the denominator (658 retained alone + 58 attached to a group + 284 folded + 0 pending), plus a resolvability assertion that each folded repeat maps to the retained alert's own id. **Writing the live suite found a defect in this item's own migration**: the conventional `WITH CHECK (tenant_id = current_tenant_id())` makes the row unwritable by fusion, which binds no tenant session — measured as `aisoc_app` (NOBYPASSRLS), the identical session inserts into `alerts` and is refused here, and because the write is best-effort it would have failed in silence (migration 123's shape). Negative controls, both measured: reverting the `WITH CHECK` fails all six live cases; removing the jsonb containment guard takes five redeliveries of one message from a count of 2 to 7. Baselines unmoved. [#1588](https://github.com/beenuar/AiSOC/pull/1588) |
+| 2026-11-01 | 4.6 | **Not measured, with the reproduction.** `make replay-eval` reads a window of closed findings somebody's analysts already labelled; no design partner has offered one, so false-positive reduction, time to verdict and escalation rate are recorded as *not measured* on the replay page with the exact two-command reproduction. `scripts/check_outcome_claims.py` is what makes the record worth anything: while the page says an outcome is unmeasured, no published surface may print a number for it — **including `0`**, which is the more damaging case because it reads as measured-and-reduced-nothing and looks like data. The prohibition is read off the page rather than hardcoded, so a real measurement retires it without editing the gate. Its first run flagged a true sentence (a table row naming `escalation rate` beside an unrelated "auto-refresh every 60s"), so the rule narrowed from same-line to same-clause with both that case and a real claim in the identical row shape pinned. 13 self-test cases; negative control names file and line. [#1588](https://github.com/beenuar/AiSOC/pull/1588) |
+| 2026-11-01 | 9.4 | **Blocked, verified rather than assumed.** The Teams war room is built and `POST /war-room` answers 501 naming each absent Microsoft Graph setting instead of falling back to the incoming webhook, because one shared channel per deployment puts the next incident's traffic in the last one's thread. Already pinned by `services/teams-bot/tests/test_war_room.py`. **Needs:** an Entra application registration with `Channel.Create`, `ChannelMessage.Send` and `Group.ReadWrite.All`, admin consent, and a team id. Recorded as a claim row so the honest refusal cannot quietly become a fallback. [#1588](https://github.com/beenuar/AiSOC/pull/1588) |
+| 2026-11-01 | 5.2 | Reproduced: `resolve_provider` required `connected_types.intersection(provider.connector_types)`, and `_execute_hunt` turns the resulting `UnsupportedTranslation` into a hit count of **zero** — not an error state, so no case opens, nothing logs above INFO, `last_run_at` moves, and it is indistinguishable from "your hunt found nothing". That was the answer on every deployment whose data lives in AiSOC's own lake. Added `LakeProvider` (no connector types; the registry now allows such a provider, checked **after** the connector-backed chain so a tenant's own SIEM always wins) with tenant binding through `compile_hunt`, an unreachable lake raising rather than returning zero, and dropped conditions logged by name. ADR-0015's **HUNTING OUTPUT** label did not exist anywhere outside the ADR — now in the banner, the page title and the mail subject, with a sentence saying what the document does not claim. Emailed delivery did not exist either (`aisoc_hunt_reports` and the report scheduler's `ReportArtefact` were never connected); it ships **off** behind `AISOC_HUNT_REPORT_RECIPIENTS`. Negative control: removing the empty-`connector_types` arm fails the reproduction and the scheduler-wiring case. API suite 5042 passed. [#1588](https://github.com/beenuar/AiSOC/pull/1588) |
+| 2026-11-01 | 9.2 | **Blocked, and the README was overstating.** See D4. Corrected the capability table and extended the `mobile.yml` honesty guard to pin both rows. **Needs:** 9.1's recogniser and screen first — nothing can speak to the app today — then an Apple developer account and provisioning profile for iOS, or a Google Play account for a store-signable Android build. The Android `assembleDebug` APK already installs on a handset, so once 9.1 lands the Android half becomes a device question rather than a credentials one. [#1588](https://github.com/beenuar/AiSOC/pull/1588) |
+| 2026-11-01 | 3.2 | Reproduced: the grouper chained on a shared host, user or source-IP **string**, first match wins in a fixed order, with nothing on the result saying which of the three had done it — so a NAT egress address welds two intrusions into one story; an alert carrying a `session_id` (written by fusion since migration 102, alongside `originating_human`) got no more weight than one carrying a hostname; and `ChainMember` carried a per-member severity that nothing aggregated, so "a member benign alone may be escalated by its story" had nowhere to happen. Built **on** the grouper: typed links with three strengths (session/human > hash/domain > host/user/ip), story severity raised by exactly one tier only when the story spans three or more kill-chain stages with the reason carried on the assignment, and actor mode held at `unknown` until Lane A's 1.4 supplies cadence — two tempting inferences rejected in code and pinned by test. **Measured:** story recall 100 % on all three labelled scenarios (4/4, 3/3, 2/2), purity 100 % (5/5), 0 cross-rule stories of 63 on a detection-shaped cohort. **The purity rule was found by the measurement, not reasoned out:** the first cut refused a weak link only across detection rules and the suite measured 75 % purity, because the scenario alerts carry no `rule_id` and an antivirus quarantine sharing the NAT address joined a phishing-to-exfiltration story. A weak link now also may not join a story anchored on strong evidence; the asymmetry (a strong link may still join a string-held pile) is deliberate and tested. Negative controls, both measured: removing either refusal fails two cases. Reduction baselines unmoved at 33.3 % and 24.5 %. **Open and recorded, not approximated:** stories are still Redis-only — the assignment reaches the Kafka envelope and the realtime socket and evaporates, so no API read or case can show one — and the resolved-identity link waits on Lane A's 3.1. [#1588](https://github.com/beenuar/AiSOC/pull/1588) |
+| 2026-11-01 | 9.5 (prereq) | **A claim-matrix row that was false in the repository's favour.** The caveat of a GATED row said six console pages "are not built"; three were. SCIM tokens is gated by another row of the same matrix, so two rows of one document disagreed about whether a surface exists. The direction is what made it worth its own change: it reads as modesty and works as an exemption, because a surface recorded as absent needs no claim row and no gate — and `UsersView` had shipped at `/settings/users` with no test at all. `check_claim_gate_matrix` cannot see this; it counts rows and statuses and does not read a caveat's prose. `check_unbuilt_claims.py` resolves each named surface through a component file **and** a render site (an unrendered component is not a page, and crediting one would make the gate certify the defect it is named for) and was **proven against the pre-fix tree, naming all three**. `UsersView.test.tsx` is the gate the corrected row names: 6 cases asserting on first paint as well as the error branch, including that a member count must not render over a failed read because `total` falls back to 0. Branding, retention, rule packs and delegations genuinely are not built and the corrected caveat says so. [#1592](https://github.com/beenuar/AiSOC/pull/1592) |
+| 2026-11-01 | 4.5 | **No read verb added.** `investigation_reads.py` already carried five across seven vendors with contracts, executors and autospec'd signature tests; the gap was that `run_auto_triage` had **no tool channel at all** and said so in its own comment, so on the path every fused alert takes a GuardDuty or Defender alert was triaged without asking GuardDuty or Defender. Shipped a **deterministic bounded pre-fetch** rather than a tool-calling loop: a loop makes latency and cost unbounded on the hot path; the alert payload is untrusted by construction so a channel whose arguments the model derives from it is a door an injected string can aim (asserted — a hostile `description` changes no read); and a pre-fetch makes the ledger citation true because the call happened. Reads land as `tool_call` rows at seq 2+ in the verdict's own transaction. `called_tools` is now what a vendor really answered and **only** that — a failed read is absent, because the guard asks whether a rationale credits a tool with a *result*. Off by default. Negative controls: removing the render call, and counting failed reads as called tools, each fail a case. Scorecard unchanged at 0.250, which is what an off-by-default context source must do. [#1593](https://github.com/beenuar/AiSOC/pull/1593) |
+| 2026-11-01 | 4.4 | Similarity precedent scores the canonical evidence rather than embedding it, on a measurement already paid for: local models pressed into embedding duty scored **below the lexical baseline** (recall@1 0.333 vs 0.667). A prior now stores the evidence it came from, because a signature is a hash; priors written before this are invisible to similarity and there is nothing to backfill from. Precedent is **cited, never acted on** — exact-fingerprint suppression stays the only path from memory to a closed alert. The measurement found a real gap in the first cut: two alerts whose only shared field is `severity` score a perfect 1.0, so a ratio alone makes "severity: high" precedent for every high alert; `MIN_SHARED_WEIGHT` is the half the ratio cannot see. Re-triage gets its **own identity** — `uuid5(alert:workflow:retriage:trigger_fingerprint)` — because the production run id is deterministic and the ledger is `ON CONFLICT DO NOTHING`, so the obvious implementation writes nothing and reports success. `changed` is explicit, since a re-triage that did not move the verdict is a real outcome. Two assertions first failed **on their own prose** and now parse the source with docstrings stripped. The writer-parity gate caught three writers lacking the new keyword. [#1594](https://github.com/beenuar/AiSOC/pull/1594) |
+| 2026-11-01 | 3.3 (2nd half) | Cross-vendor root cause, keyed on `(resource, technique, principal)` — the conjunction is the control, and a NULL does not match another NULL. Every original is kept: promoting one vendor's alert would make the survivor's severity and vendor an accident of arrival order and discard the fact that several products agreed. `vendor_count` is recomputed, not incremented, so a redelivery cannot turn two vendors into three. Published as a **third labelled row, 16.8 %**, and the gate now refuses a page quoting any of the three reductions' four possible sums. **A weak test was found and fixed**: the severity case first read `WHERE vendor_count = 4 LIMIT 1` with no tenant predicate and passed against an earlier test's row while the ordering was reverted — a live suite that does not scope its reads measures whatever ran before it. Negative controls: resource-only keying fails 3 live cases; alphabetical severity fails the severity case. Migration 152. [#1595](https://github.com/beenuar/AiSOC/pull/1595) |
+| 2026-11-01 | 4.2 | **Measured, did not help, off — a complete outcome.** Reviewer on and off both score 0.2500 balanced accuracy, auto-close precision *not measured* (the deterministic path closed nothing, so no denominator — never `0`), malicious recall unchanged. The reason is published rather than shrugged at: the deterministic scorer makes no prose claims, so every input the reviewer reads is `None` and it abstains on all 72 — which measures the reviewer on the only path available to measure it, not the idea. Deterministic rather than a second model call because a model at 0.21–0.36 adjudicating another at 0.21–0.36 is a coin flip refereeing a coin flip. It may never close: the flag goes True→False only, and an AST assertion with docstrings stripped proves no closure path. A test asserts the measurement is recorded beside the code, because "it is off" decays into "nobody remembers why". [#1596](https://github.com/beenuar/AiSOC/pull/1596) |
+| 2026-11-01 | 5.5 | **Measured against a real ClickHouse on recorded hardware** (Apple M5 Max, 128 GiB, CH 24.8), driving the real `build_sweep_sql` and reading cost from `system.query_log`. `read_rows` equals `lake_rows` at every step: the sweep is a **full scan**, 93.8 bytes/row, 7.45 ms per million rows. **The degradation point is derived from the product's own constant** — `MAX_BYTES_PER_SWEEP` (8 GiB) over 93.8 bytes/row means one sweep is refused by the server at ~**91.6 M rows** of history. The million-indicator figures are extrapolation and are labelled as such; at 20 M rows that is 41.4 h and 1.88 PB. The honest reading is on the page: **a million indicators cannot be swept one at a time against a working lake**, a batched sweep would fix it, and it is not built. Negative control: changing the budget to 2 GiB makes the gate name the page's stale ceiling. [#1596](https://github.com/beenuar/AiSOC/pull/1596) |
 ### 1.6 Anonymizer and hosting classes at ingest - Lane B
 
 **Reproduced.** A Go test driving the real `Normalize` entry point, not the
@@ -1455,7 +1774,438 @@ that has to carry the delta.
 **Deviations:** D3 (three classes have no redistributable source), D4
 (tenant-supplied lists designed, not built).
 
+### 8.1 CNAPP depth - Lane B
 
+Migration `133` is this item's, from Lane B's pre-allocated block; the claim
+above already names `133_cloud_security_findings.sql` and this item keeps that
+filename. Re-derived against `origin/main` immediately before writing:
+`130` is the highest on `main`, and `124`, `125`, `128`, `131`, `142`, `143`,
+`146` and `147` are taken on pushed lane branches. `133` is free everywhere.
+
+**Inventory first, because several "missing" capabilities in this repository
+turned out to be built and unwired.** Measured on `4bb84f0fd`, in a worktree,
+with `rg` run inside it:
+
+| Piece | State on `main` |
+|---|---|
+| `services/api/app/services/cspm.py` | Real. Pure functions, five resource types, severity plus control refs. **Stateless** |
+| `POST /posture/scan` | Evaluates a snapshot supplied in the request body and persists nothing |
+| `posture_findings` (migration `017`) | Table, RLS, six indices, one of them `(tenant_id, resource_id)` |
+| Writers of `posture_findings` | **One**: `POST /posture/findings`, which a human calls by hand. No collector, no scheduler, no connector |
+| Writers of `posture_scan_runs` | **None anywhere in the tree.** `GET /posture/scans` reads a table nothing writes |
+| `GET /posture/summary` | Counts that table, so on every deployment it answers eight confident zeros |
+| Console cloud-posture page | **Does not exist.** `AlertPosturePanel` is the alert backlog; the other `/posture` hits in `apps/web` are autonomy posture |
+| `wiz.py` | Issues only, exactly as the plan says. `raw_event` envelope correct, five-tier map correct |
+| `orca`, `prisma_cloud`, `lacework`, `sysdig` | One aggregated feed each; `lacework` also reads compliance evaluations. All alert-shaped |
+| Ingest profiles | None of the five has a `connectorProfiles` entry; all five resolve through the canonical `raw_event` envelope, which defaults to class 2001, so their issues **are** promoted. `check_connector_profiles.py` is green and stays green |
+| `plugins/wiz/plugin.yaml` | **Absent.** The only one of the five cloud-security connectors with no manifest (63 of 87 connectors have one) |
+| `Capability.PULL_VULNERABILITIES` + `fetch_vulnerability_findings()` | **Built and working.** The scheduler calls it and `app/vulnerabilities.py` materialises into `asset_vulnerabilities` under the polled tenant. Implemented by the host-IDS and the vulnerability-scanner connector only |
+| `incident_context.py` (the five triage dimensions) | 100% Neo4j, so `full` only. On CORE every dimension answers "graph unavailable" |
+| `context/identity.py` | The CORE-native precedent: an internal API route behind a service token, `render_for_prompt`, `basis`, cached, never raises |
+
+**What 8.1 therefore adds, and what it deliberately does not.** It does not
+add a second posture store, a second scanner or a second scoring path. It
+gives `posture_findings` its first production writer, extends Wiz to the three
+finding classes its API actually offers, and makes the result reach a verdict
+on CORE through the `identity.py` pattern rather than through the graph.
+
+**Reproduced.** Not by grep. Three measurements on the pre-change tree:
+
+1. `rg` over the whole tree for writers of `posture_findings` returns one
+   non-test site, `posture.py:149`, inside `ingest_finding` — a route behind
+   `settings:write`. For `posture_scan_runs`, zero.
+2. `GET /posture/summary` is `sum(1 for f in findings if ...)` over that
+   table with no discriminator, so on any deployment that has not POSTed a
+   finding by hand it returns eight zeros. Pinned by
+   `test_a_tenant_that_has_never_collected_gets_nulls_and_a_false_flag`,
+   which fails against the pre-change handler.
+3. `get_incident_context` imports `app.db.neo4j.get_session` and every one of
+   its five dimensions is Cypher, so on CORE the whole bundle answers
+   `graph unavailable`. That is why the new read is Postgres.
+
+**Shipped.**
+
+|---|---|
+| Vendor reads | `wiz.py`: `vulnerabilityFindings`, `configurationFindings`, `detections`, each opt-in |
+| Vulnerability destination | the existing `fetch_vulnerability_findings` hook -> `asset_vulnerabilities`. No new store |
+| Posture destination | `services/connectors/app/cloud_security.py` -> `posture_findings`, written in the connectors service for the reason `vulnerabilities.py` records |
+| Scheduler hook | `_sync_cloud_security_findings`, its own `try`, a failure costs the poll nothing |
+| Schema | migration `133`: `source`, `finding_class` + CHECK, `external_id`, `resource_keys` + GIN, `last_seen_at`, a partial unique index, and two columns on `posture_scan_runs` |
+| Honest summary | `collected` + null counts; a run row is written even for a poll that found nothing |
+| Internal read | `GET /posture/resource-findings`, service-token only, conditional exemption in `check_route_tenant_scope` |
+| Triage context | `services/agents/app/context/cloud_posture.py`, modelled on `context/identity.py` |
+| Replay freeze | a fourth `CUTOFF` source; cut on the vendor's own `first_detected_at`, which is stronger than directory context's import stamp |
+| Injection scan | a sixth channel in `_scannable_fields` |
+| Manifest + docs | `plugins/wiz/plugin.yaml` (the only one of the five that had none), `connectors/wiz.md`, `connectors/cloud-security-depth.md` |
+
+**Negative controls, measured.**
+
+    # re-poll resets the exposure clock
+    FAILED test_a_repoll_touches_one_row_and_does_not_restart_the_exposure_clock
+      assert datetime(2026, 11, 1, ...) == datetime(2026, 10, 20, 9, 0, ...)
+
+    # match lookup drops its tenant predicate
+    FAILED test_a_second_tenants_poll_leaves_the_first_alone
+      assert 0 == 1
+
+    # the vendor's default type filter is left in place
+    FAILED test_wiz_detections_request_both_types
+      KeyError: 'type'
+
+    # the service-token check is deleted but the allowlist entry kept
+    check_route_tenant_scope FAIL: 1 route(s) take a tenant identifier with
+      no auth dependency
+
+**A defect this work introduced and its own test caught.** The first renderer
+passed each field through `sanitize_text`, which deliberately keeps single
+newlines — correct for a runbook body, wrong for a one-line list item, where
+an attacker-chosen resource name could start its own line and read as a new
+section of the prompt. `_one_line` flattens every field;
+`test_a_resource_name_cannot_smuggle_an_instruction_into_the_prompt` failed
+against the first version.
+
+**Refused, with the reason recorded.** The plan names four finding classes
+and Wiz offers three. No public reference documents a top-level secrets
+query: the official Elastic integration ships six Wiz data streams and none
+is secrets, and third-party query inventories list only issues,
+configuration findings and vulnerability findings. Writing a
+`secretFindings` query from the product's marketing surface would be
+inventing an endpoint, so secrets are not collected and the docs say why.
+They reach AiSOC as `issues` where Wiz raises them as such. This is the
+maintainer-blocked item the plan already anticipated ("recorded payloads for
+the CNAPP vendor's newer APIs, where public references are not enough to
+build the mock").
+
+**Also refused: auto-resolving a finding that stopped being returned.** A
+poll asks for a time window, so absence means "not updated in this window"
+far more often than "remediated", and writing `resolved` from it would
+retire a live misconfiguration on a quiet afternoon.
+
+**Numbers.**
+
+|---|---|---|
+| Live writer cases | 8, real Postgres as `aisoc_app` (NOBYPASSRLS) | `test_cloud_security_findings_live.py` |
+| Connector cases | 12, three asserted on the request | `test_wiz_cnapp_depth.py` |
+| Agents context cases | 16 | `test_cloud_posture_context.py` |
+| API surface cases | 12 | `test_posture_triage_context.py` |
+| Registered connectors | 87 -> **87** (none added) | `generate_connector_count.py --check` |
+| Plugin manifests | 80 -> **81** | `pnpm marketplace:sync` |
+| Marketplace items | 7,183 -> **7,184** | same |
+| Claim matrix | 335/330/5 -> **338/333/5** | `check_claim_gate_matrix.py` |
+| Service suites | agents 2,212 · connectors 1,243 · api 5,034, all green | each service's own locked venv |
+
+**Scorecard and reduction suite.** Not re-run, recorded as a judgement. This
+item adds a prompt block that is empty on every tenant in the corpus: the
+verdict corpus carries no cloud-posture findings and no CNAPP connector, so
+`render_for_prompt` returns `""` for all 72 items and the model input is
+byte-identical. It changes no correlation key, no confidence input and no
+priority input. The PR that seeds posture findings into the corpus is the one
+that has to carry the delta.
+
+### 8.4 Scale and deployment evidence - Lane B (audit)
+
+Audited rather than re-implemented, since a sibling lane reported it done.
+Four of the five things worth checking were already right, and saying so is
+the point of the audit.
+
+| Property | State on `main` | Verdict |
+|---|---|---|
+| 4.4 cloud-hardware run | Absent, with its own page section, the exact command, and "an account and an instance, not code" as what is needed | already honest |
+| End-to-end floor and ceiling | 11 events/s and 21,000 ms, stated as 7.3x and 19.2x from the published figures, held by `test_perf_gate_is_related_to_the_claims.py` | already bound |
+| Harness refuses to grade | `load_harness.py` turns an unmeasured stage into a failure ("throughput was not measured, so the floor cannot be met"), not a pass | already correct |
+| An unknown probe reads as unknown | The `kind` run records absent `kubectl top` data as absence rather than zero; `/scale-hint` publishes `lag_measured: false` and the page says a scaler must treat it as no signal | already correct |
+| **In-process floor** | `--assert-floor 1000` against a figure published nowhere, under a comment claiming ">200x below the measured number" | **the real gap** |
+| **4.5 managed-cluster run** | Absent, but only implicitly — the page carried a Kubernetes table (`kind`) and no sentence saying a managed run is a separate missing thing | **understated** |
+
+The in-process floor is the one that mattered, because `end-to-end` is
+`if: schedule || workflow_dispatch`: on a pull request it was the only
+throughput assertion running at all. Measured at **140,692 events/s** (Apple
+M5 Max, 18 cores, 2026-11-01, commit `4e6c79305`), published on the
+performance page, floor moved `1000` -> `7000`, a stated **20.1x**. Controls:
+reverting the floor fails at 140.7x against a 25x ceiling; deleting the
+published section fails with the reason rather than passing over an absent
+claim.
+
+Both runs stay **blocked**, now stated separately and each with exactly what
+is needed: a cloud account and a named instance type for 4.4, and a managed
+Kubernetes cluster plus a kubeconfig for 4.5. Neither is blocked on code —
+the harness records hardware, load shape and commit into every result file,
+and `helm.yml` already installs all of CORE on `kind` on every pull request.
+
+**An observation recorded rather than acted on.** `context/identity.py`'s
+renderer has the same newline exposure the posture renderer had, through a
+directory display name. It is a lower trust tier (first-party import, and
+the module says so) and it is Lane A's surface, so it is reported here rather
+than edited mid-flight.
+
+
+### Phase 2 Detection depth — Lane C
+
+**Status.** 2.1 partial (the content target is not met and the gate says so),
+2.2, 2.3, 2.4 and 2.5 shipped. Five pull-request-sized commits on
+`depth2/lane-c-detection`.
+
+#### 2.1 Content depth — PARTIAL, 569 of 800
+
+**Reproduced first.** The depth plan's own counting rule (products grouped
+into cloud / identity / SaaS / code) measured **443** on the base commit
+`4bb84f0`, against the plan's note of "about 358". The difference is the
+grouping, not the tree: the first depth plan grouped `log_source` values out
+of `marketplace/index.json`, which carries no `log_source` for the 1,770
+imported rules. The grouping is now pinned in code in
+`scripts/project_stats.py::SCENARIO_GROUPS` so the figure stops being
+re-derivable two ways, and every product outside the four groups is printed
+as `other` rather than dropped, so the breakdown and the headline reconcile.
+
+**Measured: 443 → 569.** `make stats` publishes it, `--check` ratchets it at
+the floor and prints the 231-rule shortfall against 800 on every run. The
+gate does **not** assert 800; a gate asserting a number the tree does not
+have is simply red, and the claim-matrix row is PARTIAL with the
+return-to-GATED condition stated.
+
+**Why the target was not reached.** Closing it needs roughly 380 more rules
+concentrated in GCP (+81), Azure including Entra (+76), Kubernetes (+23),
+GitHub and GitLab (+29) and the SaaS sources at their 20-rule minimums. The
+rules shipped here were held to the standard the plan sets — every one
+replayed through its real connector and the real engine and observed to fire
+— and that standard, not the authoring, is the cost. Writing the remainder
+without it would have raised the number and lowered what it means.
+
+**What shipped.** 86 executable rules in six declared families:
+`workspace-takeover` (21), `third-party-access` (24), `saas-data-movement`
+(24), `saas-authentication-abuse` (10), `apps-script-impersonation` (4),
+`long-horizon-identity` (4, from 2.2) and `api-behaviour` (3, from 2.4). The
+family is declared on the spec and travels into the artefact the engine
+loads, so the console and `make stats` read one string rather than guessing
+from a slug.
+
+**The enabling work was connector-side, and it is the finding of this item.**
+Seven connectors were dropping the fields their own rules would need,
+because the engine flattens `raw_event` exactly one level and the vendors
+nest two or three deep: Slack's signing-in address is `context.ip_address`
+and an app's scopes are `entity.app.scopes`; Workspace puts the OAuth scopes
+a consent granted and the visibility a share opened inside
+`events[].parameters`, and `events` is a *list*; a Cloud Audit method is
+`protoPayload.methodName`. `scripts/check_connector_field_lift.py` pins 36
+lifted fields and, run against a detached worktree at the pre-fix commit,
+exits 1 naming **35 of the 36**.
+
+**Refused, with reasons.**
+
+| Refused | Reason |
+|---|---|
+| The plan's "recovery email or phone changed, then the password, within minutes" as a single rule | A sequence, and the windowed engine counts without ordering. 24 rules were already refused on that ground. Routed to 2.3, where the pair accumulates and the finding lists both halves in arrival order |
+| Zoom's 20-rule minimum | No Zoom connector exists in the tree. The plan lists Zoom among "SaaS sources with a connector"; the tree disagrees and the tree wins |
+| ServiceNow's 20-rule minimum | The connector reads the `incident` table only. Platform-audit detections (`sys_audit`, role grants, ACL changes) have no source until the connector collects them |
+| Workspace app-specific-password, mailbox-delegation and recovery-change *admin* variants | Could not confirm the activity names against Google's reference. `scripts/vendor_event_vocabulary.py` would have rejected them, which is the gate working |
+
+**Not vacuous, proven twice.** Reverting one connector lift reds 15 Slack
+rules in `check_scenario_family_alignment.py`; an invented action name
+(`slack.app_install` for `slack.app_installed`) is rejected by the
+vocabulary arm, which is the `deploy_key.create` defect class.
+
+**A defect found on the way.** Allocating ids for the new rules collided
+with **44 orphan YAML files** left by an earlier generation run — ids no
+spec owns, which `generate_detections.py` has never deleted. Harmless until
+the lock reissues the number, and then not: `detection_truth_table.py`
+classifies a file as executable by asking whether its id is in the engine's
+set, so two files sharing one id are counted twice. Four collided
+immediately and the truth table published **2,617 against an engine loading
+2,613**. Deleted, with `scripts/check_detection_yaml_orphans.py` refusing
+both an unowned id and a duplicated one.
+
+**Counts moved together:** executable 2,530 → **2,620**; on disk 7,015 →
+**7,061**. README, `REPOSITORY_REALITY.md`, the claim matrix, `llms.txt`,
+`llms-full.txt`, the truth table, corpus stats and the marketplace index.
+Unreachable rules unchanged at the floor of **2**.
+
+#### 2.2 Long-horizon identity attacks — shipped
+
+`services/fusion/app/services/long_horizon_identity.py` accumulates distinct
+source ASNs, countries and IPs per account per day over 30 days, on the
+baseline store rather than the windowed engine exactly as the plan requires.
+The discriminator is the shape, not the count: an attack widens the set of
+networks that *fail* while the succeeding set stays small, a traveller
+widens both. Folded into the namespace by `evaluate_async`; four rules read
+it. Absent-not-zero throughout — an account with fewer than three active
+days publishes no key, and the ratio is *undefined* rather than enormous
+when no success was observed, so a dormant account cannot fire it.
+
+**Thresholds are a rationale, not a measurement, and say so.**
+`scripts/derive_long_horizon_thresholds.py` surveyed 502 events across both
+telemetry corpora and found **0** carrying an account, a source network and
+an outcome together, so it refuses to publish a derived number and writes
+`measured: false` with the return-to-measured condition.
+
+#### 2.3 Weak-signal aggregation — shipped
+
+`services/fusion/app/services/weak_signals.py`. Eleven signal kinds
+accumulate per session and per principal inside an hour; past a strength
+threshold they become one finding listing every contributor and its weight.
+The plan's invariant — one geography or ASN change alone is never a finding
+— is a property of the weight table asserted by a test over *every* weight,
+so a future signal added above the threshold fails rather than ships.
+`MIN_DISTINCT_KINDS` stops one noisy integration repeating its way past it,
+and strength counts each kind once plus a small increment for repeats so
+forty copies of one risk event cannot outscore a four-kind sequence.
+Severity is the strongest contributor on the five-tier ladder; confidence is
+a separate 0–100.
+
+**The threshold is a rationale, not a calibration.**
+`scripts/calibrate_weak_signals.py` loads all 72 balanced corpus items (36
+malicious, 36 benign) and refuses to publish a sweep: the corpus carries
+vendor alert *evidence* while every signal here is produced by fusion's
+enrichment, so all 72 score 0.0. Publishing `recall 0.0000` would have
+stated "the aggregator detects nothing" having measured "this corpus carries
+none of its inputs". See D5.
+
+#### 2.4 API behaviour — shipped
+
+`services/fusion/app/services/api_behaviour.py` templates request paths,
+learns parameter names, coarse value types and status codes per template,
+and raises unknown-parameter, type-change and identifier-enumeration
+signals. Off by default per tenant, checked before any store call. Three
+rules read it. Templating is conservative in both directions and a test pins
+both: identifiers are replaced, words are not, however unusual they look.
+
+#### 2.5 Detection engineering agent — shipped as the missing half
+
+The governed flow already existed end to end (propose, evaluate, backtest,
+decide with a separate approver, promote). What it never had was a reason to
+start. `services/api/app/services/detection_coverage_gaps.py` ranks gaps
+against the connectors **this tenant** has enabled, joining two things the
+tree already knew and nothing had joined. Exposed read-only at
+`GET /api/v1/detection-proposals/coverage-gaps`.
+
+It deliberately does not write a proposal: ranking a gap and drafting a rule
+are different authorities, and the drafting path's separate-approver
+requirement would be meaningless if the ranker could reach past it. A test
+proves the compiled corpus is readable *from the API service* — a zero there
+would report every connected source as uncovered, which is the most alarming
+possible way to be broken.
+
+### D5 — two thresholds this phase publishes are rationales, not measurements
+
+Both derivation scripts refuse rather than publish a number. 2.2's has no
+corpus carrying an account, a source network and an outcome together; 2.3's
+has a balanced corpus of the right size whose items carry vendor alert
+evidence rather than enriched events, so every one scores zero on a
+mechanism that reads fusion's enrichment output.
+
+The shape is worth recording because the second is the more dangerous: the
+sweep *runs*, over 72 correctly-labelled items, and produces `recall
+0.0000` at every threshold. Published, a reader concludes the aggregator was
+graded and failed. Both artefacts carry `measured: false`, the reason, and
+the condition that returns them to measured.
+
+### D6 — the depth plan's SaaS minimums name two sources the tree cannot feed
+
+Depth 3.6 lists Zoom among "every SaaS source with a connector"; there is no
+Zoom connector. ServiceNow has one, but it reads the `incident` table only,
+so the platform-audit events a detection would clause on are not collected.
+Both minimums are refused rather than met with rules nothing can feed, and
+both are named in the 2.1 refusal table above.
+
+### Phase 2 second pass — closing 3.6, and the orphan disposition confirmed
+
+#### 2.1 closed: 569 → 907 cloud/identity/SaaS/code conditions
+
+The first pass named the blocker as authoring effort rather than
+impossibility. It was, and the effort closed it. **338 new executable rules**
+across GCP, Entra, Kubernetes, AWS, GitHub, GitLab, M365, Okta, Atlassian,
+Box, Dropbox, 1Password, Salesforce and Snowflake, every one replayed
+through its real connector and the real engine and watched to fire.
+
+| Group | Before | After |
+|---|---|---|
+| cloud | 301 | **494** |
+| identity | 138 | **152** |
+| saas | 119 | **208** |
+| code | 11 | **53** |
+| **total** | **569** | **907** |
+
+Per-source minimums, all met: aws 120/120, gcp 121/120, azure 151/150,
+kubernetes 63/60, okta 63/60, github+gitlab 51/40, and every SaaS source
+with a connector at or above 20.
+
+`make stats --check` now **asserts** the 800 target as well as ratcheting
+the measured floor at 907. The shortfall line still prints every run — that
+property is what made the earlier PARTIAL honest, and a reader needs the
+headroom. The matrix row moved PARTIAL → GATED by reaching the target, not
+by relabelling.
+
+**Proof, not assertion.** `check_scenario_family_alignment.py` covers **421
+rules across 16 products**, up from 83 across 8. Each spec in
+`detection_specs_part6_coverage.py` carries the vendor envelope that proves
+it, written in the vendor's own nesting — a rule clausing on `new_value` is
+proven by a payload carrying it three levels down inside
+`targetResources[0].modifiedProperties[0].newValue`, which a clause-derived
+sample would never have. Keeping proof and rule adjacent means a rule edited
+without its proof fails immediately.
+
+**Four more connector lifts**, same class as the first seven: Entra puts the
+account a role was granted to inside `targetResources` with the role itself
+nested again; M365 puts the address an inbox rule forwards to inside
+`Parameters`; GitLab's `details` dict held the object acted on and its
+`event_type` carries spaces; Confluence's `event_type` carries the audit
+category, grouping every permission change in the site under one value.
+`check_connector_field_lift.py` now pins **61 fields across 10 connectors**
+and, against a detached worktree at `origin/main`, exits 1 naming **59 of
+the 61**.
+
+**The CloudTrail proof is worth recording.** The connector reads the
+*LookupEvents* envelope, taking `EventName` from the envelope and everything
+else out of `CloudTrailEvent`, a JSON string. A sample shaped like a raw
+CloudTrail record normalises with `event_name` empty and every identity
+field `None`. That was the first attempt at the AWS proof, and the replay is
+what caught it — a clause-derived fixture would have passed.
+
+**Refused in this round.**
+
+|---|---|
+| `aws-config-recorder-stopped`, `aws-guardduty-detector-deleted` | Both conditions already have a rule in the cloud corpus. Dropped rather than renamed: a second rule for one condition is noise, and renaming to dodge a collision is how a corpus grows duplicates |
+| Zoom, ServiceNow, four Workspace admin variants | The first pass's refusals, unchanged. Zoom has no connector; ServiceNow's reads the `incident` table only; the four Workspace activity names could not be confirmed against Google's reference and the vocabulary gate would reject them |
+| A vocabulary arm over the pre-existing AWS corpus | `AWS_EVENTS` transcribes only the names this pass introduced. Applying a partial transcription to the older AWS rules would report every one of them as unknown, so the arm is scoped to the specs the gate walks and the limit is stated in the module rather than left for a reader to infer |
+
+#### The 44 orphan YAML files: disposition confirmed, and a second defect in the same class
+
+The files were **deleted in the first pass**, not merely diagnosed. Evidence:
+
+* 60 deletions under `detections/` in commit `91baf368d` (44 rule files plus
+  their directory companions);
+* `check_detection_yaml_orphans.py` reports **OK — 7,403 rule files, every
+  id owned by one file**;
+* the truth table and the engine agree at **2,962**, where they read 2,617
+  against 2,613 before the cleanup;
+* the gate is wired into `validate-detections.yml`, which it was not when
+  the first pass's claim-matrix rows named `ci.yml :: python-lint`. That was
+  a false gate reference and `check_gate_coverage.py` found it, along with
+  two more scripts of mine nothing invoked.
+
+The second pass found a **second defect in the same class**: a slug used
+twice in one category writes **one** YAML and exports **two** engine rules,
+so the published total exceeds the file count by the number of collisions.
+It surfaced on this branch's own AWS batch. The gate now refuses all three
+shapes — an unowned `det-*` id, a duplicated id, and a duplicated
+`(category, slug)`.
+
+A **third** shape appeared at merge time and is not a gate failure but a
+lane-coordination one: `detections/rule-ids.lock.json` is first-come across
+lanes exactly like a migration number, and Lane E and this lane both
+allocated `det-application-087` through `090`. The JSON merge kept both
+keys. Lane E landed on `main` first, so its ids stand and this lane's four
+were released and re-allocated — an id that has shipped must never move.
+
+### D7 — a gate nothing runs is a claim, and three of mine were
+
+The first pass's claim-matrix rows named `ci.yml :: python-lint` as the gate
+for `check_scenario_family_alignment`, `check_connector_field_lift`,
+`check_detection_yaml_orphans` and `project_stats --check`. None of the four
+ran in any workflow. `check_gate_coverage.py` found them and two more I had
+not thought of as gates at all — `calibrate_weak_signals` and
+`derive_long_horizon_thresholds` both have `--check` modes, which is what
+makes them gates. All six are wired into `validate-detections.yml` and the
+matrix rows name the workflow that actually runs them.
 ### 7.3 — Agent identity and per-agent baselines (depth 6.4 / parity 6.7)
 
 [#1601](https://github.com/beenuar/AiSOC/pull/1601), base `main`.

@@ -37,8 +37,10 @@ from app.models.case import Case
 from app.models.connector import Connector
 from app.models.detection_rule import DetectionRule
 from app.models.remediation import RemediationGateLog
+from app.models.sla import AlertSLAEvent
 from app.services import case_status
-from app.services.alert_status import RESOLVED_STATUSES, UNRESOLVED_STATUSES
+from app.services.alert_disposition import decided_filter
+from app.services.alert_status import resolved_filter, unresolved_filter
 from app.services.resolution_time import (
     MTTR_WINDOW,
     tenant_case_mttr_minutes,
@@ -162,11 +164,15 @@ class FunnelMetrics(BaseModel):
     """Tenant funnel + efficiency for the selected period.
 
     All counts are absolute for ``period``. ``signal_to_noise`` is the
-    fraction of *resolved* alerts that ended in disposition ``true_positive``
-    (i.e. signal / (signal + noise)). ``mttd_seconds`` mirrors /metrics/soc's
-    MTTD definition (Alert.created_at → Alert.first_seen_at) but expressed in
-    seconds for funnel-level precision. ``deltas`` compares this period to the
-    immediately preceding period of the same length.
+    fraction of *decided* verdicts that ended in disposition
+    ``true_positive`` (i.e. signal / (signal + noise)); alerts the agent
+    abstained on with ``needs_review`` are in neither half, because scoring
+    an agent on questions it refused to answer is not an accuracy figure.
+    ``mttd_seconds`` mirrors /metrics/soc's MTTD definition
+    (Alert.created_at → Alert.first_seen_at) but expressed in seconds for
+    funnel-level precision. Each of those two travels with the count of rows
+    it was computed over -- read them as a pair. ``deltas`` compares this
+    period to the immediately preceding period of the same length.
     """
 
     period: str
@@ -175,6 +181,22 @@ class FunnelMetrics(BaseModel):
     alerts_generated: int
     signal_to_noise: float
     mttd_seconds: float
+    # How many rows each figure above was computed over.
+    #
+    # `signal_to_noise` is `x / n if n else 0.0` and `mttd_seconds` was
+    # `float(None or 0.0)` — the two shapes that publish an undefined value
+    # as a confident zero. Both rendered on the console ("Signal / Noise
+    # 0%", "MTTD 0s") directly above a SOC card correctly reading "MTTD —
+    # not measured · no closures in 7d". The honest treatment had been
+    # applied to `FunnelDeltas`, whose fields are `float | None` for exactly
+    # this reason, and not to the values the deltas describe.
+    #
+    # Additive rather than making the two nullable, which is a breaking
+    # response change for every existing client — the same decision
+    # `SOCKpis` took with `mttd_sample_count`. A client that ignores these
+    # sees exactly what it saw before.
+    signal_to_noise_sample_count: int = 0
+    mttd_sample_count: int = 0
     analyst_queue_depth: int
     correlation_efficiency: float
     alert_yield: float
@@ -230,6 +252,16 @@ class PipelineStage(BaseModel):
     p95_latency_ms: float
     error_rate: float
     status: str
+    #: What this stage *did* observe, when the observation is not a backlog.
+    #:
+    #: `correlate` reported `backlog = <alerts that absorbed exactly one
+    #: event>` and the console rendered it as "Backlog 7", telling an
+    #: operator seven items were queued when nothing was. That count is a
+    #: correlation *outcome*, not a queue depth, and fusion emits no
+    #: per-correlation queue depth at all -- so `backlog` is now named in
+    #: `unmeasured` and the real observation travels here under its own
+    #: description.
+    detail: str | None = None
     #: Names of the numeric fields above this stage could not measure. Those
     #: fields still carry ``0`` for compatibility, and ``0`` is the most
     #: reassuring number a pipeline panel can show — an operator reads
@@ -281,11 +313,19 @@ async def _count_alerts_by_status(db, tenant_id) -> dict[str, int]:
     tile being the odd one out is exactly how one rule written five times
     drifts: each site looks locally correct.
 
+    Centralising it was necessary and not sufficient: the shared tuple was an
+    *inclusion* list of three states, so `triaged` -- written by the
+    auto-triage worker on every alert it looks at -- landed in neither bucket
+    and every tile here read 0 on a nine-alert queue. The predicate is now
+    `unresolved_filter`, i.e. "not terminal", which is the same rule
+    `is_unresolved()` applies and the reason a status nobody declared still
+    counts as work.
+
     `resolved` is returned alongside rather than dropped. Narrowing the active
     tile must not lose the number, because "how much did we close" is a real
     question.
     """
-    unresolved = Alert.status.in_(UNRESOLVED_STATUSES)
+    unresolved = unresolved_filter(Alert.status)
     scope = Alert.tenant_id == tenant_id
 
     async def _n(*predicates) -> int:
@@ -293,7 +333,7 @@ async def _count_alerts_by_status(db, tenant_id) -> dict[str, int]:
 
     return {
         "open": await _n(unresolved),
-        "resolved": await _n(Alert.status.in_(RESOLVED_STATUSES)),
+        "resolved": await _n(resolved_filter(Alert.status)),
         "new": await _n(Alert.status == "new"),
         "critical": await _n(unresolved, Alert.severity == "critical"),
         "high": await _n(unresolved, Alert.severity == "high"),
@@ -536,7 +576,18 @@ class SOCKpis(BaseModel):
     alert_volume_7d: int
     cases_opened_7d: int
     cases_closed_7d: int
+    #: Alerts a **human** dispositioned in the window, counted from the
+    #: lifecycle events that carry an actor id. It used to count every alert
+    #: with a disposition, which the auto-triage worker writes on everything
+    #: it looks at -- so the console read "Analyst Overrides (7d) 9" on a
+    #: deployment where nobody had clicked anything. An override is a human
+    #: disagreeing with the agent; the agent agreeing with itself is not one.
     analyst_overrides_7d: int
+    #: The agent's own dispositions over the same window. Reported rather
+    #: than dropped: narrowing the tile above must not lose the number, and
+    #: "how much did the agent decide" is a real question with its own
+    #: answer.
+    ai_dispositions_7d: int = 0
     # How many rows each mean was averaged over.
     #
     # An average over zero rows is not zero, it is unmeasured, and these three
@@ -584,6 +635,67 @@ class SOCMetrics(BaseModel):
     kpis: SOCKpis
     attack_heatmap: list[AttackHeatmapCell]
     calibration_curve: list[CalibrationBucket]
+
+
+async def _soc_disposition_counts(db, tenant_id, window_start: datetime) -> dict[str, int]:
+    """Who decided what, split by whether a human was involved.
+
+    Three figures that were all computed from ``disposition IS NOT NULL``:
+
+    ``decided``
+        Alerts somebody reached a conclusion about. The denominator of the
+        false-positive rate. ``needs_review`` is excluded because it is the
+        agent declining to decide, and a rate that counts abstentions scores
+        the agent on questions it refused to answer. The same predicate
+        ``/metrics/funnel`` has always used, imported rather than re-typed so
+        the two cannot answer differently again.
+
+    ``analyst_overrides``
+        Alerts a **human** dispositioned. Read from ``alert_sla_events``,
+        which is the only place in the schema that records *who* acted: the
+        alert row carries a disposition and no author, so "an analyst
+        disagreed" and "the worker wrote a verdict" are indistinguishable on
+        it. Both analyst paths write one of these with the acting user's id
+        -- claiming an alert and overriding a verdict -- and the backfilled
+        ``detected`` row carries no actor, so it is not mistaken for one.
+
+    ``ai_dispositions``
+        The remainder: dispositioned, with no human lifecycle event.
+    """
+    dispositioned = and_(
+        Alert.tenant_id == tenant_id,
+        Alert.disposition.isnot(None),
+        Alert.updated_at >= window_start,
+    )
+
+    decided = int(
+        await db.scalar(
+            select(func.count()).where(
+                and_(
+                    Alert.tenant_id == tenant_id,
+                    decided_filter(Alert.disposition),
+                    Alert.created_at >= window_start,
+                )
+            )
+        )
+        or 0
+    )
+
+    human_alerts = select(AlertSLAEvent.alert_id).where(
+        and_(
+            AlertSLAEvent.tenant_id == tenant_id,
+            AlertSLAEvent.actor_id.isnot(None),
+            AlertSLAEvent.occurred_at >= window_start,
+        )
+    )
+    analyst_overrides = int(await db.scalar(select(func.count()).where(and_(dispositioned, Alert.id.in_(human_alerts)))) or 0)
+    dispositioned_total = int(await db.scalar(select(func.count()).where(dispositioned)) or 0)
+
+    return {
+        "decided": decided,
+        "analyst_overrides": analyst_overrides,
+        "ai_dispositions": dispositioned_total - analyst_overrides,
+    }
 
 
 @router.get("/soc", response_model=SOCMetrics)
@@ -650,19 +762,13 @@ async def get_soc_metrics(
     mttc_hours = float(mttc_q or 0.0)
 
     # ── FPR ───────────────────────────────────────────────────────────────────
-    # False-positive dispositions / total resolved-and-dispositioned alerts.
-    total_resolved = (
-        await db.scalar(
-            select(func.count()).where(
-                and_(
-                    Alert.tenant_id == tenant_id,
-                    Alert.disposition.isnot(None),
-                    Alert.created_at >= week_start,
-                )
-            )
-        )
-        or 0
-    )
+    # False-positive dispositions / alerts somebody reached a conclusion
+    # about. The denominator was `disposition IS NOT NULL`, which includes
+    # `needs_review` -- the agent saying it could not tell -- so a tenant
+    # whose nine alerts were all abstained on got "0.0% over 5 resolved
+    # alerts" while `/metrics/funnel` computed the same ratio over zero.
+    decided_counts = await _soc_disposition_counts(db, tenant_id, week_start)
+    total_resolved = decided_counts["decided"]
     fp_count = (
         await db.scalar(
             select(func.count()).where(
@@ -716,19 +822,12 @@ async def get_soc_metrics(
     cases_closed = await tenant_cases_closed(db, tenant_id, week_start)
 
     # ── Analyst overrides (7d) ────────────────────────────────────────────────
-    # Any alert with a disposition set in the last 7 days = analyst weighed in.
-    overrides_q = (
-        await db.scalar(
-            select(func.count()).where(
-                and_(
-                    Alert.tenant_id == tenant_id,
-                    Alert.disposition.isnot(None),
-                    Alert.updated_at >= week_start,
-                )
-            )
-        )
-        or 0
-    )
+    # Computed in `_soc_disposition_counts` above, from the lifecycle events
+    # that carry an actor. The filter here used to be "any alert with a
+    # disposition", which the auto-triage worker sets on every alert it
+    # looks at -- so a deployment on which no human had clicked anything
+    # reported nine analyst overrides.
+    overrides_q = decided_counts["analyst_overrides"]
 
     kpis = SOCKpis(
         mttd_hours=round(mttd_hours, 2),
@@ -740,6 +839,7 @@ async def get_soc_metrics(
         cases_opened_7d=cases_opened,
         cases_closed_7d=cases_closed,
         analyst_overrides_7d=overrides_q,
+        ai_dispositions_7d=decided_counts["ai_dispositions"],
         mttd_sample_count=mttd_samples,
         mttr_sample_count=mttr_samples,
         mttc_sample_count=mttc_samples,
@@ -1109,10 +1209,14 @@ async def _funnel_window(db, tenant_id, start, end, *, mitre_total: int) -> dict
         or 0
     )
 
-    # Signal-to-noise: of *resolved* alerts in the window, what fraction
-    # ended in disposition='true_positive'? Closed alerts with no disposition
-    # are excluded from both numerator and denominator so the ratio reflects
-    # analyst judgement, not lifecycle state.
+    # Signal-to-noise: of the alerts in the window that someone reached a
+    # conclusion about, what fraction ended in disposition='true_positive'?
+    # Alerts with no disposition, and alerts the agent explicitly abstained
+    # on, are excluded from both numerator and denominator so the ratio
+    # reflects judgement rather than lifecycle state. The predicate is
+    # `alert_disposition`'s rather than a local tuple -- /metrics/soc and
+    # /dashboards/soc-insights both asked this question with
+    # `disposition IS NOT NULL` and got a different answer from this one.
     sig_total = (
         await db.scalar(
             select(func.count()).where(
@@ -1120,7 +1224,7 @@ async def _funnel_window(db, tenant_id, start, end, *, mitre_total: int) -> dict
                     Alert.tenant_id == tenant_id,
                     Alert.created_at >= start,
                     Alert.created_at < end,
-                    Alert.disposition.in_(("true_positive", "false_positive", "benign", "duplicate")),
+                    decided_filter(Alert.disposition),
                 )
             )
         )
@@ -1139,30 +1243,42 @@ async def _funnel_window(db, tenant_id, start, end, *, mitre_total: int) -> dict
         )
         or 0
     )
+    # 0.0 here is explicitly *not* a measurement. `signal_to_noise_sample_count`
+    # below carries the denominator and the console renders "not measured"
+    # when it is zero, which is what /metrics/soc already did and this
+    # surface did not: the two sat on one screen, one saying "MTTD — not
+    # measured · no closures in 7d" and the other "Signal / Noise 0%".
     signal_to_noise = round((sig_tp / sig_total), 4) if sig_total else 0.0
 
     # MTTD in seconds for alerts created in this window that have been seen.
-    mttd_seconds_raw = await db.scalar(
-        select(func.avg(func.extract("epoch", Alert.first_seen_at - Alert.created_at))).where(
-            and_(
-                Alert.tenant_id == tenant_id,
-                Alert.first_seen_at.isnot(None),
-                Alert.created_at >= start,
-                Alert.created_at < end,
-            )
-        )
+    #
+    # Nothing in the pipeline writes `first_seen_at`: its only writers are
+    # analyst actions, so this is structurally 0.0 until somebody
+    # acknowledges an alert. `float(None or 0.0)` published that as
+    # instant detection; the sample count beside it is how a reader tells
+    # "we detect in 0 seconds" from "nobody has looked yet".
+    mttd_filters = and_(
+        Alert.tenant_id == tenant_id,
+        Alert.first_seen_at.isnot(None),
+        Alert.created_at >= start,
+        Alert.created_at < end,
     )
-    mttd_seconds = round(float(mttd_seconds_raw or 0.0), 2)
+    mttd_seconds_raw = await db.scalar(select(func.avg(func.extract("epoch", Alert.first_seen_at - Alert.created_at))).where(mttd_filters))
+    mttd_samples = int(await db.scalar(select(func.count()).where(mttd_filters)) or 0)
+    mttd_seconds = round(float(mttd_seconds_raw), 2) if mttd_seconds_raw is not None and mttd_samples else 0.0
 
     # Analyst queue depth = open alerts (snapshot, not window-bound) that an
-    # analyst would see in their queue right now: status in {new, triaging,
-    # in_progress} and no disposition.
+    # analyst would see in their queue right now: not in a terminal state and
+    # no disposition. The predicate is the shared one rather than a fourth
+    # hand-written copy -- this site named three states and missed `triaged`,
+    # which is what let the funnel and the dashboard tile disagree about the
+    # same rows on one screen.
     analyst_queue_depth = (
         await db.scalar(
             select(func.count()).where(
                 and_(
                     Alert.tenant_id == tenant_id,
-                    Alert.status.in_(("new", "triaging", "in_progress")),
+                    unresolved_filter(Alert.status),
                     Alert.disposition.is_(None),
                 )
             )
@@ -1205,7 +1321,9 @@ async def _funnel_window(db, tenant_id, start, end, *, mitre_total: int) -> dict
         "correlation_instances": int(correlation_instances),
         "alerts_generated": int(alerts_generated),
         "signal_to_noise": signal_to_noise,
+        "signal_to_noise_sample_count": int(sig_total),
         "mttd_seconds": mttd_seconds,
+        "mttd_sample_count": mttd_samples,
         "analyst_queue_depth": int(analyst_queue_depth),
         "correlation_efficiency": correlation_efficiency,
         "alert_yield": alert_yield,
@@ -1291,8 +1409,20 @@ async def get_funnel_metrics(
         events_of_interest=_pct_delta(current["events_of_interest"], previous["events_of_interest"]),
         correlation_instances=_pct_delta(current["correlation_instances"], previous["correlation_instances"]),
         alerts_generated=_pct_delta(current["alerts_generated"], previous["alerts_generated"]),
-        signal_to_noise=_pct_delta(current["signal_to_noise"], previous["signal_to_noise"]),
-        mttd_seconds=_pct_delta(current["mttd_seconds"], previous["mttd_seconds"]),
+        # `None` when either window measured nothing: a delta between two
+        # values that were never measured is not a change, and `_pct_delta`
+        # on two zeros answers 0.0% — "flat", which reads as a stable
+        # measurement rather than an absent one.
+        signal_to_noise=(
+            _pct_delta(current["signal_to_noise"], previous["signal_to_noise"])
+            if current["signal_to_noise_sample_count"] and previous["signal_to_noise_sample_count"]
+            else None
+        ),
+        mttd_seconds=(
+            _pct_delta(current["mttd_seconds"], previous["mttd_seconds"])
+            if current["mttd_sample_count"] and previous["mttd_sample_count"]
+            else None
+        ),
         analyst_queue_depth=_pct_delta(current["analyst_queue_depth"], previous["analyst_queue_depth"]),
     )
 
@@ -1302,7 +1432,9 @@ async def get_funnel_metrics(
         correlation_instances=current["correlation_instances"],
         alerts_generated=current["alerts_generated"],
         signal_to_noise=current["signal_to_noise"],
+        signal_to_noise_sample_count=current.get("signal_to_noise_sample_count", 0),
         mttd_seconds=current["mttd_seconds"],
+        mttd_sample_count=current.get("mttd_sample_count", 0),
         analyst_queue_depth=current["analyst_queue_depth"],
         correlation_efficiency=current["correlation_efficiency"],
         alert_yield=current["alert_yield"],

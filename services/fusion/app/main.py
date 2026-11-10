@@ -16,6 +16,7 @@ from app.services.ai_asset_recorder import AiAssetRecorder
 from app.services.alert_enricher import AlertEnricher
 from app.services.alert_outbox import AlertNotificationOutbox
 from app.services.alert_sink import AlertSink
+from app.services.api_behaviour import ApiBehaviourProfiler
 from app.services.asset_context import AssetContextResolver
 from app.services.attack_chain_grouper import AttackChainGrouper
 from app.services.baselines import BaselineStore
@@ -30,26 +31,35 @@ from app.services.fusion_engine import FusionEngine
 from app.services.identity_privilege_context import IdentityPrivilegeResolver
 from app.services.ioc_match import TenantIocMatcher
 from app.services.lake_writer import LakeWriter
+from app.services.long_horizon_identity import LongHorizonIdentityStore
 from app.services.sessions import SessionStore
 from app.services.tenant_overlay import OverlayCache
 from app.services.ueba_signal import UebaSignalCache
+from app.services.weak_signals import WeakSignalAggregator
 from app.services.windowed_detection import WindowedDetectionEngine
 from app.workers.consumer import FusionWorker
 
 
 def _log_worker_exit(task: asyncio.Task) -> None:
-    """Say why the consume loop stopped, whatever the reason.
+    """Say why supervision stopped, whatever the reason.
 
     A worker that ends cleanly is as much of a problem as one that raises:
     either way nothing is consuming ``raw_events`` any more, and both used to
     be silent.
+
+    This task runs ``FusionWorker.start()``, which supervises, so reaching
+    here is no longer "one consume loop ended". A transient broker fault is
+    retried without the task completing at all; the task finishes only on a
+    clean shutdown, on a failure classified as permanent (already logged with
+    the operator action), or on a bug in the supervisor itself. The last of
+    those is the one with nothing else reporting it, which is why this stays.
     """
     if task.cancelled():
         logger.info("fusion.worker_cancelled")
         return
     exc = task.exception()
     if exc is None:
-        logger.error("fusion.worker_exited", detail="consume loop returned; the subscription is gone")
+        logger.error("fusion.worker_exited", detail="supervision returned; the subscription is gone")
         return
     logger.error("fusion.worker_died", error=str(exc), error_type=type(exc).__name__, exc_info=exc)
 
@@ -157,6 +167,16 @@ async def lifespan(app: FastAPI):
     # same Redis. ADR-0011 records why this is a fusion module rather than
     # the `full`-profile UEBA service.
     baselines = BaselineStore(redis_client)
+    # Wave 2 items 2.2, 2.3 and 2.4 — three more stores on the same Redis.
+    # Each was built, tested and reachable from nothing, which is the defect
+    # `scripts/check_module_reachability.py` exists to name: a passing test
+    # on an uncalled module is indistinguishable from a working feature.
+    long_horizon = LongHorizonIdentityStore(redis_client) if settings.long_horizon_identity_enabled else None
+    weak_signals = WeakSignalAggregator(redis_client) if settings.weak_signal_aggregation_enabled else None
+    # Opt-in per tenant rather than a global switch: `enabled` is consulted
+    # before any Redis call, so an unconfigured deployment pays one set
+    # membership test per event and nothing else.
+    api_behaviour = ApiBehaviourProfiler(redis_client, enabled_for=settings.api_behaviour_tenant_set)
     # Dead letters go to Postgres so they can be read back. Until now the
     # worker defaulted to LoggingDLQ, so a dropped event produced a log
     # line and nothing else — and an invisible drop is indistinguishable
@@ -221,6 +241,9 @@ async def lifespan(app: FastAPI):
         windowed_detector=windowed_detector,
         first_seen=first_seen,
         baselines=baselines,
+        long_horizon=long_horizon,
+        api_behaviour=api_behaviour,
+        weak_signals=weak_signals,
         # Parity 5.4. Per-tenant detection tuning as a versioned overlay
         # with hot reload. Without it the engine evaluated the shared
         # corpus and nothing else, so a tenant who disabled a noisy rule
@@ -239,11 +262,20 @@ async def lifespan(app: FastAPI):
 
     # Start Kafka worker as a background task.
     #
-    # The done-callback is what makes a dead worker findable. The task is held
-    # on app.state, so it is never garbage-collected and asyncio never emits
-    # its "Task exception was never retrieved" warning — without this, a
-    # consume loop that died took the reason with it. The matching readiness
-    # probe below is what stops /readyz answering 200 afterwards.
+    # `start()` supervises: a transient Kafka failure is retried with capped
+    # backoff, so this task now ends only on a clean stop or on a failure no
+    # retry can clear. That makes the done-callback rarer and more
+    # significant than it was — it used to fire for any blip, and now firing
+    # means supervision itself gave up.
+    #
+    # The task is held on app.state, so it is never garbage-collected and
+    # asyncio never emits its "Task exception was never retrieved" warning —
+    # without this, a consume loop that died took the reason with it. The
+    # readiness probe below is what stops /readyz answering 200 afterwards,
+    # and what returns it to 200 when a retry re-attaches: `attached` is
+    # cleared for the whole of a backoff window, so one probe already covers
+    # both directions and a second one reading the same flag would only
+    # publish the same answer under a different name.
     worker_task = asyncio.create_task(worker.start())
     worker_task.add_done_callback(_log_worker_exit)
     register_subscription(app, "alerts+raw_events", lambda: worker.attached)

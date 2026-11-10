@@ -20,7 +20,7 @@ This document describes the end-to-end architecture of the AiSOC platform after 
                        ┌─────────────────┐   ┌──────────────────────┐
                        │  services/api   │   │ services/connectors  │
                        │  inbox tokens + │   │  APScheduler poll    │
-                       │  HMAC webhooks  │   │  90 connector classes│
+                       │  HMAC webhooks  │   │  91 connector classes│
                        │  CEF / HEC / DNS│   │  push_case + status  │
                        └────────┬────────┘   └──────────┬───────────┘
                                 │                       │
@@ -91,7 +91,7 @@ This document describes the end-to-end architecture of the AiSOC platform after 
 | `services/enrichment` | Go 1.21 | Per-IOC TTL-cached enrichment lookups | n/a |
 | `services/fusion` | Python 3.11 | Simhash dedup → correlation → ML scoring → publish fused alerts | Background ML retrain on feedback |
 | `services/api` | Python 3.11 | REST + WS, RBAC, case mgmt, rule engine, graph queries, ITSM webhook inbox, case fan-out | Schema migrations on boot |
-| `services/connectors` | Python 3.11 | 90 connector classes, APScheduler poll, `push_case` / `push_status_change` for Jira & ServiceNow | CredentialVault decrypt at poll time |
+| `services/connectors` | Python 3.11 | 91 connector classes, APScheduler poll, `push_case` / `push_status_change` for Jira & ServiceNow | CredentialVault decrypt at poll time |
 | `services/agents` | Python 3.11 | LangGraph multi-agent investigation runs | Loads full ATT&CK STIX bundle on boot, optional Qdrant embed |
 | `services/actions` | Python 3.11 | SOAR action execution with blast-radius gating | Approval workflows |
 | `services/threatintel` | Python 3.11 | IOC/actor search API | APScheduler poll loop for TAXII/MISP/OTX/KEV |
@@ -315,7 +315,7 @@ The following subsystems were added on top of the v2 design described above. The
 
 ### 12.1 Connector Platform (`services/connectors`)
 
-A first-class, in-process polling tier with **90 registered connector classes** spanning seven categories — `edr`, `siem`, `cloud`, `iam`, `saas`, `vcs`, `network`. Every connector subclasses `BaseConnector` and declares:
+A first-class, in-process polling tier with **91 registered connector classes** spanning seven categories — `edr`, `siem`, `cloud`, `iam`, `saas`, `vcs`, `network`. Every connector subclasses `BaseConnector` and declares:
 
 * `schema()` — self-describing `ConnectorSchema(name, label, category, fields, oauth, default_poll_interval_seconds)` consumed by the web console for the connect form.
 * `capabilities()` — tuple of `Capability` enum values (`PULL_ALERTS`, `PUSH_CASE`, `PUSH_STATUS`, `FEDERATED_SEARCH`, …) that the orchestrator inspects at runtime.
@@ -422,17 +422,26 @@ Both detect the OS, install missing prerequisites (git, Docker Engine + Compose 
 → [One-click install (Docusaurus)](../../apps/docs/docs/installation.md)
 → [Quick install reference](../QUICK_INSTALL.md)
 
-### 13.7 Updated Service Inventory (post v2.2)
+### 13.7 Service Inventory
 
-The full set of services in `services/` after v2.2 is:
+The full set of services in `services/` is:
 
 ```
 actions/          agents/           api/              connectors/
-demo-producer/    enrichment/       fusion/           honeytokens/
-ingest/           mcp/              osquery-extensions/  osquery-tls/
-purple-team/      realtime/         slack-bot/        threatintel/
-ueba/
+demo-producer/    enrichment/       escalations/      fusion/
+honeytokens/      ingest/           mcp/              mesh/
+osquery-extensions/  osquery-tls/   purple-team/      realtime/
+slack-bot/        teams-bot/        threatintel/      ueba/
 ```
 
-17 services in total. The `mcp/`, `osquery-extensions/`, `osquery-tls/`, and `slack-bot/` directories are the v2.2 additions; the rest are described in §2 and §12 above.
+20 directories in total. That is a count of source trees, not of running
+containers: a deployment starts 16 on the `core` profile and 22 on `full`
+(21 under the production overlay, which does not run `kafka-ui` beside
+production data), because some directories ship more than one process and
+others are only started by a profile that needs them. Recount with
+`ls -d services/*/` and `python3 scripts/check_profile_service_counts.py`
+rather than trusting this line. The `mcp/`, `osquery-extensions/`,
+`osquery-tls/` and `slack-bot/` directories arrived in v2.2; `escalations/`,
+`mesh/` and `teams-bot/` are later additions. The rest are described in §2
+and §12 above.
 

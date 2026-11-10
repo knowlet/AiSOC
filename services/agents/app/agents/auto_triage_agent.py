@@ -28,6 +28,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app import closure as closure_policy
+from app.agents import reviewer
 from app.agents.dispositions import (
     AUTO_CLOSEABLE_DISPOSITIONS,
     BENIGN,
@@ -41,6 +42,9 @@ from app.closure import authorization as closure_authorization
 from app.closure.qa_sampling import ClosureQaSampler
 from app.confidence import eligibility
 from app.confidence.claim_support import score_claim_support
+from app.context import vendor_evidence as vendor_evidence_module
+from app.context.cloud_posture import basis as posture_basis
+from app.context.cloud_posture import render_for_prompt as render_posture
 from app.context.dispositions import basis as disposition_basis
 from app.context.dispositions import render_for_prompt as render_dispositions
 from app.context.identity import basis as identity_basis
@@ -56,6 +60,8 @@ from app.llm import safe_ainvoke
 from app.llm.factory import make_chat_model
 from app.llm.prompt_registry import prompt_text
 from app.llm.structured_output import extract_json_block
+from app.memory.precedent import Precedent
+from app.memory.precedent import render_for_prompt as render_precedent
 from app.models.state import AgentStatus, InvestigationState
 from app.prompt_serialization import format_extra_fields_for_llm
 from app.prompting.envelope import make_nonce, scan_evidence_fields, system_rule
@@ -204,6 +210,16 @@ def _scannable_fields(state: InvestigationState) -> list[tuple[str, Any]]:
         if isinstance(row, dict):
             fields.append((f"organisation_memory[{index}].statement", row.get("statement")))
 
+    # Depth-2 8.1, and a sixth channel for the same reason as the three above.
+    # A cloud resource name is chosen by whoever created the resource, which
+    # in a compromise is the attacker, and a CNAPP reads it verbatim; a rule
+    # title is vendor text but a custom rule's title is the customer's own
+    # free text. Both reach the preamble, so both are scanned.
+    for index, row in enumerate((state.cloud_posture_context or {}).get("findings") or []):
+        if isinstance(row, dict):
+            fields.append((f"cloud_posture.findings[{index}].rule_title", row.get("rule_title")))
+            fields.append((f"cloud_posture.findings[{index}].resource_name", row.get("resource_name")))
+
     skill = state.tenant_skill or {}
     if skill.get("triage_guidance"):
         fields.append(("tenant_skill.triage_guidance", skill.get("triage_guidance")))
@@ -322,7 +338,22 @@ def _build_alert_context(state: InvestigationState, *, nonce: str) -> str:
     who = render_identity(state.identity_context)
     if who:
         preamble.append(sanitize_text(who, max_len=_MAX_CONTEXT_BLOCK_CHARS))
+    # Depth-2 8.1. The state the resource was already in. A rule title and a
+    # resource name come from the tenant's own CNAPP reading their cloud
+    # estate, where a resource name is attacker-influenced in every provider,
+    # so this takes the same second sanitising pass as the blocks above.
+    posture = render_posture(state.cloud_posture_context)
+    if posture:
+        preamble.append(sanitize_text(posture, max_len=_MAX_CONTEXT_BLOCK_CHARS))
 
+    # Phase 4.4(a). In the preamble rather than the fence, on the same test
+    # the dispositions block passes: every value in it is first-party and
+    # from a closed vocabulary — a disposition the server owns, an author
+    # that is `human` or `ai`, a float, and field names drawn from this
+    # module's own weight table. No tenant or vendor free text reaches it.
+    prior_art = render_precedent(_precedent_of(state))
+    if prior_art:
+        preamble.append(sanitize_text(prior_art, max_len=_MAX_CONTEXT_BLOCK_CHARS))
     # What that principal could do when it acted (depth 2 wave 2, 1.1).
     # First-party like the block above -- it is the platform's own derivation
     # over a posture snapshot, not vendor text -- but sanitised anyway,
@@ -345,15 +376,75 @@ def _build_alert_context(state: InvestigationState, *, nonce: str) -> str:
     if biz:
         preamble.append(sanitize_text(biz, max_len=_MAX_CONTEXT_BLOCK_CHARS))
 
+    # Phase 4.3. The tenant's standing questions and the verdicts computed
+    # for them, which is what puts `app/context/triage_questions.py` on the
+    # path the console already writes questions for.
+    #
+    # Not re-sanitised: the renderer already put every tenant-authored label
+    # through `sanitize_text` and wrapped the block in an `<UNTRUSTED_DATA>`
+    # envelope, and running the sanitiser over the rendered block would
+    # rewrite the markers holding that envelope together — the same rule the
+    # runbook and vendor-evidence blocks below follow, and for the same
+    # reason. The verdicts beside each label were computed deterministically
+    # before this prompt existed, so the free text decides nothing.
+    questions = (state.triage_questions or {}).get("block")
+    if questions:
+        preamble.append(str(questions))
+
     # Not sanitised again on the way in: the retrieval already capped and
     # sanitised each chunk, and `render_runbooks` fences the result. Running
     # `sanitize_text` over the rendered block would rewrite the nonce markers
     # it just placed, which is the one thing holding the fence together.
     runbooks = render_runbooks(state.knowledge_base, nonce=nonce)
 
-    if not preamble and not runbooks:
+    # Phase 4.5. Fenced here for the same reason and with the same rule: the
+    # renderer places the nonce markers, so re-sanitising this block would
+    # rewrite the one thing holding the fence together. A vendor's own
+    # description field carries attacker-influenced text — a file name, a
+    # command line, a repository somebody chose — so it belongs inside the
+    # fence rather than in the first-party preamble above.
+    vendor = vendor_evidence_module.render_for_prompt(_vendor_evidence_of(state), nonce=nonce)
+
+    blocks = [*preamble, *([runbooks] if runbooks else []), *([vendor] if vendor else []), telemetry]
+    if not preamble and not runbooks and not vendor:
         return telemetry
-    return "\n\n".join([*preamble, *([runbooks] if runbooks else []), telemetry])
+    return "\n\n".join(blocks)
+
+
+def _vendor_evidence_of(state: Any) -> Any:
+    """The pre-fetched vendor evidence carried on the state, if any.
+
+    Read through `getattr` so a state built by an older caller — a replay of
+    a run from before 4.5, or a test double — renders no block instead of
+    raising on the hot path.
+    """
+    return getattr(state, "vendor_evidence", None)
+
+
+def _precedent_of(state: Any) -> list[Precedent]:
+    """Rehydrate the precedent carried on the state.
+
+    Stored as plain dicts so the state stays serialisable, the same shape
+    the other context sources use; the renderer wants objects. Read through
+    `getattr` so a state built before 4.4 renders nothing rather than
+    raising on the hot path.
+    """
+    rows = getattr(state, "precedent", None) or []
+    out: list[Precedent] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            Precedent(
+                disposition=str(row.get("disposition") or "unknown"),
+                author=str(row.get("author") or "ai"),
+                count=int(row.get("count") or 1),
+                score=float(row.get("score") or 0.0),
+                matched=[str(m) for m in (row.get("matched_fields") or [])],
+                last_seen=str(row.get("last_seen") or ""),
+            )
+        )
+    return out
 
 
 def _render_business_context(bc: dict[str, Any] | None) -> str:
@@ -681,6 +772,7 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
     state.confidence_basis.extend(citation_basis(state.knowledge_base))
     state.confidence_basis.extend(disposition_basis(state.recent_dispositions))
     state.confidence_basis.extend(identity_basis(state.identity_context))
+    state.confidence_basis.extend(posture_basis(state.cloud_posture_context))
     # Depth 2 wave 2, 1.1. Every line here names the tool that produced
     # it, so an auditor can match the claim to a `tool_call` row rather
     # than taking the prompt's word for it.
@@ -727,13 +819,22 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
     # retrieved and as asserting an indicator the evidence does not contain —
     # a claim whose provenance resolves to nothing.
     #
-    # `called_tools` is empty and that is the point rather than a shortcut:
-    # this path is a single `safe_ainvoke` with no tool channel, so the
-    # Investigation Ledger holds no `tool_call` row for this run and can hold
-    # none. Every tool result in this rationale therefore came from the
-    # evidence or from the model, and in both cases the verdict is resting on
-    # something that did not happen.
-    fabricated_tools = unverified_tool_claims(rationale, called_tools=())
+    # `called_tools` was empty and that was the point rather than a shortcut:
+    # this path was a single `safe_ainvoke` with no tool channel, so the
+    # Investigation Ledger held no `tool_call` row for the run and could hold
+    # none. Every tool result in a rationale therefore came from the evidence
+    # or from the model, and in both cases the verdict rested on something
+    # that did not happen.
+    #
+    # Phase 4.5 gives it a bounded channel, so the list is now whatever a
+    # vendor really answered — and *only* that. A read that was attempted and
+    # failed is deliberately absent: the guard's question is whether a
+    # rationale credits a tool with a result, and a read that returned
+    # nothing produced no result to credit. An empty tuple when the pre-fetch
+    # is off restores the original behaviour exactly.
+    evidence = _vendor_evidence_of(state)
+    called_tools = evidence.executed_capabilities if evidence is not None else ()
+    fabricated_tools = unverified_tool_claims(rationale, called_tools=called_tools)
 
     # Phase 7. The third member of that family, and the one indicator
     # grounding is structurally blind to: a conclusion that reuses the
@@ -874,6 +975,32 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
             signals=len(injection.signals),
             max_severity=ledger.get("max_severity"),
         )
+
+    # Phase 4.2. A separate pass over the decision contract, after every
+    # existing demotion and before the closure branch, so it can only ever
+    # take a decision *away* from closure. Off by default: it was measured
+    # on the corpus and did not improve balanced accuracy or auto-close
+    # precision, which the plan's own condition says means it stays off.
+    # Kept rather than deleted because the measurement is the deliverable,
+    # and because a funded model makes it a drop-in behind this interface.
+    if reviewer.enabled():
+        should_auto_close, verdict_review = reviewer.apply_review(
+            {
+                "verdict": verdict,
+                "supporting_evidence": claim_support.as_dict().get("supported") if claim_support.scored else None,
+                "contradictory_evidence": claim_support.as_dict().get("contradicted") if claim_support.scored else None,
+                "groundedness": getattr(state, "groundedness", None),
+                "missing_prerequisites": [],
+            },
+            auto_closed=should_auto_close,
+        )
+        state.reviewer_outcome = verdict_review.as_payload()
+        # Recorded on every run, abstentions included: a reviewer that has
+        # silently stopped firing must not look identical to one that ran
+        # and found nothing to act on.
+        state.confidence_basis.append(verdict_review.summary())
+        if verdict_review.changes_decision:
+            state.add_finding(verdict_review.summary())
 
     if should_auto_close:
         _metrics["auto_resolved_count"] += 1

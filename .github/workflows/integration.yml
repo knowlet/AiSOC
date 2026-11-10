@@ -104,7 +104,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          spine_paths='services/ingest/ services/fusion/ services/realtime/ docker-compose.yml scripts/integration/ .github/workflows/integration.yml'
+          # services/agents/ is in here for the readiness probe at the far end
+          # of the Kafka spine: the triage worker is the spine's last
+          # consumer, and its /readyz answered 200 through an entire broker
+          # outage while ingest, fusion and realtime all answered 503. One
+          # assignment — see the note on migration_paths below for what two
+          # cost.
+          spine_paths='services/ingest/ services/fusion/ services/realtime/ services/agents/app/_health.py services/agents/app/main.py services/agents/app/workers/fused_alert_consumer.py services/agents/tests/integration/ docker-compose.yml scripts/integration/ .github/workflows/integration.yml'
           # One assignment, deliberately. Three parallel lanes each appended
           # their live-test paths as a fresh `migration_paths=` line, and in
           # shell the last assignment wins silently — so two lanes' filter
@@ -112,7 +118,8 @@ jobs:
           # rail legs) were inert: their live tests only ran when something
           # *else* in the surviving list changed. This is the union of all
           # three lists; the next lane extends it rather than re-assigning.
-          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py services/api/tests/test_identity_privilege_live.py services/api/app/services/identity_privilege.py services/api/app/services/identity_privilege_store.py services/api/app/services/alert_priority.py services/api/tests/test_access_review_live.py services/api/app/services/access_review.py services/api/app/services/access_review_store.py services/api/tests/test_identity_resolution_live.py services/api/app/services/identity_resolution.py services/api/app/services/identity_resolution_store.py services/api/app/services/change_timeline.py .github/workflows/integration.yml'
+          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py tests/isolation/test_alert_occurrences_live.py tests/isolation/test_alert_recurrence_after_closure_live.py services/fusion/app/services/alert_sink.py services/fusion/app/services/alert_status.py services/fusion/tests/test_alert_reduction_real.py tests/isolation/test_root_cause_findings_live.py .github/workflows/integration.yml'
+          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py services/api/tests/test_identity_privilege_live.py services/api/app/services/identity_privilege.py services/api/app/services/identity_privilege_store.py services/api/app/services/alert_priority.py services/api/tests/test_access_review_live.py services/api/app/services/access_review.py services/api/app/services/access_review_store.py services/api/tests/test_identity_resolution_live.py services/api/app/services/identity_resolution.py services/api/app/services/identity_resolution_store.py services/api/app/services/change_timeline.py tests/isolation/test_alert_occurrences_live.py tests/isolation/test_alert_recurrence_after_closure_live.py services/fusion/app/services/alert_sink.py services/fusion/app/services/alert_status.py services/fusion/tests/test_alert_reduction_real.py services/connectors/app/vuln_promotion_sql.py services/connectors/app/scheduler.py services/connectors/tests/test_vuln_promotion_live.py services/api/app/api/v1/endpoints/triage_questions.py services/agents/app/context/triage_questions_store.py services/agents/app/hunt/source_report_store.py services/agents/app/api/router.py services/agents/tests/integration/ .github/workflows/integration.yml'
           # backup_crypt.py was missing from the old filter, and it is where
           # every byte of the AES-256-GCM implementation lives — so a change
           # to the encryption itself did not run the gate that proves the
@@ -787,6 +794,73 @@ jobs:
           MSSP_ISOLATION_REQUIRED: '1'
         run: pip install --quiet pytest pytest-asyncio && python -m pytest tests/test_mssp_portfolio_isolation.py -v --tb=short
 
+      # The patch-window promotion sweep is the only path from
+      # `asset_vulnerabilities` back into the alert queue, and its upsert
+      # carried `:affected_hosts::jsonb` — never substituted, so the literal
+      # text reached the driver and every sweep on every deployment answered
+      # `syntax error at or near ":"` into a per-tenant `except Exception`.
+      # The suite that covered it asserted substrings against the SQL string,
+      # which cannot fail on this: the substring is present and correct.
+      #
+      # Under the CONNECTORS service's own locked interpreter, deliberately.
+      # It resolves SQLAlchemy 2.1.6 where the migrations job above installs a
+      # different closure, and the two releases declare different parameter
+      # sets for this statement — so the version that grades the fix has to be
+      # the version services/connectors/Dockerfile installs.
+      - name: Patch-window promotion statements against real Postgres
+        working-directory: services/connectors
+        env:
+          # The RUNTIME role, not the owner. A superuser ignores every RLS
+          # policy in the schema even under FORCE ROW LEVEL SECURITY, and
+          # seeding as the owner is the exact workaround that has hidden
+          # policy defects here before — `check_runtime_db_role.py` fails a
+          # workflow that points a test DSN at the superuser.
+          AISOC_TEST_POSTGRES: postgresql+asyncpg://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-connectors
+          python3 ../../scripts/service_requirements.py connectors --locked > /tmp/connectors.lock.txt
+          $RUNNER_TEMP/.venv-connectors/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/connectors.lock.txt
+          $RUNNER_TEMP/.venv-connectors/bin/python -m pytest tests/test_vuln_promotion_live.py -q -p no:cacheprovider 2>&1 | tee /tmp/vuln-promo.log
+          grep -Eq "[1-9][0-9]* passed" /tmp/vuln-promo.log \
+            || { echo "::error::the promotion statements never executed — the Postgres leg is misconfigured"; exit 1; }
+
+      # Two tables that had a migration, a schema and no path that writes
+      # them. `triage_questions` is read on the triage hot path of every alert
+      # and had no writer anywhere; `hunt_source_reports` was a pure orphan
+      # whose `approved_at` enforced the property its own migration states.
+      # Both halves run against one database here, because a unit test of
+      # either half passes whether or not the other one exists — which is
+      # exactly how both shipped under GATED claim rows.
+      - name: The write surface for triage questions (live Postgres)
+        working-directory: services/api
+        env:
+          # The runtime role, not the owner: a superuser ignores every RLS
+          # policy even under FORCE ROW LEVEL SECURITY.
+          AISOC_TEST_POSTGRES: postgresql+asyncpg://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_triage_question_write_surface.py -q -p no:cacheprovider 2>&1 | tee /tmp/tq-write.log
+          grep -Eq "[1-9][0-9]* passed" /tmp/tq-write.log \
+            || { echo "::error::the triage-question write surface never ran — the Postgres leg is misconfigured"; exit 1; }
+
+      - name: Orphan-table round trips, read side (live Postgres)
+        working-directory: services/agents
+        env:
+          AISOC_TEST_POSTGRES: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          AISOC_DEV_MODE: '1'
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-agents-db
+          python3 ../../scripts/service_requirements.py agents --locked > /tmp/agents.db.lock.txt
+          $RUNNER_TEMP/.venv-agents-db/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/agents.db.lock.txt
+          $RUNNER_TEMP/.venv-agents-db/bin/python -m pytest \
+            tests/integration/test_triage_questions_round_trip.py \
+            tests/integration/test_hunt_source_report_store_live.py \
+            -q -p no:cacheprovider 2>&1 | tee /tmp/agents-db.log
+          grep -Eq "[1-9][0-9]* passed" /tmp/agents-db.log \
+            || { echo "::error::no orphan-table round trip actually ran — the Postgres leg is misconfigured"; exit 1; }
+
       # Fusion's fuse-time asset-context resolver: the name/FQDN/IP match,
       # the highest-criticality tie-break and the tenant predicate are schema
       # facts a fake pool would invent. The file's import closure is kept
@@ -829,6 +903,102 @@ jobs:
           MSSP_ISOLATION_REQUIRED: '1'
         run: python -m pytest tests/test_alert_queue_priority_live.py -v --tb=short
 
+      # Phase 3.3. A repeat kept as a linked occurrence is a jsonb statement
+      # with three parts a stub connection cannot judge: `payload_ids - 0`
+      # (the oldest-first eviction), the `@>` containment guard on the
+      # ON CONFLICT arm (the only thing stopping a Kafka redelivery from
+      # inflating the count), and the RLS policy itself. The suite runs as
+      # `aisoc_app` — DML-only, NOBYPASSRLS — because that is what fusion
+      # connects as, and it is what found the defect recorded in migration
+      # 151: the conventional `WITH CHECK (tenant_id = current_tenant_id())`
+      # makes the row unwritable by a consumer that binds no tenant session,
+      # and the write is best-effort, so it would have failed in silence.
+      - name: A repeated vendor finding is counted, not discarded (live Postgres)
+        working-directory: services/fusion
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+          # The runtime role for the code under test; the owner for fixtures
+          # only. One superuser DSN for both would bypass every policy on the
+          # way through and could not have found the WITH CHECK defect.
+          ISOLATION_OCCURRENCES_DSN: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          # aisoc-db-role: owner — fixtures only. The suite creates scratch tenants, which the DML-only runtime role cannot. The code under test reads ISOLATION_OCCURRENCES_DSN above, which is the runtime role with NOBYPASSRLS, so every assertion — including the one that found migration 151's WITH CHECK defect — is still judged under forced RLS.
+          ISOLATION_OCCURRENCES_ADMIN_DSN: postgresql://aisoc:aisoc_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          pip install --quiet pydantic pydantic-settings structlog
+          python -m pytest ../../tests/isolation/test_alert_occurrences_live.py -v --tb=short -rs | tee /tmp/occurrences.log
+          # A skipped live suite reports the same word as a passing one.
+          #
+          # The count is NOT anchored to the start of the line: pytest writes
+          # its summary as `===== 6 passed in 0.67s =====`, so `^[0-9]+` never
+          # matched and this guard reddened a run in which all six tests
+          # passed. A guard that fails on a healthy suite is worse than no
+          # guard, because the documented remedy becomes "ignore it".
+          #
+          # `[1-9][0-9]*` rather than `[0-9]+`, so a run that collected
+          # nothing and reported `0 passed` is still a failure.
+          grep -qE '[1-9][0-9]* passed' /tmp/occurrences.log \
+            || { echo "::error::the occurrence live suite did not report any passing test"; exit 1; }
+          ! grep -qE 'skipped' /tmp/occurrences.log \
+            || { echo "::error::the occurrence live suite skipped a test; its DSNs must both be set"; exit 1; }
+
+      # GHSA-qp9f-459j-w89c. `_INSERT_SQL`'s dedup guard carries no status, so
+      # a closed alert absorbed every later firing of the same detection and
+      # no open alert was created — an attacker who waited for an analyst to
+      # close the alert, then repeated the activity, was invisible.
+      #
+      # Only a database can grade this. `uq_alerts_tenant_dedup` is what rules
+      # out the "insert a second row" remedy, and the reopen is a conditional
+      # UPDATE whose `status = ANY(terminal)` predicate is simultaneously the
+      # fix and the control that leaves an open alert alone. A stub pool would
+      # accept both and prove neither.
+      - name: A detection that fires again after closure reaches the queue (live Postgres)
+        working-directory: services/fusion
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+          # Runtime role for the code under test; owner for fixtures only.
+          ISOLATION_RECURRENCE_DSN: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          # aisoc-db-role: owner — fixtures only. The suite creates scratch tenants, which the DML-only runtime role cannot. Every assertion is judged over ISOLATION_RECURRENCE_DSN above, which is NOBYPASSRLS, and the suite refuses to grade itself if that role can bypass RLS.
+          ISOLATION_RECURRENCE_ADMIN_DSN: postgresql://aisoc:aisoc_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          pip install --quiet pydantic pydantic-settings structlog
+          python -m pytest ../../tests/isolation/test_alert_recurrence_after_closure_live.py -v --tb=short -rs | tee /tmp/recurrence.log
+          # A skipped live suite reports the same word as a passing one, and
+          # this is the suite standing between a closed alert and silent
+          # detection evasion. `[1-9][0-9]*` so `0 passed` is still a failure.
+          grep -qE '[1-9][0-9]* passed' /tmp/recurrence.log \
+            || { echo "::error::the recurrence live suite did not report any passing test"; exit 1; }
+          ! grep -qE 'skipped' /tmp/recurrence.log \
+            || { echo "::error::the recurrence live suite skipped a test; its DSNs must both be set"; exit 1; }
+
+      # Phase 3.3, second half. Three statements a stub accepts and Postgres
+      # does not: the ON CONFLICT upsert on the (resource, technique,
+      # principal) unique index; the recount's correlated subquery, which
+      # orders severity by the five-tier ladder explicitly because
+      # alphabetical order puts `critical` below `medium`; and
+      # COUNT(DISTINCT connector_type), recomputed rather than incremented so
+      # a redelivery cannot turn two vendors into three.
+      - name: Several vendors reporting one root cause are one finding (live Postgres)
+        working-directory: services/fusion
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+          ISOLATION_ROOT_CAUSE_DSN: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          # aisoc-db-role: owner — fixtures only. The suite creates scratch tenants, which the DML-only runtime role cannot. The code under test reads ISOLATION_ROOT_CAUSE_DSN above, which is the NOBYPASSRLS runtime role, so the RLS assertion is judged under the policy it really runs under.
+          ISOLATION_ROOT_CAUSE_ADMIN_DSN: postgresql://aisoc:aisoc_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          python -m pytest ../../tests/isolation/test_root_cause_findings_live.py -v --tb=short -rs | tee /tmp/rootcause.log
+          # Same pattern as the occurrence guard above, and for both its
+          # reasons. Unanchored, because pytest's summary line begins with
+          # `=====` and `^[0-9]+ passed` therefore matches nothing — the
+          # guard failed a run in which all six tests passed. And
+          # `[1-9][0-9]*` rather than `[0-9]+`, so a run that collected
+          # nothing and reported `0 passed` is still a failure.
+          grep -qE '[1-9][0-9]* passed' /tmp/rootcause.log \
+            || { echo "::error::the root-cause live suite did not report any passing test"; exit 1; }
+          ! grep -qE 'skipped' /tmp/rootcause.log \
+            || { echo "::error::the root-cause live suite skipped a test; its DSNs must both be set"; exit 1; }
       # Depth 2 wave 2, 1.1. The properties here are schema facts a stand-in
       # store always gets right by construction: the
       # `valid_from <= t < valid_until` select that makes an alert read the
@@ -1061,6 +1231,33 @@ jobs:
           [ "$missing" -eq 0 ] || exit 1
           echo "all four chains applied to one database"
 
+      # GHSA-9q6p-m345-h3hj (F58). A honeytoken trip is journalled before it
+      # is acknowledged and drained afterwards, so a receiver that is down
+      # costs a delay rather than the signal. The claim is made of database
+      # facts — the UNIQUE on `trigger_id`, the partial index agreeing with
+      # the `status = 'pending'` predicate, and terminal states really being
+      # terminal — so it is graded here, against the chain this job has just
+      # applied, rather than against a stub that would accept any of them.
+      #
+      # Runs as the DML-only `aisoc_app` role, which is what the service
+      # connects as. Run as the owner it would sail past the RLS policy that
+      # revision 0004 installs.
+      - name: A tripped honeytoken survives a receiver outage (live Postgres)
+        working-directory: services/honeytokens
+        env:
+          HONEYTOKEN_OUTBOX_DSN: postgresql+asyncpg://aisoc_app:aisoc_app_ci_secret@localhost:5432/shared_ci
+        run: |
+          set -euo pipefail
+          pip install --quiet pytest pytest-asyncio 'sqlalchemy[asyncio]' asyncpg pydantic pydantic-settings httpx
+          python -m pytest tests/test_outbox_live.py -v --tb=short -rs | tee /tmp/honeytoken-outbox.log
+          # A skipped live suite reports the same word as a passing one, and
+          # this is the suite standing between a transient outage and a lost
+          # intrusion signal. `[1-9][0-9]*` so `0 passed` is still a failure.
+          grep -qE '[1-9][0-9]* passed' /tmp/honeytoken-outbox.log \
+            || { echo "::error::the honeytoken outbox live suite reported no passing test"; exit 1; }
+          ! grep -qE 'skipped' /tmp/honeytoken-outbox.log \
+            || { echo "::error::the honeytoken outbox live suite skipped a test; HONEYTOKEN_OUTBOX_DSN must be set"; exit 1; }
+
   # ── Disaster recovery: an untested backup is not a backup ─────────────────
   #
   # Unlike the three jobs above, this one has no job-level `if`. It runs on
@@ -1131,6 +1328,84 @@ jobs:
           grep -Eq "[1-9][0-9]* passed" /tmp/fusion-live.log \
             || { echo "::error::no live fusion test actually ran — the Redis leg is misconfigured"; exit 1; }
 
+  agents-kafka-live:
+    # `/readyz` on the service that hosts the auto-triage worker, against a
+    # real broker that then goes away. The unit suite can only prove the
+    # endpoint reports whatever the probe returns; the premise the fix rests
+    # on — that aiokafka keeps `attached` true for the whole outage, because
+    # the reconnect lives inside `__anext__` — is a property of the client,
+    # and a double that models it models the author's belief about aiokafka.
+    #
+    # The broker advertises the PROXY's port, not its own. Without that the
+    # client takes the cluster's real address out of the bootstrap response
+    # and leaves the proxy behind, so the staged outage never reaches it and
+    # the test passes against the defect.
+    name: Agents readiness through a broker outage (live Kafka)
+    needs: changes
+    if: needs.changes.outputs.spine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      kafka:
+        image: confluentinc/cp-kafka:7.5.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:19092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install the agents service's locked dependency set
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-agents
+          python3 scripts/service_requirements.py agents --locked > /tmp/agents.lock.txt
+          $RUNNER_TEMP/.venv-agents/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/agents.lock.txt
+
+      - name: Wait for the broker to answer
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/9092) >/dev/null 2>&1; then
+              echo "broker accepting connections"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the Kafka service container never accepted a connection"
+          exit 1
+
+      - name: Readiness against a broker that goes away
+        working-directory: services/agents
+        env:
+          AISOC_TEST_KAFKA: 127.0.0.1:9092
+          AISOC_TEST_KAFKA_PROXY_PORT: '19092'
+          AISOC_DEV_MODE: '1'
+        run: |
+          set -euo pipefail
+          $RUNNER_TEMP/.venv-agents/bin/python -m pytest tests/integration/ -q -p no:cacheprovider 2>&1 | tee /tmp/agents-live.log
+          # A run in which everything skipped is a configuration failure
+          # wearing a green tick — the one outcome this job must refuse.
+          grep -Eq "[1-9][0-9]* passed" /tmp/agents-live.log \
+            || { echo "::error::no live agents readiness test actually ran — the Kafka leg is misconfigured"; exit 1; }
+
   backup-restore:
     name: Backup → destroy → restore (Postgres via S3)
     runs-on: ubuntu-latest
@@ -1163,6 +1438,31 @@ jobs:
           password: aisoc_ci_secret
           tag: "16"
 
+      # The dump and the replay must speak the server's dialect, and the
+      # runner image's client tools are whatever ubuntu-latest ships this
+      # week: the 24.04 -> 26.04 rotation (2026-11-09) moved them to
+      # PostgreSQL 18, whose pg_dump writes `SET transaction_timeout` — a
+      # parameter the pinned 16 server does not recognise, so the
+      # --single-transaction replay aborted wholesale and only the probe-row
+      # count below noticed. Shimming pg_dump/psql to the server container's
+      # own binaries makes client and server the same version by
+      # construction, whichever image the runner rotates to next. Both
+      # scripts stream over stdin/stdout, so `docker exec -i` carries them.
+      - name: Use the server's own client tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pgbin"
+          # `-e PGPASSWORD` forwards the caller's value into the container, so
+          # the seed and verify steps' `PGPASSWORD=… psql -h localhost` keeps
+          # authenticating exactly as it did against the apt client.
+          for tool in pg_dump psql pg_restore; do
+            printf '#!/bin/sh\nexec docker exec -i -e PGPASSWORD aisoc-ci-postgres %s "$@"\n' "$tool" > "$RUNNER_TEMP/pgbin/$tool"
+            chmod +x "$RUNNER_TEMP/pgbin/$tool"
+          done
+          echo "$RUNNER_TEMP/pgbin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pgbin/psql" --version
+          "$RUNNER_TEMP/pgbin/pg_dump" --version
+
       - name: Generate this run's backup encryption key
         run: |
           set -euo pipefail
@@ -1183,11 +1483,13 @@ jobs:
             echo "required check that never reports blocks the pull request forever."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Install tooling (awscli + postgres client)
+      # No apt postgres client here any more: the shim step above provides
+      # pg_dump/psql at the server's own version, and the apt package tracks
+      # the runner image's release instead (18 on ubuntu-26.04, the mismatch
+      # that broke this job).
+      - name: Install tooling (awscli)
         if: needs.changes.outputs.backup == 'true'
-        run: |
-          pip install --quiet awscli "cryptography>=46,<51"
-          sudo apt-get update -q && sudo apt-get install -y -q postgresql-client
+        run: pip install --quiet awscli "cryptography>=46,<51"
 
       # The S3 endpoint is a fixture: what this job tests is backup.sh and
       # restore.sh, not the object store. It still has to be a real S3 server,

@@ -34,6 +34,7 @@ const sidebars: SidebarsConfig = {
         "concepts/live-actions",
         "concepts/retro-hunts",
         "concepts/hunting-agent",
+        "concepts/scheduled-hunts",
         "concepts/automation-maturity",
         "concepts/self-play",
         "concepts/investigation-swarm",
@@ -125,6 +126,7 @@ const sidebars: SidebarsConfig = {
         "connectors/elastic",
         "connectors/email-inbox",
         "connectors/exabeam",
+        "connectors/extrahop",
         "connectors/falco",
         "connectors/fleetdm",
         "connectors/gcp-cloud-audit",
@@ -183,6 +185,10 @@ const sidebars: SidebarsConfig = {
         "connectors/zeek_suricata",
         "connectors/zscaler",
         // END GENERATED CONNECTOR LIST
+        // Outside the markers on purpose: generate_connector_docs.py rewrites
+        // everything between them from the connector registry, so an overview
+        // page that is not a connector is silently dropped if it sits inside.
+        "connectors/cloud-security-depth",
       ],
     },
     {
@@ -193,7 +199,7 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "Benchmarks",
-      items: ["benchmarks/alert-reduction"],
+      items: ["benchmarks/alert-reduction", "benchmarks/retro-hunt-scale"],
     },
     {
       type: "category",

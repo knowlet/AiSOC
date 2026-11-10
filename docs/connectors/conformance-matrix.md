@@ -6,7 +6,7 @@
 > async coroutines, valid capabilities, secret fields marked `secret`).
 > Live-vendor sandbox smoke is a separate wave; this gates the contract.
 
-**90 / 90 connectors conform** to the runtime contract.
+**91 / 91 connectors conform** to the runtime contract.
 
 | connector | category | fields | vaulted | caps | test_connection | fetch_alerts | normalize |
 |-----------|----------|-------:|--------:|-----:|:---------------:|:------------:|:---------:|
@@ -43,6 +43,7 @@
 | elastic | siem | 6 | 2 | 5 | ✅ | ✅ | ✅ |
 | email_inbox | saas | 7 | 1 | 1 | ✅ | ✅ | ✅ |
 | exabeam | siem | 4 | 2 | 2 | ✅ | ✅ | ✅ |
+| extrahop | ndr | 4 | 1 | 1 | ✅ | ✅ | ✅ |
 | falco | siem | 3 | 1 | 2 | ✅ | ✅ | ✅ |
 | fleetdm | edr | 4 | 1 | 4 | ✅ | ✅ | ✅ |
 | gcp_cloud_audit | cloud | 2 | 1 | 1 | ✅ | ✅ | ✅ |
@@ -97,7 +98,7 @@
 | vault | iam | 4 | 1 | 2 | ✅ | ✅ | ✅ |
 | wazuh | siem | 7 | 1 | 5 | ✅ | ✅ | ✅ |
 | windows_event | edr | 3 | 1 | 3 | ✅ | ✅ | ✅ |
-| wiz | cloud | 4 | 1 | 1 | ✅ | ✅ | ✅ |
+| wiz | cloud | 7 | 1 | 2 | ✅ | ✅ | ✅ |
 | zeek_suricata | ndr | 4 | 1 | 2 | ✅ | ✅ | ✅ |
 | zscaler | network | 4 | 2 | 1 | ✅ | ✅ | ✅ |
 

@@ -44,6 +44,8 @@ production fusion service against real customer telemetry.
 | Metric | Value | Target | Describes AiSOC? |
 |---|---|---|---|
 | **Reduction ratio (product logic)** | **33.3 %** (1,000 alerts → 667 incidents) | 20–95 % | **Yes** — groups with `RawAlert.correlation_key()` |
+| **Repeat folding (deduplication)** | **28.4 %** (1,000 inputs → 716 alerts, 284 folded) | not floored — see below | **Yes** — folds with `RawAlert.fingerprint()`, the function behind `alerts.dedup_hash` |
+| **Cross-vendor root cause** | **16.8 %** (1,000 inputs → 832 records; 51 findings carry more than one vendor) | not floored — see below | **Yes** — groups with `alert_sink.root_cause_key`, the function the sink uses |
 | Reduction ratio (legacy suite) | 75.3 % (1,000 alerts → 247 incidents) | ≥ 70 % | **No** — four-tier scheme implemented inside the test |
 | Critical alerts preserved (legacy suite) | 93 / 93 (zero drop) | 100 % | Invariant of the legacy suite |
 | Storm incidents collapsed (legacy Tier 3) | 16 (avg ~8.9 alerts each, 3–8 distinct hosts) | ≥ 1 | Legacy suite only |
@@ -54,6 +56,90 @@ The real-key gate is bounded on **both** sides rather than floored. A floor
 alone is satisfied by a key that collapses everything into one incident —
 99.9 % reduction and a useless SOC — so "more reduction is better" is only
 true up to a point, and the gate says where.
+
+### Why cross-vendor root cause is a third row
+
+Repeat folding above handles **the same finding arriving again**. It cannot
+reach the other half of the same problem: Security Hub, Defender for Cloud, a
+CNAPP connector and GuardDuty each raising their own finding about one public
+bucket produce four *different* fingerprints — different titles, different
+vendors, different severities — so every dedup layer in the pipeline correctly
+leaves all four standing. They are four reports of one root cause, and the
+analyst closes the same misconfiguration four times.
+
+A finding is keyed on the triple `(resource, technique, principal)`, and the
+conjunction is the control. Resource alone over-collapses: two unrelated
+findings on one busy host are two findings, which is the lesson v21 paid for
+when a missing tactic collapsed an exfiltration alert into a port scan.
+Technique alone is a category. Principal alone is an account's whole day. A
+NULL in any component does not match another NULL — *"we do not know the
+principal"* is not evidence that two findings share one.
+
+**Every original is kept and stays queryable.** Promoting one vendor's alert
+to "the" alert would make the survivor's severity, title and vendor an
+accident of arrival order, and would discard the fact that four independent
+products agreed, which is itself the strongest evidence in the group. The
+finding's severity is the **worst** any member carried, never an average: one
+critical report among three makes a critical finding.
+
+The same accounting applies, with resolvability alongside balance:
+
+```
+[eval] cross-vendor accounting: 1000 inputs = 832 findings
+       + 0 unkeyed + 168 folded into a finding
+```
+
+Like repeat folding, this row carries no floor. How many products report the
+same misconfiguration is a property of how many cloud-security tools a tenant
+has bought, not of how good AiSOC is.
+
+:::danger The three figures are never added
+Correlation, repeat folding and cross-vendor root cause reduce **different
+things over overlapping inputs**. A reader who summed them would count some
+alerts three times. That is exactly the defect the retracted 75.3 % figure
+carried — a headline whose denominator nobody could name — and
+`scripts/check_alert_reduction_claims.py` refuses a page that quotes any of
+their sums.
+:::
+
+### Why repeat folding is a separate row, and why it did not go up
+
+Deduplication and correlation reduce different things and are published as
+two numbers that must never be added together. Correlation groups *related*
+alerts under `correlation_key()`. Deduplication folds *the same finding
+arriving again* under `fingerprint()`, which is the function behind
+`alerts.dedup_hash` and `uq_alerts_tenant_dedup`. A reader who summed them
+would be double-counting, which is precisely the defect the retracted 75.3 %
+figure carried: a headline whose denominator nobody could name.
+
+The folding itself is not new — three layers have collapsed repeats since
+migration 120. What wave 2's Phase 3.3 changed is that the folded repeat is
+now **kept** rather than discarded, as a linked occurrence on the alert it
+folded onto (`alert_occurrences`, migration 151): a count that includes the
+surviving alert, the real first- and last-seen window, and a bounded window
+of the original payload ids. A vendor that re-reports one finding 79 times is
+one alert that says 79.
+
+So the measured reduction is **identical before and after 3.3**, and that is
+the honest reading of this row. The number worth publishing is not a larger
+reduction; it is the same reduction with all 284 folded inputs accounted for
+instead of absent. The suite asserts that accounting directly — every input
+lands in exactly one of *retained alone*, *attached to a group*, *folded onto
+a retained alert*, or *pending/failed*, and the four sum to the denominator:
+
+```
+[eval] full-cohort accounting: 1000 inputs = 658 retained alone
+       + 58 attached to a group + 284 folded occurrences + 0 pending/failed
+```
+
+A second assertion requires each folded repeat to resolve back to the id of
+the alert that absorbed it. Balance alone says nothing was lost in aggregate;
+resolvability says the evidence can still be followed. A count that balances
+while pointing nowhere cannot be audited.
+
+This row carries no floor. A deduplication rate is a property of how noisy
+the connected vendors are, not of how good the product is, so a target would
+be measuring the customer's estate rather than AiSOC.
 
 The legacy snapshot lives at
 [`eval-results/eval/results/latest.json`](https://github.com/beenuar/AiSOC/blob/eval-results/eval/results/latest.json)

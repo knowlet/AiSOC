@@ -9,7 +9,7 @@ PATCH  /api-keys/{key_id} – update name / scopes / expiry
 
 VALID SCOPES
   alerts:read  alerts:write  alerts:delete
-  cases:read   cases:write   cases:delete
+  cases:read   cases:write   cases:delete   approvals:write
   playbooks:read playbooks:write playbooks:execute
   connectors:read connectors:write connectors:delete
   plugins:read plugins:execute plugins:admin
@@ -49,6 +49,7 @@ VALID_SCOPES: frozenset[str] = frozenset(
         "cases:read",
         "cases:write",
         "cases:delete",
+        "approvals:write",
         "playbooks:read",
         "playbooks:write",
         "playbooks:execute",
@@ -87,6 +88,13 @@ VALID_SCOPES: frozenset[str] = frozenset(
         "elevation:read",
         "elevation:request",
         "elevation:approve",
+        # Identity posture. Mintable because an access-review or
+        # joiner-mover-leaver job resolving effective permissions on a
+        # schedule is exactly the kind of automation a key is for, and a
+        # permission absent from this set is one only a wildcard key can
+        # exercise — which is how `hunts:read` came to be reachable solely by
+        # the credential nobody should be using.
+        "identity:read",
         # Depth 6.1. Mintable so a tenant can pull its own AI-estate
         # inventory into a CMDB or a governance report without a wildcard
         # key. Listed here widens nothing by itself: the grant check below

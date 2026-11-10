@@ -13,6 +13,15 @@ from typing import Any
 
 import structlog
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
+from aiokafka.errors import (
+    AuthenticationFailedError,
+    ClusterAuthorizationFailedError,
+    GroupAuthorizationFailedError,
+    IllegalSaslStateError,
+    TopicAuthorizationFailedError,
+    UnsupportedSaslMechanismError,
+    UnsupportedVersionError,
+)
 
 from app.core.config import settings
 from app.core.kafka_security import kafka_client_kwargs
@@ -30,6 +39,7 @@ from app.services.scale_hint import compute as compute_scale_hint
 from app.services.sessions import DERIVED_IDLE_SECONDS, SessionRef, SessionStore
 from app.services.tenant_overlay import OverlayCache
 from app.services.ueba_signal import UebaSignalCache
+from app.services.weak_signals import build_alert as weak_signal_alert
 from app.services.windowed_detection import WindowedDetectionEngine
 
 logger = structlog.get_logger()
@@ -134,6 +144,81 @@ class PermanentProcessingError(RuntimeError):
 #: DERIVED_IDLE_SECONDS of its last event rather than up to twice that.
 SESSION_SWEEP_SECONDS = DERIVED_IDLE_SECONDS / 4
 
+#: Backoff bounds the supervised worker uses in production. Module constants
+#: rather than defaults baked into the signature so a test can drive the real
+#: entry point — ``start()`` — at test speed. A recovery test that calls
+#: ``run_forever`` directly passes just as happily with ``start()`` left
+#: unsupervised, which is the production path and therefore the only one
+#: worth asserting on.
+SUPERVISOR_INITIAL_BACKOFF_SECONDS = 1.0
+SUPERVISOR_MAX_BACKOFF_SECONDS = 60.0
+
+#: How long one uninterrupted Kafka failure may keep being called transient.
+#: The same two minutes ``streamhealth.DefaultStuckAfter`` uses in
+#: ``services/ingest``: longer than a broker restart, a leader election or a
+#: Kubernetes service appearing behind its DNS record, and far shorter than
+#: the "forever" a bare retry loop implies.
+SUPERVISOR_STUCK_AFTER_SECONDS = 120.0
+
+#: Kafka failures a retry can never clear, and what the operator must change.
+#:
+#: The permanent arm of the same three-class split
+#: ``services/ingest/internal/streamhealth`` applies to the Go consumer. The
+#: mapping is to an *action* rather than to a bare boolean because "check the
+#: configuration" is not advice — the value of stopping the retry loop is
+#: that the log line it stops on tells somebody what to do next.
+#:
+#: Everything absent from this table is treated as transient and retried.
+#: That direction is deliberate: an unclassified fault retried is a service
+#: that recovers on its own from something nobody anticipated, while an
+#: unclassified fault treated as permanent is a service that stays down over
+#: a blip. Adding an entry is a behaviour change and belongs in review.
+_PERMANENT_FAILURES: tuple[tuple[type[BaseException], str], ...] = (
+    (
+        AuthenticationFailedError,
+        "fix the Kafka credentials this service presents (AISOC_KAFKA_SASL_USERNAME / _PASSWORD)",
+    ),
+    (
+        UnsupportedSaslMechanismError,
+        "set AISOC_KAFKA_SASL_MECHANISM to a mechanism this broker offers",
+    ),
+    (
+        IllegalSaslStateError,
+        "check the SASL mechanism and security protocol agree with the broker's listener",
+    ),
+    (
+        TopicAuthorizationFailedError,
+        "grant this principal Read on the fusion input topics and Write on the fused-alert topic",
+    ),
+    (
+        GroupAuthorizationFailedError,
+        "grant this principal Read on consumer group AISOC_KAFKA_CONSUMER_GROUP",
+    ),
+    (
+        ClusterAuthorizationFailedError,
+        "grant this principal the cluster permissions the broker requires, or point it at a cluster it may use",
+    ),
+    (
+        UnsupportedVersionError,
+        "the broker is older than this client requires; upgrade the broker or pin an older aiokafka",
+    ),
+)
+
+
+def permanent_failure_action(exc: BaseException) -> str | None:
+    """What an operator must change, or ``None`` when a retry may still work.
+
+    Returning ``None`` for an unrecognised error is what makes the supervisor
+    default to retrying. A wrong "permanent" verdict keeps a recoverable
+    service down; a wrong "transient" one costs a log line every 60 seconds,
+    which the stuck-escalation in :meth:`FusionWorker.run_forever` then
+    promotes to an error naming where to look.
+    """
+    for error_type, action in _PERMANENT_FAILURES:
+        if isinstance(exc, error_type):
+            return action
+    return None
+
 
 class FusionWorker:
     """Kafka consumer/producer pair that drives the fusion pipeline."""
@@ -148,6 +233,9 @@ class FusionWorker:
         windowed_detector: WindowedDetectionEngine | None = None,
         first_seen: Any | None = None,
         baselines: Any | None = None,
+        long_horizon: Any | None = None,
+        api_behaviour: Any | None = None,
+        weak_signals: Any | None = None,
         ueba_cache: UebaSignalCache | None = None,
         overlays: OverlayCache | None = None,
         sessions: SessionStore | None = None,
@@ -173,6 +261,18 @@ class FusionWorker:
         self._first_seen = first_seen
         #: Depth plan 3.4 behavioural baselines, computed in CORE.
         self._baselines = baselines
+        #: Wave 2 item 2.2 — distinct source networks per account over weeks.
+        #: A fourth store beside the three above because a day is the windowed
+        #: engine's longest window, and an attack spread deliberately below an
+        #: hourly threshold is invisible to every one of the others.
+        self._long_horizon = long_horizon
+        #: Wave 2 item 2.4 — access-log shape per endpoint. Off per tenant, so
+        #: a deployment that ingests no access logs pays one membership test.
+        self._api_behaviour = api_behaviour
+        #: Wave 2 item 2.3 — several unalarming signals becoming one finding.
+        #: Unlike the four above this does not publish derived fields; it
+        #: returns findings the worker promotes, like the windowed engine.
+        self._weak_signals = weak_signals
         self._ueba_cache = ueba_cache
         #: Depth 6.1 — the observed AI estate. Optional in the same sense the
         #: lake writer is: a deployment that passes nothing behaves exactly
@@ -199,6 +299,15 @@ class FusionWorker:
         self._producer: AIOKafkaProducer | None = None
         self._running = False
         self._attached = False
+        #: How many times the consume loop has reached the point of iterating
+        #: its subscription. The supervisor reads it to tell "this attempt
+        #: never got the broker to answer" from "it was consuming and then
+        #: fell over", which are the same exception and different streaks.
+        self._attach_count = 0
+        #: Whether the current attempt's resources have already been
+        #: released. Guards :meth:`_teardown` against the two callers that
+        #: legitimately race on a clean shutdown; see that method.
+        self._torn_down = False
         self._flush_task: asyncio.Task | None = None
         #: Signalled by stop() so retry sleeps wake immediately instead of
         #: making shutdown wait out an exponential backoff.
@@ -280,7 +389,144 @@ class FusionWorker:
         return self._durable_capture
 
     async def start(self) -> None:
+        """Run the worker under supervision until :meth:`stop` is called.
+
+        Reporting a death and healing from it are different properties and
+        this service only had the first. ``app/main.py`` registers
+        :attr:`attached` as a readiness probe and attaches a done-callback,
+        so a consume loop torn out by a broker fault already drops
+        ``/readyz`` to 503 and logs why — but nothing ever started it again,
+        so the only recovery was an operator noticing and restarting the
+        container.
+
+        Supervision closes that: a transient Kafka failure is retried with
+        capped exponential backoff, and readiness recovers on its own when
+        consumption resumes. The consume path itself is unchanged.
+        """
+        await self.run_forever(
+            initial_backoff_seconds=SUPERVISOR_INITIAL_BACKOFF_SECONDS,
+            max_backoff_seconds=SUPERVISOR_MAX_BACKOFF_SECONDS,
+        )
+
+    async def run_forever(
+        self,
+        initial_backoff_seconds: float = 1.0,
+        max_backoff_seconds: float = 60.0,
+        stuck_after_seconds: float = SUPERVISOR_STUCK_AFTER_SECONDS,
+    ) -> None:
+        """Retry :meth:`_attempt_start` for as long as retrying can help.
+
+        "For as long as retrying can help" is the whole design. A loop that
+        retries every failure forever turns a misconfiguration into churn an
+        operator reads as ordinary noise, so a failure is classified before
+        it is retried — the same three answers ``streamhealth`` gives the Go
+        consumer in ``services/ingest``, and for the same reason:
+
+        * **transient** — a broker restarting, a leader election, a DNS
+          record that is not up yet. Back off and retry.
+        * **permanent** — the broker refused this principal, or the client is
+          configured in a way no retry can fix. Say so with the operator
+          action and stop; pretending a retry is progress is what buries it.
+        * **poison** — one unreadable message. Not handled here: the consume
+          loop already dead-letters it and takes the next one, which is the
+          right place for it because the subscription is fine.
+
+        The fourth state is a duration rather than a class. ``no such host``
+        on a broker name is a startup race for the first few seconds and a
+        variable nobody set after two minutes, and guessing on the first
+        occurrence is wrong either way — so it is retried as transient and
+        escalated to an error naming the operator action once it has
+        outlived any plausible transient explanation.
+        """
+        backoff = max(0.1, initial_backoff_seconds)
+        failing_since: float | None = None
         self._stop_event.clear()
+        while not self._stop_event.is_set():
+            attached_before = self._attach_count
+            try:
+                await self._attempt_start()
+                return  # consume loop ended on a clean stop request
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — classified below, not swallowed
+                if self._stop_event.is_set():
+                    return
+                _METRICS["errors"] += 1
+
+                action = permanent_failure_action(exc)
+                if action is not None:
+                    logger.error(
+                        "fusion.worker_failed_permanently",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        operator_action=action,
+                        detail=(
+                            "supervision stopped because no retry can clear this; "
+                            "/readyz stays 503 until the cause is fixed and the service restarted"
+                        ),
+                        exc_info=True,
+                    )
+                    return
+
+                # A streak is "this failure, uninterrupted". An attempt that
+                # got as far as iterating the subscription means the broker
+                # was reachable, so a later fault starts its own clock rather
+                # than inheriting an hours-old one.
+                now = time.monotonic()
+                if self._attach_count > attached_before:
+                    failing_since = None
+                if failing_since is None:
+                    failing_since = now
+                failing_for = now - failing_since
+
+                if failing_for >= stuck_after_seconds:
+                    logger.error(
+                        "fusion.worker_not_resolving",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        failing_for_seconds=round(failing_for, 1),
+                        backoff_seconds=backoff,
+                        operator_action=(
+                            "check that AISOC_KAFKA_BOOTSTRAP_SERVERS names a broker this "
+                            "container can resolve and reach, and that the topics exist"
+                        ),
+                        detail="still retrying, but this has outlived any transient explanation",
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning(
+                        "fusion.worker_crashed_retrying",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        failing_for_seconds=round(failing_for, 1),
+                        backoff_seconds=backoff,
+                        exc_info=True,
+                    )
+
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
+                    return  # stop() was requested during the backoff
+                except TimeoutError:
+                    pass
+                backoff = min(backoff * 2, max_backoff_seconds)
+
+    async def _attempt_start(self) -> None:
+        """One supervised start/consume/stop cycle. Raises if it cannot start.
+
+        The ``finally`` covers the bootstrap as well as the consume loop, not
+        just the loop. A raise out of ``self._consumer.start()`` is the
+        commonest retry there is — it is what "the broker is not up yet"
+        looks like — and the next attempt reassigns ``_consumer`` and
+        ``_producer``, so anything this attempt built and did not close is
+        unreachable and never closed.
+        """
+        self._torn_down = False
+        try:
+            await self._bootstrap_and_consume()
+        finally:
+            await self._teardown()
+
+    async def _bootstrap_and_consume(self) -> None:
         topics = [settings.kafka_topic_alerts_raw]
         # Subscribe to raw_events when EITHER promotion or lake archival needs
         # it — the lake must fill even if promotion is turned off.
@@ -392,8 +638,33 @@ class FusionWorker:
     async def stop(self) -> None:
         self._running = False
         # Wake any retry/backoff sleep. Without this a 30s backoff would make
-        # every rolling restart look like a hang.
+        # every rolling restart look like a hang. Also ends supervision: a
+        # retrying worker that ignores the stop request turns shutdown into a
+        # crash-loop.
         self._stop_event.set()
+        # Tear down from here as before. Closing the consumer is what wakes an
+        # idle `async for` — an idle loop is blocked in the iterator and
+        # cannot observe `_running` — so this is not an alternative to the
+        # attempt's own teardown but the thing that lets the attempt finish at
+        # all. Both then run; `_teardown` is idempotent so only the first does
+        # the work.
+        await self._teardown()
+
+    async def _teardown(self) -> None:
+        """Release everything one attempt built. Safe to call more than once.
+
+        Two callers race on every clean shutdown: :meth:`stop` closes the
+        consumer to wake the ``async for``, and the woken attempt then runs
+        its own ``finally``. The Kafka handles survive that by being nulled,
+        but the sink, the lake and the inventory buffer are not nulled, so
+        without this guard a shutdown stopped the sink twice and flushed the
+        buffer twice. Exactly-once per attempt is the property; the flag is
+        cleared by :meth:`_attempt_start`, which is the only thing that
+        builds a new set.
+        """
+        if self._torn_down:
+            return
+        self._torn_down = True
         if self._flush_task is not None:
             self._flush_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -430,8 +701,13 @@ class FusionWorker:
 
         if self._consumer:
             await self._consumer.stop()
+            # Null them out: a supervised retry builds fresh clients, and an
+            # aiokafka consumer cannot be restarted after stop(). Leaving a
+            # stopped client attached would make the next attempt reuse it.
+            self._consumer = None
         if self._producer:
             await self._producer.stop()
+            self._producer = None
         if self._sink is not None:
             await self._sink.stop()
         if self._lake is not None:
@@ -443,18 +719,19 @@ class FusionWorker:
         logger.info("Fusion worker stopped", metrics=_METRICS, inflight=self._inflight)
 
     async def _consume_loop(self) -> None:
-        # `start()` is the only caller and assigns `_consumer` before getting
-        # here. Bound locally so that invariant is stated where it is relied
-        # on: iterating or committing a None consumer would otherwise be an
-        # AttributeError inside the message loop, reported as a processing
+        # `_bootstrap_and_consume()` is the only caller and assigns `_consumer`
+        # before getting here. Bound locally so that invariant is stated where it
+        # is relied on: iterating or committing a None consumer would otherwise be
+        # an AttributeError inside the message loop, reported as a processing
         # failure rather than as the startup bug it is.
         consumer = self._consumer
-        if consumer is None:  # pragma: no cover — unreachable via start()
+        if consumer is None:  # pragma: no cover — unreachable via _bootstrap_and_consume()
             raise RuntimeError("fusion consume loop started before the Kafka consumer")
         # Attached for as long as this loop is iterating; read by the
         # readiness probe app/main.py registers. Cleared in the ``finally`` so
         # every exit path reports the same way, including one that raises.
         self._attached = True
+        self._attach_count += 1
         self._loop_done.clear()
         try:
             async for msg in consumer:
@@ -859,11 +1136,35 @@ class FusionWorker:
             # {tenant}:{entity}:{tactic} for the console, which is where the
             # N-into-1 view belongs.
             if self._detector is not None:
-                for hit in await self._detector.evaluate_async(payload, overlay, self._first_seen, self._baselines):
+                # Wave 2 items 2.2 and 2.4 join first-seen and baselines as
+                # stores whose derived fields enter the namespace before the
+                # corpus runs. Each is independent: a deployment passing none
+                # of them evaluates exactly the corpus it did before.
+                context = await self._detector.context_fields(
+                    payload,
+                    first_seen=self._first_seen,
+                    baselines=self._baselines,
+                    long_horizon=self._long_horizon,
+                    api_behaviour=self._api_behaviour,
+                )
+                for hit in self._detector.evaluate(payload, overlay, _extra_fields=context):
                     det_alert = self._detector.build_alert(payload, hit)
                     if det_alert is not None:
                         _METRICS["detected"] += 1
                         await self._fuse_and_persist(det_alert, source_event_id=validation.source_event_id, session=session)
+
+                # Wave 2 item 2.3 — the signals that are each too weak to be a
+                # rule. Fed the *same* namespace the corpus just saw, because
+                # it reads the first-seen novelty booleans and the baseline
+                # deviation scores computed directly above; recomputing them
+                # here is how two readers of one event come to disagree.
+                if self._weak_signals is not None:
+                    await self._aggregate_weak_signals(
+                        payload,
+                        context,
+                        source_event_id=validation.source_event_id,
+                        session=session,
+                    )
 
             # Wave 2 — stateful/windowed detections (brute force, spray, scans)
             # count this event into its sliding window and fire once on threshold.
@@ -937,6 +1238,41 @@ class FusionWorker:
                 return
 
         await self._fuse_and_persist(alert, source_event_id=validation.source_event_id, session=session)
+
+    async def _aggregate_weak_signals(
+        self,
+        payload: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        source_event_id: str | None = None,
+        session: SessionRef | None = None,
+    ) -> None:
+        """Accumulate item 2.3's weak signals and promote any finding.
+
+        Advisory, like the AI-estate recorder: an aggregator that cannot
+        reach Redis must not cost the event its detections, so a failure is
+        logged and the event continues. The alternative -- letting it raise
+        -- would make an optional enrichment able to stall the pipeline.
+        """
+        if self._detector is None or self._weak_signals is None:
+            return
+        tenant = str(payload.get("tenant_id") or (payload.get("ocsf_event") or {}).get("tenant_uid") or "")
+        if not tenant:
+            return
+        fields = self._detector.namespace(payload, context)
+        if not fields:
+            return
+        try:
+            findings = await self._weak_signals.observe(tenant, fields)
+        except Exception as exc:  # noqa: BLE001 - advisory enrichment, detections are not
+            logger.warning("fusion.weak_signals_failed", error=str(exc)[:200])
+            return
+        for finding in findings:
+            alert = weak_signal_alert(payload, fields, finding)
+            if alert is None:
+                continue
+            _METRICS["detected"] += 1
+            await self._fuse_and_persist(alert, source_event_id=source_event_id, session=session)
 
     async def _fuse_and_persist(self, alert: RawAlert, *, source_event_id: str | None = None, session: SessionRef | None = None) -> None:
         """Run one RawAlert through fusion, persist it, then publish it.

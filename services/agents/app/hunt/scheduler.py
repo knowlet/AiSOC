@@ -155,16 +155,23 @@ class HuntScheduler:
     # Manual trigger (used by the API)
     # ------------------------------------------------------------------
 
-    async def run_one(self, hunt_id: str) -> dict[str, Any]:
-        """Run a single hunt on demand. Returns a summary dict."""
+    async def run_one(self, hunt_id: str, *, tenant_ref: str | None = None) -> dict[str, Any]:
+        """Run a single hunt on demand. Returns a summary dict.
+
+        ``tenant_ref`` overrides the scheduler's process-wide default so an
+        on-demand run searches the *caller's* telemetry and records against
+        the caller's tenant. The timer path passes nothing and keeps the
+        deployment default, which is what it is for.
+        """
         hunt = self._corpus.get(hunt_id)
         if hunt is None:
             return {"ok": False, "error": f"hunt {hunt_id} not found"}
-        result = self._engine.run(hunt, _load_telemetry(self._tenant_ref))
+        target = tenant_ref or self._tenant_ref
+        result = self._engine.run(hunt, _load_telemetry(target))
         await record_run(
             hunt,
             result,
-            tenant_ref=self._tenant_ref,
+            tenant_ref=target,
             trigger_source="manual",
         )
         self._last_run[hunt.id] = time.time()
@@ -211,6 +218,58 @@ def _load_telemetry(tenant_ref: str | None = None) -> list[dict[str, Any]]:
     return []
 
 
+class _LakeBackoff:
+    """How often the scheduler re-dials a lake that is not answering.
+
+    The scheduler ticks every 60 seconds, and a tick that cannot reach
+    ClickHouse printed twelve lines of Python stack — emitted by
+    `clickhouse_driver`'s own connect path at WARNING with `exc_info`, not
+    by anything here — plus our one-line warning, on a loop, forever. On the
+    CORE profile, where ClickHouse legitimately does not exist, that is a
+    traceback a minute for a condition that is not a fault.
+
+    No attempt is made to decide the condition is *permanent*: a lake that
+    is merely booting looks identical from here, and refusing to retry would
+    turn a slow start into a silent outage. Instead the interval grows to a
+    cap, so a deployment that will never have a lake costs one traceback and
+    then a line every half hour, while one that is starting up recovers
+    within a minute of coming up — and says so, because an unobserved
+    recovery that is never announced leaves the log claiming an outage that
+    has ended.
+    """
+
+    #: One tick. The first retry is immediate in practice, so a transient
+    #: blip costs nothing.
+    MIN_SECONDS = 60.0
+    MAX_SECONDS = 1800.0
+
+    def __init__(self) -> None:
+        self._failures = 0
+        self._next_attempt = 0.0
+
+    @property
+    def first_failure(self) -> bool:
+        return self._failures == 1
+
+    def suppressed(self) -> bool:
+        return self._failures > 0 and time.monotonic() < self._next_attempt
+
+    def record_failure(self) -> float:
+        self._failures += 1
+        wait = min(self.MIN_SECONDS * (2 ** (self._failures - 1)), self.MAX_SECONDS)
+        self._next_attempt = time.monotonic() + wait
+        return wait
+
+    def record_success(self) -> None:
+        if self._failures:
+            logger.info("hunt.telemetry.lake.recovered", after_failures=self._failures)
+        self._failures = 0
+        self._next_attempt = 0.0
+
+
+_lake_backoff = _LakeBackoff()
+
+
 def _load_lake_events(tenant_ref: str | None) -> list[dict[str, Any]]:
     """Read this tenant's recorded events out of the ClickHouse lake.
 
@@ -234,15 +293,42 @@ def _load_lake_events(tenant_ref: str | None) -> list[dict[str, Any]]:
     except ImportError:  # pragma: no cover - the module ships with the service
         logger.warning("hunt.telemetry.lake.unavailable")
         return []
-    try:
-        return fetch_recent_events(tenant_ref)
-    except Exception as exc:  # noqa: BLE001 - a hunt must not take the scheduler down
-        logger.warning(
-            "hunt.telemetry.lake.failed",
-            tenant_ref=tenant_ref,
-            error=str(exc)[:200].replace("\r", "").replace("\n", " "),
-        )
+
+    if _lake_backoff.suppressed():
+        # Still inside the window opened by the last failure. Skipping the
+        # call is the point: the traceback this used to print on every tick
+        # came from `clickhouse_driver`'s own connect path, so the only way
+        # to stop it is not to dial.
+        logger.debug("hunt.telemetry.lake.skipped", reason="within the backoff window after an earlier failure")
         return []
+
+    try:
+        events = fetch_recent_events(tenant_ref)
+    except Exception as exc:  # noqa: BLE001 - a hunt must not take the scheduler down
+        detail = str(exc)[:200].replace("\r", "").replace("\n", " ")
+        wait = _lake_backoff.record_failure()
+        if _lake_backoff.first_failure:
+            # Once, with the diagnosis. The graph tool one directory over
+            # already answers the same condition in one line — "the entity
+            # graph runs in the `full` profile and is not part of this
+            # deployment" — and the lake deserves the same sentence rather
+            # than a stack trace on a loop.
+            logger.warning(
+                "hunt.telemetry.lake.unreachable",
+                reason=(
+                    "the event lake did not answer, so scheduled hunts have no telemetry to run against. "
+                    "ClickHouse runs in the `full` profile and is not part of a CORE deployment; "
+                    "bring up the full profile, or set HUNT_TELEMETRY_PROVIDER explicitly if this is intentional"
+                ),
+                error=detail,
+                retry_in_seconds=wait,
+            )
+        else:
+            logger.debug("hunt.telemetry.lake.failed", error=detail, retry_in_seconds=wait)
+        return []
+
+    _lake_backoff.record_success()
+    return events
 
 
 _SYNTHETIC_PATH_OVERRIDE = "HUNT_SYNTHETIC_TELEMETRY_PATH"

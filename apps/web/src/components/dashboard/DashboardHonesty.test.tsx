@@ -341,7 +341,12 @@ describe('a mean over no samples is unmeasured, not zero', () => {
     // Exactly the two rate tiles; the three means have samples here, so a
     // count of two also proves the change did not blank anything else.
     expect(screen.getAllByText(/not measured/i).length).toBe(2);
-    expect(screen.getByText(/no resolved alerts in 7d/i)).toBeTruthy();
+    // "decided verdicts", not "resolved alerts": the denominator counts
+    // alerts somebody reached a conclusion about. It read `disposition IS
+    // NOT NULL`, which the auto-triage worker sets on everything it looks
+    // at, so the card said "over 5 resolved alerts" on a tenant that had
+    // resolved nothing and whose five dispositions were all `needs_review`.
+    expect(screen.getByText(/no decided verdicts in 7d/i)).toBeTruthy();
     expect(screen.getByText(/no gate decisions in 7d/i)).toBeTruthy();
     expect(screen.queryByText('0.0%')).toBeNull();
   });
@@ -362,7 +367,7 @@ describe('a mean over no samples is unmeasured, not zero', () => {
     render(<SOCMetricsDashboard />);
 
     expect(screen.getByText('25.0%')).toBeTruthy();
-    expect(screen.getByText(/over 8 resolved alerts in 7d/i)).toBeTruthy();
+    expect(screen.getByText(/over 8 decided verdicts in 7d/i)).toBeTruthy();
     expect(screen.getByText('50.0%')).toBeTruthy();
     expect(screen.getByText(/over 4 gate decisions in 7d/i)).toBeTruthy();
   });
@@ -449,6 +454,38 @@ describe('demo mode still populates the dashboards', () => {
       </TimeWindowProvider>,
     );
 
-    expect(screen.getByText('CrowdStrike EDR')).toBeTruthy();
+    // Twice now: once in the source list, once in the "Connected Sources"
+    // caption, which names the sources it counted instead of the fixed
+    // "EDR, SIEM, Cloud, IAM, SaaS" taxonomy it used to print beside a live
+    // number.
+    expect(screen.getAllByText('CrowdStrike EDR')).toHaveLength(2);
+  });
+
+  it('captions the source count with the sources it counted', () => {
+    __setDemoModeForTests(true);
+    swrData.set('dashboard-metrics', {
+      alerts: { total: 1, new: 1, critical: 0, high: 1, medium: 0, low: 0, resolvedToday: 0, mttr: 0 },
+      cases: { open: 0, inProgress: 0, resolvedThisWeek: 0 },
+      sources: [
+        { name: 'AWS CloudTrail', count: 4, status: 'active' },
+        { name: 'CrowdStrike Falcon', count: 2, status: 'active' },
+        { name: 'Okta', count: 1, status: 'active' },
+        { name: 'Kubernetes Audit', count: 1, status: 'active' },
+      ],
+      topMitre: [],
+      alertsTrend: [],
+      threatsBySource: [],
+    });
+
+    render(
+      <TimeWindowProvider>
+        <DashboardView />
+      </TimeWindowProvider>,
+    );
+
+    expect(
+      screen.getByText('AWS CloudTrail, CrowdStrike Falcon, Okta +1 more'),
+    ).toBeTruthy();
+    expect(screen.queryByText('EDR, SIEM, Cloud, IAM, SaaS')).toBeNull();
   });
 });

@@ -37,6 +37,153 @@ _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # Microsoft Graph caps `$top` at 1000 for these collections; 200 keeps each
 # round-trip fast and rate-limit friendly while still covering normal volume.
 _PAGE_SIZE = 200
+# Bounds one feed's read in a single poll; reaching it is logged.
+_MAX_PAGES = 25
+
+
+def _unquote(value: Any) -> str:
+    """A modified-property value with Graph's JSON encoding removed.
+
+    Graph JSON-encodes these, so `"Global Administrator"` arrives with its
+    quotes. Stripping them is what lets a rule compare against the role name
+    a reader would write.
+    """
+    return str(value or "").strip('"')
+
+
+def _targets_of_type(targets: list[dict[str, Any]], wanted: str) -> dict[str, Any] | None:
+    """The first target whose `type` is `wanted`, searched for by name."""
+    for target in targets:
+        if str(target.get("type") or "").casefold() == wanted:
+            return target
+    return None
+
+
+def _target_fields(targets: Any) -> dict[str, Any]:
+    """Every target resource of a directory-audit event, flattened by name.
+
+    Graph puts the objects an administrator acted on inside
+    `targetResources`, a list, with the properties that changed nested one
+    level deeper again under `modifiedProperties`. The engine flattens
+    `raw_event` exactly one level, so a rule asking "which role was granted,
+    and to whom" had nothing to read.
+
+    This lifted the first target and its first modified property only, on the
+    reasoning that almost every audit event has exactly one and that
+    inventing `target_user_2` would give rules a field they cannot rely on
+    being present. The hazard is real and is why nothing below is keyed by
+    index; the premise was not. Issue #1718 measured ten alerts from a real
+    tenant: a group-membership event carries the member *and* the group as
+    two targets as a matter of course, and a device update's first modified
+    property is the empty `Included Updated Properties` marker, so a device's
+    id, OS and trust type were lost on every device event.
+
+    What makes `target_user_2` unreliable is **position**, not plurality.
+    Position is not semantics, so a rule written against index 2 passes a
+    fixture where the group happened to be second and misses the event where
+    it is first. So `targets` and `modified_properties` are keyed by what a
+    thing *is* — its type, its property name — and every flat field derived
+    from them is found by searching for that meaning rather than by counting:
+    `target_group_name` looks for the group, `target_hostname` looks for the
+    device. A rule clausing on one of those is making a claim about the
+    event's semantics, which holds wherever in the list Graph put it.
+
+    `modified_properties` maps a property name to its **new** value, which is
+    what a reader of a change record wants. Anything that needs the previous
+    value, or needs to know which target carried the change, reads `targets`,
+    where every property keeps both halves.
+
+    The original flat fields — `target_type`, `target_user`, `target_name`,
+    `target_id`, `modified_property`, `old_value`, `new_value` — still
+    describe `targetResources[0]` and its `modifiedProperties[0]` exactly as
+    before, so every rule written against them is unaffected.
+    """
+    if not isinstance(targets, list) or not targets:
+        return {}
+    resources = [t for t in targets if isinstance(t, dict)]
+    if not resources:
+        return {}
+
+    first = resources[0]
+    out: dict[str, Any] = {
+        "target_type": first.get("type"),
+        "target_user": first.get("userPrincipalName"),
+        "target_name": first.get("displayName"),
+        "target_id": first.get("id"),
+        "target_count": len(resources),
+        "targets": [
+            {
+                "type": target.get("type"),
+                "id": target.get("id"),
+                "user_principal_name": target.get("userPrincipalName"),
+                "display_name": target.get("displayName"),
+                "modified_properties": [
+                    {
+                        "name": change.get("displayName"),
+                        "old_value": _unquote(change.get("oldValue")),
+                        "new_value": _unquote(change.get("newValue")),
+                    }
+                    for change in (target.get("modifiedProperties") or [])
+                    if isinstance(change, dict)
+                ],
+            }
+            for target in resources
+        ],
+    }
+
+    modified = first.get("modifiedProperties")
+    if isinstance(modified, list) and modified and isinstance(modified[0], dict):
+        change = modified[0]
+        out["modified_property"] = change.get("displayName")
+        out["old_value"] = _unquote(change.get("oldValue"))
+        out["new_value"] = _unquote(change.get("newValue"))
+
+    # One map across every target. A property name repeated on two targets
+    # keeps its first occurrence, which is the same precedence the flat
+    # fields give `targetResources[0]`; both values are still in `targets`.
+    properties: dict[str, str] = {}
+    for target in out["targets"]:
+        for change in target["modified_properties"]:
+            name = change["name"]
+            if isinstance(name, str) and name and name not in properties:
+                properties[name] = change["new_value"]
+    out["modified_properties"] = properties
+
+    group = _targets_of_type(resources, "group")
+    group_name = properties.get("Group.DisplayName") or (group or {}).get("displayName")
+    group_id = properties.get("Group.ObjectID") or (group or {}).get("id")
+    if group_name:
+        out["target_group_name"] = group_name
+    if group_id:
+        out["target_group_id"] = group_id
+
+    # A device target is a host, and saying so here is what lets it become
+    # one: the ingest normalizer fills OCSF `device.name` from this, so the
+    # alert row's `affected_hosts` and its correlation entity become the
+    # device that changed rather than the Intune client that changed it.
+    device = _targets_of_type(resources, "device")
+    if device and device.get("displayName"):
+        out["target_hostname"] = device["displayName"]
+    device_id = properties.get("DeviceId") or (device or {}).get("id")
+    if device_id:
+        out["target_device_id"] = device_id
+    if properties.get("DeviceOSType"):
+        out["target_device_os"] = properties["DeviceOSType"]
+    if properties.get("DeviceTrustType"):
+        out["target_device_trust_type"] = properties["DeviceTrustType"]
+
+    # Graph reports `result: success` for a directory call that completed and
+    # changed nothing — adding a member who was already in the group returns
+    # `DirectoryValueExistsException` in a modified property while the event
+    # itself stays successful. The vendor's own verdict is reported as the
+    # vendor wrote it; this names the execution result beside it so a reader
+    # or a rule can tell a real add from a no-op, which is a distinction
+    # neither field makes alone. Graph spells the key with a trailing dot.
+    execution = properties.get("MethodExecutionResult.") or properties.get("MethodExecutionResult")
+    if execution:
+        out["method_execution_result"] = execution
+
+    return out
 
 
 class AzureEntraConnector(BaseConnector):
@@ -165,7 +312,7 @@ class AzureEntraConnector(BaseConnector):
                     params=audit_params,
                 )
             if audit_resp.status_code == 200:
-                for raw in audit_resp.json().get("value", []):
+                for raw in await self._read_pages(client, audit_resp, "directory_audits"):
                     raw["_aisoc_event_kind"] = "directoryAudit"
                     events.append(raw)
             else:
@@ -187,7 +334,7 @@ class AzureEntraConnector(BaseConnector):
                 params=signin_params,
             )
             if signin_resp.status_code == 200:
-                for raw in signin_resp.json().get("value", []):
+                for raw in await self._read_pages(client, signin_resp, "risky_signins"):
                     raw["_aisoc_event_kind"] = "riskySignIn"
                     events.append(raw)
             else:
@@ -198,6 +345,32 @@ class AzureEntraConnector(BaseConnector):
                 )
 
         return [self.normalize(e) for e in events]
+
+    async def _read_pages(self, client: httpx.AsyncClient, first: httpx.Response, feed: str) -> list[dict[str, Any]]:
+        """Every entry of a Graph collection, starting from its first page.
+
+        Graph returns ``$top`` entries and an ``@odata.nextLink`` while more
+        remain. Reading only the first page kept the newest 200 entries of the
+        window and dropped the rest; the next poll's window starts later, so
+        they were never read. The link already carries the filter, ordering
+        and skip token, so it is requested as-is. A failed later page keeps
+        what was already read.
+        """
+        body = first.json()
+        entries: list[dict[str, Any]] = list(body.get("value", []))
+        for _ in range(_MAX_PAGES - 1):
+            next_link = body.get("@odata.nextLink")
+            if not next_link:
+                return entries
+            resp = await client.get(next_link, headers=self._headers())
+            if resp.status_code != 200:
+                logger.warning("azure_entra.next_page_failed", feed=feed, status=resp.status_code, body=resp.text[:300])
+                return entries
+            body = resp.json()
+            entries.extend(body.get("value", []))
+        if body.get("@odata.nextLink"):
+            logger.warning("azure_entra.fetch_page_cap_reached", feed=feed, pages=_MAX_PAGES, entries=len(entries))
+        return entries
 
     # ------------------------- posture --------------------------
 
@@ -307,15 +480,63 @@ class AzureEntraConnector(BaseConnector):
         user_part = initiator.get("user", {}) or {}
         app_part = initiator.get("app", {}) or {}
 
+        # Issue #1718. Graph records a user acting through a first-party
+        # client by putting the *client* in `user.displayName` and the person
+        # in `user.userPrincipalName`, so preferring the display name named
+        # "Microsoft Teams Services" as the actor on an event a person
+        # performed. The principal name leads because it is the one field
+        # that is a person whenever it is present at all. The display name is
+        # not discarded, it is carried under its own name: nothing downstream
+        # can tell from the value alone whether that slot held a person or a
+        # client, so the connector states which is which instead of leaving a
+        # reader to guess.
+        actor_upn = user_part.get("userPrincipalName")
+        actor_app = app_part.get("displayName")
+
+        # Which kind of principal Graph recorded. Decided on whether a human
+        # principal name initiated the change, not on which JSON slot
+        # Microsoft used: a service initiator appears under `app` in some
+        # categories and under `user` with no principal name in others, and a
+        # detection separating an administrator's action from a self-service
+        # one has to hold across both. Always a string so a clause on it
+        # cannot silently stop matching, and "unknown" rather than a guess
+        # when there is a principal with no name to judge by.
+        if actor_upn:
+            initiator_type = "user"
+        elif app_part:
+            initiator_type = "app"
+        else:
+            initiator_type = "unknown"
+
         return {
             "source": self.connector_id,
             "external_id": raw.get("id", ""),
             "title": raw.get("activityDisplayName", "Entra Directory Audit"),
             "description": (f"category={category}; result={raw.get('result')}; resultReason={raw.get('resultReason', '')}"),
             "severity": severity,
-            "actor": user_part.get("displayName") or app_part.get("displayName"),
-            "actor_email": user_part.get("userPrincipalName"),
+            "actor": actor_upn or user_part.get("displayName") or actor_app,
+            "actor_email": actor_upn,
+            "actor_app": actor_app,
+            "actor_display_name": user_part.get("displayName"),
+            "initiator_type": initiator_type,
+            "src_ip": user_part.get("ipAddress"),
             "event_type": f"azure.entra.audit.{category.lower() or 'unknown'}",
+            # `event_type` carries the *category*, which is far too coarse to
+            # clause on: every role grant, removal and eligibility change in
+            # the tenant shares `azure.entra.audit.rolemanagement`. The
+            # activity is the thing a detection is about, so it is lifted
+            # under its own name alongside a normalised form that survives
+            # Graph's capitalisation.
+            "activity": raw.get("activityDisplayName"),
+            "activity_key": str(raw.get("activityDisplayName") or "").strip().lower().replace(" ", "_"),
+            "operation_type": raw.get("operationType"),
+            "audit_category": category,
+            "audit_result": result,
+            # `targetResources` is a list, and the engine flattens
+            # `raw_event` one level — so the account a role was granted to,
+            # and the role itself, were both invisible. A role-grant rule
+            # could name the category and nothing about what was granted.
+            **_target_fields(raw.get("targetResources")),
             "raw_event": raw,
             "created_at": raw.get("activityDateTime"),
         }

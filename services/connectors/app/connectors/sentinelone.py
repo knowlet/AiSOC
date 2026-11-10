@@ -15,6 +15,10 @@ from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Fiel
 
 logger = structlog.get_logger()
 
+_PER_PAGE = 100
+# Bound on pages per poll so a misbehaving cursor cannot loop forever.
+_MAX_PAGES = 50
+
 _SEVERITY_MAP = {
     "Undefined": "info",
     "Info": "info",
@@ -26,6 +30,21 @@ _SEVERITY_MAP = {
     # rather than getting collapsed into ``high``.
     "Critical": "critical",
 }
+
+# ``threatInfo.confidenceLevel`` is the agent's verdict, not a severity
+# ladder: the API reports ``malicious`` or ``suspicious``. None of the keys
+# above can match it, so without this map every threat landed on the
+# ``medium`` default and a malicious detection ranked level with a
+# suspicious one.
+_CONFIDENCE_SEVERITY = {
+    "malicious": "high",
+    "suspicious": "medium",
+}
+
+
+def _severity(confidence: Any) -> str:
+    value = str(confidence or "")
+    return _CONFIDENCE_SEVERITY.get(value.lower()) or _SEVERITY_MAP.get(value, "medium")
 
 
 class SentinelOneConnector(BaseConnector):
@@ -99,19 +118,32 @@ class SentinelOneConnector(BaseConnector):
         since = (datetime.now(UTC) - timedelta(seconds=since_seconds)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
         params: dict[str, Any] = {
             "createdAt__gte": since,
-            "limit": 100,
+            "limit": _PER_PAGE,
         }
         if self._site_id:
             params["siteIds"] = self._site_id
 
+        threats: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{self._base_url}/web/api/v2.1/threats",
-                headers=self._headers(),
-                params=params,
-            )
-            resp.raise_for_status()
-            threats = resp.json().get("data", [])
+            # The threats endpoint is cursor-paginated. Reading only the first
+            # page dropped every threat past the 100th in a poll window, and the
+            # next poll's window starts later, so those threats were never read.
+            for _ in range(_MAX_PAGES):
+                resp = await client.get(
+                    f"{self._base_url}/web/api/v2.1/threats",
+                    headers=self._headers(),
+                    params=params,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                page = body.get("data") or []
+                threats.extend(page)
+                cursor = (body.get("pagination") or {}).get("nextCursor")
+                if not cursor or not page:
+                    break
+                params["cursor"] = cursor
+            else:
+                logger.warning("sentinelone.fetch_alerts.page_cap_reached", pages=_MAX_PAGES, threats=len(threats))
 
         return [self.normalize(t) for t in threats]
 
@@ -128,7 +160,7 @@ class SentinelOneConnector(BaseConnector):
                 f"{threat_info.get('threatName', 'unknown')} on "
                 f"{agent_info.get('agentComputerName', 'unknown')}"
             ),
-            "severity": _SEVERITY_MAP.get(threat_info.get("confidenceLevel", "Medium"), "medium"),
+            "severity": _severity(threat_info.get("confidenceLevel")),
             "src_ip": agent_info.get("agentIpV4", agent_info.get("externalIp")),
             "hostname": agent_info.get("agentComputerName"),
             "actor": threat_info.get("processUser"),

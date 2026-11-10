@@ -32,6 +32,7 @@ import structlog
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from app.connectors._paging import read_token_pages
 from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Field, OAuthHints
 from app.connectors.posture import POSTURE_SNAPSHOT_ID, Collected
 from app.connectors.posture import gws as gws_posture
@@ -56,6 +57,40 @@ _DIRECTORY_SCOPE = " ".join(
 
 _DEFAULT_APPS = ("login", "admin", "drive", "token", "mobile")
 _PAGE_SIZE = 500
+
+# How long Google withholds an event before the Reports API will answer it.
+#
+# This is a vendor fact, not a tuning knob, and it is published per
+# application: https://support.google.com/a/answer/7061566 states the lag
+# "appl[ies] to log events data from the audit and investigation page,
+# security investigation tool, alert center, and the Admin SDK Reports API",
+# and the spread across the applications polled here is three orders of
+# magnitude — Admin, Drive, Devices and Login events are "Near real time
+# (couple of minutes)" while Token log events are "A couple of hours".
+#
+# Each figure sits above the documented one, because the same page warns:
+# "There's a small chance that reports and log event data for some events
+# will be delayed beyond the following specified times." Undershooting puts
+# the window back inside the band Google has not published, which is the
+# defect this exists to close; overshooting only delays an event.
+#
+# The cost is latency and the alternative was silence. A window ending at
+# `now` never held the unpublished tail, and the next poll began where it
+# ended, so that tail was read once while empty and never requeried. For
+# Token, whose lag exceeds the default interval by a factor of about
+# twenty-four, no poll ever overlapped the published part of the timeline at
+# all: the loss was not a fraction, it was everything.
+_PUBLICATION_LAG_S: dict[str, int] = {
+    "login": 600,
+    "admin": 600,
+    "drive": 600,
+    "mobile": 600,
+    "token": 10_800,
+}
+# Applied to an application not named above, so adding one to ``_DEFAULT_APPS``
+# cannot silently reintroduce a window pinned to ``now``. Look the application
+# up in Google's table and give it its own entry rather than relying on this.
+_DEFAULT_PUBLICATION_LAG_S = 600
 
 
 def _b64url(data: bytes) -> str:
@@ -227,33 +262,64 @@ class GoogleWorkspaceConnector(BaseConnector):
 
     async def fetch_alerts(self, since_seconds: int = 300) -> list[dict[str, Any]]:
         await self._authenticate()
-        start_time = (datetime.now(UTC) - timedelta(seconds=since_seconds)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        now = datetime.now(UTC)
 
         events: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
             for app_name in _DEFAULT_APPS:
-                resp = await client.get(
-                    f"{_REPORTS_BASE}/users/all/applications/{app_name}",
-                    headers=self._headers(),
-                    params={"startTime": start_time, "maxResults": _PAGE_SIZE},
+                url = f"{_REPORTS_BASE}/users/all/applications/{app_name}"
+                # End the window where Google has published, not at `now`, and
+                # keep its length so consecutive polls stay contiguous across
+                # that boundary. `endTime` has to be sent explicitly: left
+                # unset, "the report returns all activities from the startTime
+                # until the current time", which is the pinned-to-now window
+                # whose unpublished tail was being lost.
+                lag = _PUBLICATION_LAG_S.get(app_name, _DEFAULT_PUBLICATION_LAG_S)
+                end = now - timedelta(seconds=lag)
+                start_time = (end - timedelta(seconds=since_seconds)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                end_time = end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+                async def page(
+                    token: str | None,
+                    *,
+                    url: str = url,
+                    app_name: str = app_name,
+                    start_time: str = start_time,
+                    end_time: str = end_time,
+                ) -> httpx.Response:
+                    params: dict[str, Any] = {
+                        "startTime": start_time,
+                        "endTime": end_time,
+                        "maxResults": _PAGE_SIZE,
+                    }
+                    if token:
+                        params["pageToken"] = token
+                    resp = await client.get(url, headers=self._headers(), params=params)
+                    if resp.status_code == 401:
+                        self._invalidate()
+                        await self._authenticate()
+                        resp = await client.get(url, headers=self._headers(), params=params)
+                    if resp.status_code != 200:
+                        logger.warning(
+                            "google_workspace.fetch_failed",
+                            application=app_name,
+                            status=resp.status_code,
+                            body=resp.text[:300],
+                        )
+                    return resp
+
+                # `maxResults` bounds one response page, not the window:
+                # "The response's `nextPageToken` property has the token to
+                # the second page." Reading one page per application dropped
+                # the rest of that application's window, and the next poll's
+                # window starts after this one. A single noisy application —
+                # `drive` on a busy tenant — was enough to lose the others'
+                # worth of activity behind it.
+                items = await read_token_pages(
+                    request=page,
+                    items_field="items",
+                    feed=f"activities.{app_name}",
                 )
-                if resp.status_code == 401:
-                    self._invalidate()
-                    await self._authenticate()
-                    resp = await client.get(
-                        f"{_REPORTS_BASE}/users/all/applications/{app_name}",
-                        headers=self._headers(),
-                        params={"startTime": start_time, "maxResults": _PAGE_SIZE},
-                    )
-                if resp.status_code != 200:
-                    logger.warning(
-                        "google_workspace.fetch_failed",
-                        application=app_name,
-                        status=resp.status_code,
-                        body=resp.text[:300],
-                    )
-                    continue
-                items = resp.json().get("items", [])
                 # Tag each item with the app name so normalize() doesn't
                 # have to crack open ``id.applicationName`` (which is
                 # present, but explicit beats implicit).
@@ -366,6 +432,35 @@ class GoogleWorkspaceConnector(BaseConnector):
         # have it, but login/admin/drive almost always do.
         ip_address = raw.get("ipAddress")
 
+        # The Reports API puts everything that distinguishes one activity
+        # from another inside `events[].parameters` — the OAuth scopes a
+        # consent granted, the role an admin assigned, the visibility a
+        # share opened, the address a forward was pointed at. `events` is a
+        # list, so the engine's one-level `raw_event` flatten cannot reach
+        # any of it and a rule clausing on a scope or a role read None.
+        #
+        # Each parameter is lifted under `param_<name lowercased>`, keeping
+        # Google's own names rather than inventing a mapping that would have
+        # to be maintained against an API that keeps adding activities.
+        # `multiValue` and `boolValue` are preserved as a list and a bool so
+        # `_has_any` and an equality clause both work.
+        params: dict[str, Any] = {}
+        for parameter in primary_event.get("parameters") or []:
+            if not isinstance(parameter, dict):
+                continue
+            name = parameter.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if "multiValue" in parameter:
+                value: Any = parameter.get("multiValue")
+            elif "boolValue" in parameter:
+                value = parameter.get("boolValue")
+            elif "intValue" in parameter:
+                value = parameter.get("intValue")
+            else:
+                value = parameter.get("value")
+            params[f"param_{name.lower()}"] = value
+
         return {
             "source": self.connector_id,
             "external_id": (raw.get("id") or {}).get("uniqueQualifier", ""),
@@ -376,7 +471,10 @@ class GoogleWorkspaceConnector(BaseConnector):
             "actor_email": actor if "@" in actor else None,
             "src_ip": ip_address,
             "application": application,
+            "event_name": event_name,
+            "event_name_type": primary_event.get("type"),
             "event_type": (f"workspace.{application}.{event_name}".lower() if application and event_name else "workspace.audit"),
+            **params,
             "raw_event": raw,
             "created_at": (raw.get("id") or {}).get("time"),
         }

@@ -14,7 +14,6 @@ import json
 import time
 
 import pytest
-
 from aisoc_sandbox import (
     Ledger,
     available_scenarios,
@@ -22,7 +21,6 @@ from aisoc_sandbox import (
     run_investigation,
 )
 from aisoc_sandbox.cli import main
-
 
 # ---------------------------------------------------------------------------
 # Scenarios are real, loadable, well-formed.
@@ -117,6 +115,18 @@ def test_ledger_human_render_is_plain_text_when_not_tty() -> None:
     # All four funnel labels must appear.
     for label in ("DETECT", "TRIAGE", "HUNT", "RESPOND"):
         assert label in text
+
+
+def test_ledger_human_render_handles_windows_legacy_console_encoding() -> None:
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    run_investigation(load_scenario("lateral-movement")).render_human(out=stream)
+    stream.flush()
+    rendered = raw.getvalue().decode("cp1252")
+    assert "Investigation Ledger" in rendered
+    assert "RESPOND" in rendered
+    assert "would-call" in rendered
+    assert "[not executed]" in rendered
 
 
 # ---------------------------------------------------------------------------

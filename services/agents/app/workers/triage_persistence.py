@@ -51,9 +51,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from app.context import cloud_posture as cloud_posture_module
 from app.context import dispositions as dispositions_module
 from app.context import identity as identity_module
 from app.context import knowledge_base, organisation_memory, tenant_skills
+from app.context.cloud_posture import CloudPostureContext
 from app.context.dispositions import RecentDispositions
 from app.context.identity import IdentityContext
 from app.context.knowledge_base import RunbookRetrieval
@@ -105,6 +107,7 @@ CONTEXT_FREEZE_KINDS: dict[str, str] = {
     "retrieve_runbooks": CUTOFF,
     "recent_dispositions": CUTOFF,
     "fetch_identity_context": CUTOFF,
+    "fetch_cloud_posture_context": CUTOFF,
 }
 
 
@@ -184,6 +187,12 @@ class TriageWriter(Protocol):
         author: str,
         alert_id: Any = None,
         injection_suspected: bool = False,
+        # Phase 4.4(a). Accepted by every writer because
+        # `test_outcome_writer_signature_parity` requires the canonical
+        # keyword set to be identical across them — a writer that silently
+        # dropped it would store a prior with no evidence, invisible to
+        # similarity forever.
+        alert: dict[str, Any] | None = None,
     ) -> None:
         """Write the per-signature outcome prior that lets a repeat alert suppress."""
 
@@ -282,6 +291,15 @@ class TriageContextReader(Protocol):
         records became true.
         """
 
+    async def fetch_cloud_posture_context(self, tenant_id: str | None, *, resources: list[str]) -> CloudPostureContext:
+        """What a CNAPP already knows is wrong with the resources this alert names.
+
+        A ``CUTOFF`` source, and the one whose freeze is strongest: a posture
+        finding carries the vendor's own ``first_detected_at``, which is when
+        the estate became wrong rather than when anything was imported, so the
+        cut is on the fact's own time.
+        """
+
 
 class LiveTriageWriter:
     """The production sink. Every method is the call the worker used to make inline.
@@ -337,6 +355,7 @@ class LiveTriageWriter:
         author: str,
         alert_id: Any = None,
         injection_suspected: bool = False,
+        alert: dict[str, Any] | None = None,
     ) -> None:
         await outcomes_module.record_outcome(
             tenant_id,
@@ -346,6 +365,10 @@ class LiveTriageWriter:
             author=author,
             alert_id=alert_id,
             injection_suspected=injection_suspected,
+            # Phase 4.4(a). The prior carries the canonical evidence it was
+            # derived from, because a signature is a hash and similarity
+            # needs something comparable.
+            alert=alert,
         )
 
     async def record_suppression(
@@ -435,3 +458,6 @@ class LiveTriageContextReader:
 
     async def fetch_identity_context(self, tenant_id: str | None, *, accounts: list[str]) -> IdentityContext:
         return await identity_module.fetch_identity_context(tenant_id, accounts=accounts, as_of=None)
+
+    async def fetch_cloud_posture_context(self, tenant_id: str | None, *, resources: list[str]) -> CloudPostureContext:
+        return await cloud_posture_module.fetch_cloud_posture_context(tenant_id, resources=resources, as_of=None)
