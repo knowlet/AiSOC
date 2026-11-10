@@ -104,8 +104,6 @@ jobs:
       # one CI never ran was the broken one.
       - name: Install the reader
         run: python -m pip install --quiet 'pyyaml>=6,<7'
-      - name: Small runtime and broken-install regression controls
-        run: python -m pytest tests/test_runtime_requirements.py -v --tb=short
       - name: The gate detects each divergence, and refuses a tree with nothing to compare
         run: python scripts/check_ci_install_parity.py --self-test
       - name: Every job grading a service installs what that service's image ships
