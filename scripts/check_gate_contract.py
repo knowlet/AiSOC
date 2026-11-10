@@ -209,16 +209,6 @@ EMPTY_TREE_EXCEPTIONS: dict[str, dict[str, tuple[str, str]]] = {
             "any file is opened.",
         )
     },
-    "verify_runtime_requirements.py": {
-        ANY_SHAPE: (
-            "inconclusive",
-            "Checks the explicitly named lock export against installed metadata inside a built image, "
-            "not repository-tree content. A bare checkout supplies neither that generated export nor "
-            "the image's interpreter. Required arguments are therefore refused before any file is read. "
-            "Its --self-test rejects empty/inactive exports, missing distributions and wrong versions; "
-            "test_runtime_requirements.py additionally exercises the workflow and real pip metadata.",
-        )
-    },
     "wet_eval_update_benchmark.py": {
         ANY_SHAPE: (
             "inconclusive",
