@@ -353,6 +353,30 @@ jobs:
         run: python scripts/check_module_reachability.py --self-test
       - name: Verify every service module has a production importer
         run: python scripts/check_module_reachability.py
+      # A connector's poll window is contiguous: it runs from `now -
+      # since_seconds` to `now`, the scheduler passes the poll interval, and
+      # nothing re-reads an earlier window. So a page a connector does not
+      # read is a page nothing reads later — the vendor's cap becomes silent
+      # data loss rather than lag. Five connectors shipped that shape inside
+      # two days (Duo, Entra, Defender, Sentinel and the three Google ones),
+      # and most order newest-first, so what went missing was the *start* of
+      # whatever burst overflowed the window.
+      - name: Connector paging — self-test
+        run: python scripts/check_connector_paging.py --self-test
+      - name: Verify every connector reads its poll window to the end
+        run: python scripts/check_connector_paging.py
+      # The sibling defect to the one above, and it has now shipped three
+      # times: a connector polls a URL the vendor does not serve, and the
+      # 404 is handled in the same branch as a 403, so "our path is wrong"
+      # is reported as "the customer has not bought this" and nobody
+      # debugs it. Cloudflare WAF (#1686), the decommissioned CrowdStrike
+      # Detects API, and GitLab vulnerability findings (#1754) each ran
+      # that way for their whole life. A pairing is allowed only when the
+      # vendor publishes 404 in that endpoint's own response list.
+      - name: 404 is not 403 — self-test
+        run: python scripts/check_connector_404_conflation.py --self-test
+      - name: Verify no connector files a 404 as a permissions problem
+        run: python scripts/check_connector_404_conflation.py
       # Two permission models shipped side by side: 275 route dependencies
       # read the hardcoded ROLE_PERMISSIONS map while 27 read the
       # user_roles / role_permissions tables the console's RBAC screen
@@ -517,6 +541,18 @@ jobs:
       # locally if this check fails.
       - name: Verify vendored narrative builder is in sync
         run: python scripts/sync_vendored_narrative.py --check
+      # `app.services.alert_status` owns which statuses mean an alert is
+      # finished. Fusion's alert sink needs that list to decide whether a
+      # repeat should reopen a closed alert (GHSA-qp9f-459j-w89c), and it
+      # cannot import across the service boundary — its Docker build context
+      # is `services/fusion`. The vendored copy is rendered rather than
+      # byte-copied, because the canonical module pulls in SQLAlchemy for two
+      # query helpers fusion has no use for. If this fails, the console and
+      # fusion disagree about what "closed" means, which either misses a
+      # recurrence or churns an alert an analyst is working. Re-run
+      # `python scripts/sync_vendored_alert_status.py` locally to fix.
+      - name: Verify vendored alert-status vocabulary is in sync
+        run: python scripts/sync_vendored_alert_status.py --check
       # The fifth vendored mirror, and the only one that had no gate. The
       # redactor strips internal IPs, emails, paths and secret-shaped strings
       # before untrusted text reaches a prompt; a copy that silently drifts
@@ -575,8 +611,17 @@ jobs:
       #   2. apps/web/src/data/connectorCount.ts matches the JSON
       #   3. README, ROADMAP, docs/architecture and apps/docs all carry the
       #      same number as the registry
+      #   4. no component under apps/web/src renders the figure as a literal
       # If this fails, run `python scripts/generate_connector_count.py` and
       # commit the result.
+      #
+      # (4) exists because (3) only ever looked at markdown: the landing hero
+      # and the onboarding hero both rendered a hardcoded 26 against a
+      # registry of 91, the latter 35 lines below a correct dynamic use in
+      # the same file, and this gate reported OK throughout.
+      - name: Connector-count gate self-test (the defect, and two near misses)
+        run: python scripts/generate_connector_count.py --self-test
+
       - name: Verify connector count is in sync (Phase 1.1)
         run: python scripts/generate_connector_count.py --check
       # Same shape again, for the self-hosted webfonts. `apps/web` used to
@@ -1575,6 +1620,35 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/service_requirements.py api agents | xargs pip install --quiet
+
+      # The sibling of `check_raw_sql_columns.py`, in the other direction:
+      # that one asks whether raw SQL names columns the migrations create,
+      # this one asks whether the ORM agrees with them about NULL.
+      #
+      # `tenants.mssp_role` was NOT NULL DEFAULT 'standalone' in the schema
+      # and `nullable=True` with no default in the model. Those read as
+      # compatible and are not: a column the ORM thinks is nullable is named
+      # in the INSERT with an explicit NULL, and a named column does not
+      # receive the column DEFAULT. So every insert that omitted the field
+      # failed, which is `pnpm aisoc:demo` dying at its seed step on a brand
+      # new database (#1693) -- the first environment to insert a tenant,
+      # not a seed bug.
+      #
+      # It lives in *this* job and not in Lint & Type-check for the same
+      # reason the injection-pattern check above does: reading the mapper
+      # imports `app.models`, which pulls SQLAlchemy in. The first attempt
+      # put it in the lint job and it died on `No module named 'sqlalchemy'`.
+      #
+      # The self-test runs first, and this parser has already been wrong
+      # twice in ways only a check caught -- it read a re-add of an existing
+      # column as a redefinition, and it saw only the first clause of a
+      # multi-column ALTER TABLE, which is exactly how `mssp_role` is
+      # declared. The gate missed the column it was written for until its
+      # negative control was run.
+      - name: Verify the ORM and the migrations agree about NULL
+        run: |
+          python3 scripts/check_orm_nullability.py --self-test
+          python3 scripts/check_orm_nullability.py
       # Boot-test: verify the FastAPI app can actually import without
       # NameError / ImportError before spending time on the full pytest
       # suite.  PR #152 fixed two import-time NameErrors (model_validator,

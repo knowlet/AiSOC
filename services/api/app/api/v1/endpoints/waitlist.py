@@ -37,9 +37,14 @@ The signup endpoint is the *one* unauthenticated mutating route in the
 v1 API surface. ``get_current_user`` is intentionally **not** wired in
 here; we'd otherwise reject the public form. The admin endpoints reuse
 the standard :class:`AuthUser` dependency and require the
-``admin:waitlist`` permission, which falls back to ``settings:write``
-on tenants whose RBAC tables haven't been migrated to the granular
-admin scope yet.
+``admin:waitlist`` permission, and nothing else. The waitlist is
+deployment-wide prospect PII, so only the wildcard roles hold it.
+
+There was a ``settings:write`` fallback here "until the RBAC tables are
+migrated". They never were, so ``admin:waitlist`` did not exist and the
+fallback was the only reachable branch -- which is held by every
+``tenant_admin`` (GHSA-6cwm-cx8p-h7f5). Migration 159 seeds the
+permission and the fallback is gone.
 """
 
 from __future__ import annotations
@@ -275,19 +280,24 @@ def _to_wire(row: WaitlistEntry) -> WaitlistEntryWire:
 
 
 async def _require_admin(user: AuthUser, db: AsyncSession) -> None:
-    """Centralised admin gate.
+    """Centralised admin gate: ``admin:waitlist``, and nothing else.
 
-    The granular RBAC layer prefers ``admin:waitlist``; tenants that
-    haven't migrated to the granular scope fall back to the legacy
-    ``settings:write`` role permission. Either grants access.
+    This fell back to ``settings:write`` for "tenants that haven't migrated
+    to the granular scope". ``admin:waitlist`` was in no catalog, so no role
+    could ever resolve it and the fallback was the only branch that ran --
+    and ``tenant_admin`` holds ``settings:write``. The waitlist is one
+    deployment-wide table, so any tenant administrator could read and edit
+    every prospect's email, company, role and motivation
+    (GHSA-6cwm-cx8p-h7f5).
+
+    Migration 159 seeds the permission. It is granted to no tenant-scoped
+    role, because this table belongs to the deployment and not to a tenant.
     """
     if await user.has_permission_db("admin:waitlist", db):
         return
-    if await user.has_permission_db("settings:write", db):
-        return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="admin:waitlist (or settings:write) required",
+        detail="admin:waitlist required",
     )
 
 
