@@ -586,7 +586,7 @@ class ConnectorScheduler:
         started = datetime.now(UTC)
         try:
             connector = connector_class(**kwargs)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             logger.error(
                 "connector.scheduler.bad_config id=%s type=%s err=%s",
                 connector_id,
@@ -606,10 +606,14 @@ class ConnectorScheduler:
         # so the seed silently did nothing for almost all of them at
         # `logger.debug`, and nothing could report which. Whether a connector
         # checkpoints is now a question its class answers.
+        requires_complete_poll = getattr(connector, "requires_complete_poll", False) is True
         try:
             connector.set_checkpoint((target.connector_config or {}).get("checkpoint"))
         except Exception:  # never let checkpoint seeding break a poll
             logger.debug("connector.scheduler.checkpoint_seed_failed id=%s", connector_id)
+            if requires_complete_poll:
+                await self._record_failure(target.id)
+                return
 
         # The schema lives in connector_config; use it for fetch lookback.
         # We deliberately default to the same poll interval, so a 5-min
@@ -631,6 +635,24 @@ class ConnectorScheduler:
             )
         else:
             since_seconds = _coerce_poll_interval(target.connector_config)
+        # A windowed source can save its first replay floor before any I/O.
+        # This is not an advancement: it preserves where a failed first poll
+        # started, even if the process restarts after the normal lookback has
+        # elapsed. Later polls retain the last fully committed boundary.
+        try:
+            initial_checkpoint = connector.prepare_poll(
+                since_seconds=since_seconds,
+                last_sync=target.last_sync,
+                started_at=started,
+            )
+        except Exception:
+            logger.exception("connector.scheduler.poll_prepare_failed id=%s", connector_id)
+            await self._record_failure(target.id)
+            return
+        if isinstance(initial_checkpoint, dict) and initial_checkpoint:
+            if not await self._record_checkpoint(target.id, initial_checkpoint):
+                await self._record_failure(target.id)
+                return
         try:
             raw_events = await connector.fetch_alerts(since_seconds=since_seconds)
         except Exception:
@@ -656,7 +678,7 @@ class ConnectorScheduler:
         # Deliberately outside the `try` around `fetch_alerts` and in its own:
         # a scanner sync that fails must not cost the poll its events, and a
         # fetch that fails must not be reported as a successful sync.
-        await self._sync_vulnerability_findings(connector, target)
+        vulnerability_sync_succeeded = await self._sync_vulnerability_findings(connector, target)
 
         # A CNAPP's configuration findings and runtime detections are posture
         # context about a resource, not events about a moment, so they take
@@ -785,23 +807,42 @@ class ConnectorScheduler:
         # rejected event and losing it permanently.
         counts_present = "accepted" in result and "rejected" in result
         batch_fully_accepted = counts_present and rejected == 0 and accepted == len(kept)
+        if not batch_fully_accepted:
+            logger.warning(
+                "connector.scheduler.checkpoint_withheld id=%s type=%s submitted=%d accepted=%d rejected=%d counts_present=%s",
+                connector_id,
+                target.connector_type,
+                len(kept),
+                accepted,
+                rejected,
+                counts_present,
+            )
+            self._discard_acknowledgements(connector, connector_id, reason="batch_not_fully_accepted", staged=len(kept))
+            await self._record_failure(target.id)
+            return
+        if requires_complete_poll and not vulnerability_sync_succeeded:
+            # Alert delivery is independent, but a combined source window
+            # cannot move past findings that were never fetched or stored.
+            # Replaying accepted alerts is preferable to an inventory gap.
+            self._discard_acknowledgements(connector, connector_id, reason="vulnerability_sync_failed", staged=len(kept))
+            await self._record_failure(target.id)
+            return
         try:
             new_checkpoint = connector.get_checkpoint()
         except Exception:  # never let checkpoint bookkeeping break a poll
             new_checkpoint = None
+            if requires_complete_poll:
+                await self._record_failure(target.id)
+                return
+        if requires_complete_poll and not (isinstance(new_checkpoint, dict) and new_checkpoint):
+            logger.error("connector.scheduler.poll_checkpoint_missing id=%s", connector_id)
+            await self._record_failure(target.id)
+            return
         if isinstance(new_checkpoint, dict) and new_checkpoint:
-            if batch_fully_accepted:
-                await self._record_checkpoint(target.id, new_checkpoint)
-            else:
-                logger.warning(
-                    "connector.scheduler.checkpoint_withheld id=%s type=%s submitted=%d accepted=%d rejected=%d counts_present=%s",
-                    connector_id,
-                    target.connector_type,
-                    len(kept),
-                    accepted,
-                    rejected,
-                    counts_present,
-                )
+            if not await self._record_checkpoint(target.id, new_checkpoint):
+                self._discard_acknowledgements(connector, connector_id, reason="checkpoint_write_failed", staged=len(kept))
+                await self._record_failure(target.id)
+                return
 
         # Only now may the source be told to forget the messages. Withholding
         # a cursor is not enough on a queue: a cursor over data that has
@@ -813,15 +854,7 @@ class ConnectorScheduler:
         # leaves messages that will be redelivered and a cursor that
         # recognises them; the other order leaves a source that has forgotten
         # them and a cursor that has not recorded them.
-        if batch_fully_accepted:
-            await self._commit_acknowledgements(connector, connector_id, target.connector_type)
-        else:
-            self._discard_acknowledgements(
-                connector,
-                connector_id,
-                reason="batch_not_fully_accepted",
-                staged=len(kept),
-            )
+        await self._commit_acknowledgements(connector, connector_id, target.connector_type)
 
         # If drift was detected, persist that fact *before* marking the
         # poll successful so the UI reflects "drifted" status alongside
@@ -853,7 +886,9 @@ class ConnectorScheduler:
         # within the flap window).
         should_backfill = False
         backfill_window_seconds = 0
-        if backfill_seconds is None and target.last_outage_at is not None:
+        # A complete-window connector has already replayed from its durable
+        # boundary. A second, capped lookback would only duplicate that work.
+        if not requires_complete_poll and backfill_seconds is None and target.last_outage_at is not None:
             outage_duration = (datetime.now(UTC) - target.last_outage_at).total_seconds()
             if outage_duration >= _BACKFILL_OUTAGE_THRESHOLD_S:
                 # Suppress flapping: don't re-fire a backfill if we already
@@ -997,24 +1032,26 @@ class ConnectorScheduler:
                 connector_id,
             )
 
-    async def _record_checkpoint(self, connector_id: uuid.UUID, checkpoint: dict[str, Any]) -> None:
+    async def _record_checkpoint(self, connector_id: uuid.UUID, checkpoint: dict[str, Any]) -> bool:
         """Persist an advanced ingest checkpoint into ``connector_config`` (#529).
 
-        Best-effort: a failed write leaves the previous checkpoint in place, so
-        the next poll simply re-scans a small overlap rather than skipping
-        events. One job per instance (``max_instances=1``) means no concurrent
-        writer races here.
+        A failed write leaves the previous checkpoint in place and returns
+        False. The caller must not report success or acknowledge a source
+        before its replay state is durable. One job per instance
+        (``max_instances=1``) means no concurrent writer races here.
         """
         if self._engine is None:  # pragma: no cover
-            return
+            return False
         try:
             async with self._engine.begin() as conn:
                 await record_checkpoint(conn, connector_id, checkpoint)
-        except Exception:  # pragma: no cover
-            logger.debug(
+            return True
+        except Exception:
+            logger.exception(
                 "connector.scheduler.record_checkpoint_failed id=%s",
                 connector_id,
             )
+            return False
 
     async def _commit_acknowledgements(self, connector: Any, connector_id: uuid.UUID, connector_type: str) -> None:
         """Answer the source for a batch ingest confirmed is durable.
@@ -1084,7 +1121,7 @@ class ConnectorScheduler:
                 staged,
             )
 
-    async def _sync_vulnerability_findings(self, connector: Any, target: Any) -> None:
+    async def _sync_vulnerability_findings(self, connector: Any, target: Any) -> bool:
         """Materialise a scanner's findings as vulnerability rows, if it has any.
 
         Fix-pass item 5.2. Written here rather than posted to the API because
@@ -1095,7 +1132,7 @@ class ConnectorScheduler:
         """
         fetch = getattr(connector, "fetch_vulnerability_findings", None)
         if fetch is None:
-            return
+            return True
 
         try:
             findings = await fetch()
@@ -1105,19 +1142,30 @@ class ConnectorScheduler:
                 target.id,
                 target.connector_type,
             )
-            return
+            return False
 
         if not findings:
-            return
+            return True
 
         try:
-            from app.vulnerabilities import sync_findings
+            from app.vulnerabilities import MAX_FINDINGS_PER_SYNC, sync_findings
 
-            counts = await sync_findings(
-                self._engine,
-                tenant_id=target.tenant_id,
-                findings=findings,
-            )
+            # sync_findings caps one transaction. Paginated sources can return
+            # more, so split here instead of letting it truncate the poll.
+            # If a later transaction fails, the caller retains the source
+            # cursor; replay touches the findings already committed.
+            counts = {"findings_inserted": 0, "findings_touched": 0, "skipped": 0}
+            for offset in range(0, len(findings), MAX_FINDINGS_PER_SYNC):
+                chunk = findings[offset : offset + MAX_FINDINGS_PER_SYNC]
+                result = await sync_findings(
+                    self._engine,
+                    tenant_id=target.tenant_id,
+                    findings=chunk,
+                )
+                if sum(result[key] for key in counts) != len(chunk):
+                    raise RuntimeError("vulnerability sync did not account for every finding")
+                for key in counts:
+                    counts[key] += result[key]
             logger.info(
                 "connector.scheduler.vulnerabilities_synced id=%s inserted=%d touched=%d skipped=%d",
                 target.id,
@@ -1125,12 +1173,14 @@ class ConnectorScheduler:
                 counts["findings_touched"],
                 counts["skipped"],
             )
+            return counts["skipped"] == 0
         except Exception:
             logger.exception(
                 "connector.scheduler.vulnerability_sync_failed id=%s type=%s",
                 target.id,
                 target.connector_type,
             )
+            return False
 
     async def _sync_cloud_security_findings(self, connector: Any, target: Any) -> None:
         """Materialise a CNAPP's posture findings as triage context, if it has any.

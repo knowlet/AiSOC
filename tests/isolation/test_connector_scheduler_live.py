@@ -32,7 +32,6 @@ else polled.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import threading
@@ -109,17 +108,19 @@ class _Ingest(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
-        with contextlib.suppress(Exception):
-            _Ingest.received.append(
-                {
-                    "tenant": self.headers.get("X-Tenant-ID"),
-                    "body": json.loads(raw.decode()),
-                }
-            )
-        self.send_response(202)
-        self.send_header("Content-Length", "2")
+        payload = json.loads(raw.decode())
+        _Ingest.received.append(
+            {
+                "tenant": self.headers.get("X-Tenant-ID"),
+                "body": payload,
+            }
+        )
+        body = json.dumps({"accepted": len(payload["events"]), "rejected": 0}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"{}")
+        self.wfile.write(body)
 
     def log_message(self, *_args) -> None:  # noqa: ANN002
         """Quiet."""

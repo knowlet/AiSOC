@@ -165,12 +165,15 @@ class TestAdoptionIsCountedNotAssumed:
         # every poll, which a bounded identity set cannot survive.
         "azure_event_hubs": (("event_time",), ("record_id",)),
     }
+    # Wazuh checkpoints completed query windows, not maximum event IDs.
+    # Its overlap must remain eligible for late-indexed documents.
+    WINDOW_BASED = {"wazuh"}
 
     def test_the_adopters_are_exactly_the_ones_recorded(self) -> None:
         actual = {cid for cid, cls in CONNECTOR_REGISTRY.items() if cls.checkpoints()}
         identity_based = set(TestUnorderedSourcesDoNotCarryAWatermark.UNORDERED)
 
-        assert actual == set(self.EXPECTED) | identity_based, (
+        assert actual == set(self.EXPECTED) | identity_based | self.WINDOW_BASED, (
             "the set of checkpointing connectors changed. Adding one is good — record it here. "
             "Losing one silently is the defect this replaces."
         )
@@ -188,7 +191,7 @@ class TestAdoptionIsCountedNotAssumed:
         overlap window after a restart, which is safe and loses events older
         than that window. The number is here so the gap is legible."""
         without = sorted(cid for cid, cls in CONNECTOR_REGISTRY.items() if not cls.checkpoints())
-        adopters = len(self.EXPECTED) + len(TestUnorderedSourcesDoNotCarryAWatermark.UNORDERED)
+        adopters = len(self.EXPECTED) + len(TestUnorderedSourcesDoNotCarryAWatermark.UNORDERED) + len(self.WINDOW_BASED)
 
         assert len(without) == len(CONNECTOR_REGISTRY) - adopters
         assert len(CONNECTOR_REGISTRY) >= 84
@@ -361,4 +364,10 @@ class TestTheSchedulerNoLongerDuckTypes:
         assert '"accepted" in result and "rejected" in result' in source
         assert "rejected == 0" in source
         assert "accepted == len(kept)" in source
-        assert "if batch_fully_accepted:" in source
+        refusal_index = source.index("if not batch_fully_accepted:")
+        # The scheduler now returns on refusal before reading or persisting
+        # any advanced cursor; test_scheduler also exercises this behavior.
+        assert accept_index < refusal_index < advance_index
+        refusal = source[refusal_index:advance_index]
+        assert "await self._record_failure(target.id)" in refusal
+        assert "return" in refusal

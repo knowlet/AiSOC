@@ -181,6 +181,8 @@ async def test_incomplete_ingest_response_withholds_the_checkpoint(monkeypatch, 
         await scheduler._poll_one(connector_id=inst.id)
 
     assert engine.checkpoint_calls == []
+    assert engine.failure_calls == [inst.id]
+    assert engine.success_calls == []
     assert "connector.scheduler.checkpoint_withheld" in caplog.text
     assert "submitted=2" in caplog.text
     assert f"accepted={int(response.get('accepted', 0) or 0)}" in caplog.text
@@ -215,6 +217,215 @@ async def test_empty_fully_processed_batch_may_persist_a_staged_checkpoint(monke
             "checkpoint": {"time": "2026-01-01T00:00:02Z", "id": "event-2"},
         }
     ]
+
+
+def _complete_poll_connector(events: list[dict[str, Any]]) -> MagicMock:
+    """A source whose alert and inventory windows commit together."""
+    connector = _checkpointing_connector(events)
+    connector.requires_complete_poll = True
+    connector.prepare_poll.return_value = None
+    connector.fetch_vulnerability_findings = AsyncMock(return_value=[])
+    return connector
+
+
+@pytest.mark.asyncio
+async def test_first_replay_floor_is_durable_before_fetch(monkeypatch):
+    inst = _make_instance(connector_type="fake_connector")
+    inst.last_sync = datetime.now(UTC) - timedelta(hours=2)
+    connector = _complete_poll_connector([{"id": "event-1"}])
+    initial = {"version": 1, "alerts": "2026-01-01T00:00:00Z", "vulnerabilities": "2025-12-31T23:00:00Z"}
+    connector.prepare_poll.return_value = initial
+    engine = _FakeEngine([inst])
+
+    async def fetch(*, since_seconds: int) -> list[dict[str, Any]]:
+        assert engine.checkpoint_calls == [{"connector_id": inst.id, "checkpoint": initial}]
+        assert since_seconds == 300
+        return [{"id": "event-1"}]
+
+    connector.fetch_alerts.side_effect = fetch
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=_FakeIngestClient(accepted=1), vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    prepared = connector.prepare_poll.call_args.kwargs
+    assert prepared["last_sync"] == inst.last_sync
+    assert prepared["since_seconds"] == 300
+    assert isinstance(prepared["started_at"], datetime)
+    assert len(engine.checkpoint_calls) == 2
+    assert engine.success_calls == [inst.id]
+
+
+@pytest.mark.asyncio
+async def test_failure_to_save_first_replay_floor_prevents_source_io(monkeypatch):
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([])
+    connector.prepare_poll.return_value = {"alerts": "2026-01-01T00:00:00Z"}
+    engine = _FakeEngine([inst])
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    monkeypatch.setattr("app.scheduler.record_checkpoint", AsyncMock(side_effect=RuntimeError("database unavailable")))
+    ingest = _FakeIngestClient()
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=ingest, vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    connector.fetch_alerts.assert_not_awaited()
+    assert ingest.calls == 0
+    assert engine.failure_calls == [inst.id]
+    assert engine.success_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_method", ["set_checkpoint", "prepare_poll"])
+async def test_invalid_window_state_fails_before_source_io(monkeypatch, failing_method):
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([])
+    getattr(connector, failing_method).side_effect = ValueError("invalid stored window")
+    engine = _FakeEngine([inst])
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=_FakeIngestClient(), vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    connector.fetch_alerts.assert_not_awaited()
+    assert engine.failure_calls == [inst.id]
+    assert engine.checkpoint_calls == []
+    assert engine.success_calls == []
+
+
+@pytest.mark.asyncio
+async def test_inventory_fetch_failure_preserves_window_but_delivers_alerts(monkeypatch):
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([{"id": "event-1"}])
+    connector.fetch_vulnerability_findings.side_effect = RuntimeError("inventory search failed")
+    engine = _FakeEngine([inst])
+    ingest = _FakeIngestClient(accepted=1)
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=ingest, vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    assert ingest.last_payload["events"] == [{"id": "event-1"}]
+    assert engine.checkpoint_calls == []
+    assert engine.failure_calls == [inst.id]
+    assert engine.success_calls == []
+
+    connector.fetch_vulnerability_findings.side_effect = None
+    await scheduler._poll_one(connector_id=inst.id)
+
+    assert ingest.calls == 2
+    assert len(engine.checkpoint_calls) == 1
+    assert engine.success_calls == [inst.id]
+
+
+@pytest.mark.asyncio
+async def test_inventory_sync_chunks_without_truncation(monkeypatch):
+    from app.vulnerabilities import MAX_FINDINGS_PER_SYNC
+
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([])
+    findings = [{"cve_id": f"CVE-2026-{number:05}", "hostname": "fixture-host"} for number in range(2 * MAX_FINDINGS_PER_SYNC + 1)]
+    connector.fetch_vulnerability_findings.return_value = findings
+
+    async def sync(_engine: Any, *, tenant_id: Any, findings: list[dict[str, Any]]) -> dict[str, int]:
+        assert tenant_id == inst.tenant_id
+        assert len(findings) <= MAX_FINDINGS_PER_SYNC
+        return {"findings_inserted": len(findings), "findings_touched": 0, "skipped": 0}
+
+    write = AsyncMock(side_effect=sync)
+    monkeypatch.setattr("app.vulnerabilities.sync_findings", write)
+    scheduler = ConnectorScheduler(engine=_FakeEngine([inst]), ingest_client=_FakeIngestClient(), vault=_FakeVault())
+
+    assert await scheduler._sync_vulnerability_findings(connector, inst) is True
+
+    chunks = [call.kwargs["findings"] for call in write.await_args_list]
+    assert [len(chunk) for chunk in chunks] == [MAX_FINDINGS_PER_SYNC, MAX_FINDINGS_PER_SYNC, 1]
+    assert [finding for chunk in chunks for finding in chunk] == findings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "partial", "skipped"])
+async def test_later_inventory_chunk_failure_retains_combined_window(monkeypatch, failure):
+    from app.vulnerabilities import MAX_FINDINGS_PER_SYNC
+
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([{"id": "event-1"}])
+    connector.fetch_vulnerability_findings.return_value = [{"cve_id": "CVE-2026-0001", "hostname": "fixture-host"}] * (
+        MAX_FINDINGS_PER_SYNC + 1
+    )
+    responses: list[Any] = [{"findings_inserted": MAX_FINDINGS_PER_SYNC, "findings_touched": 0, "skipped": 0}]
+    if failure == "exception":
+        responses.append(RuntimeError("later inventory transaction failed"))
+    elif failure == "partial":
+        responses.append({"findings_inserted": 0, "findings_touched": 0, "skipped": 0})
+    else:
+        responses.append({"findings_inserted": 0, "findings_touched": 0, "skipped": 1})
+    write = AsyncMock(side_effect=responses)
+    monkeypatch.setattr("app.vulnerabilities.sync_findings", write)
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    engine = _FakeEngine([inst])
+    ingest = _FakeIngestClient(accepted=1)
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=ingest, vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    assert write.await_count == 2
+    assert ingest.calls == 1
+    assert engine.failure_calls == [inst.id]
+    assert engine.success_calls == []
+    assert engine.checkpoint_calls == []
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_write_failure_after_ingest_is_not_success(monkeypatch):
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([{"id": "event-1"}])
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    monkeypatch.setattr("app.scheduler.record_checkpoint", AsyncMock(side_effect=RuntimeError("commit failed")))
+    engine = _FakeEngine([inst])
+    ingest = _FakeIngestClient(accepted=1)
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=ingest, vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    assert ingest.calls == 1
+    assert engine.failure_calls == [inst.id]
+    assert engine.success_calls == []
+    assert engine.checkpoint_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", [None, {}, []])
+async def test_complete_window_requires_a_completion_checkpoint(monkeypatch, checkpoint):
+    inst = _make_instance(connector_type="fake_connector")
+    connector = _complete_poll_connector([])
+    connector.get_checkpoint.return_value = checkpoint
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    engine = _FakeEngine([inst])
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=_FakeIngestClient(), vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    assert engine.failure_calls == [inst.id]
+    assert engine.success_calls == []
+    assert engine.checkpoint_calls == []
+
+
+@pytest.mark.asyncio
+async def test_complete_window_recovery_does_not_schedule_a_capped_backfill(monkeypatch):
+    inst = _make_instance(connector_type="fake_connector")
+    inst.last_outage_at = datetime.now(UTC) - timedelta(days=2)
+    connector = _complete_poll_connector([])
+    monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": MagicMock(return_value=connector)})
+    engine = _FakeEngine([inst])
+    scheduler = ConnectorScheduler(engine=engine, ingest_client=_FakeIngestClient(), vault=_FakeVault())
+
+    await scheduler._poll_one(connector_id=inst.id)
+
+    connector.fetch_alerts.assert_awaited_once()
+    assert len(engine.checkpoint_calls) == 1
+    assert engine.success_calls == [inst.id]
+    assert engine.backfill_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -482,14 +693,15 @@ async def test_poll_one_decrypt_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poll_one_constructor_typeerror(monkeypatch):
+@pytest.mark.parametrize("error", [TypeError, ValueError])
+async def test_poll_one_constructor_rejects_bad_config(monkeypatch, error):
     inst = _make_instance(
         connector_type="fake_connector",
         auth_config={"unexpected_kwarg": "x"},
     )
 
     def bad_ctor(**_kwargs: Any) -> Any:
-        raise TypeError("got unexpected keyword argument")
+        raise error("invalid connector configuration")
 
     monkeypatch.setattr("app.scheduler.CONNECTOR_REGISTRY", {"fake_connector": bad_ctor})
 
@@ -1468,9 +1680,9 @@ async def test_the_checkpoint_is_durable_before_the_acknowledgement_is_sent(monk
     monkeypatch.setattr(_AtLeastOnceQueue, "ack", _record_ack)
     original_record = scheduler._record_checkpoint
 
-    async def _record_checkpoint(*args: Any, **kwargs: Any) -> None:
+    async def _record_checkpoint(*args: Any, **kwargs: Any) -> bool:
         order.append("checkpoint")
-        await original_record(*args, **kwargs)
+        return await original_record(*args, **kwargs)
 
     monkeypatch.setattr(scheduler, "_record_checkpoint", _record_checkpoint)
 

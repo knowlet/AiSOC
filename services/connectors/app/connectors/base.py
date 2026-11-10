@@ -22,6 +22,7 @@ import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -738,6 +739,10 @@ class BaseConnector(ABC):
     _incoming_checkpoint: dict[str, str] | None = None
     _next_checkpoint: dict[str, Any] | None = None
 
+    #: Some sources checkpoint a complete poll, including inventory writes.
+    #: Optional inventory failures on other integrations remain independent.
+    requires_complete_poll: bool = False
+
     #: Identities seeded from the persisted cursor, in the order they were
     #: last seen, so the bound forgets the oldest first.
     _incoming_seen: tuple[str, ...] = ()
@@ -811,6 +816,16 @@ class BaseConnector(ABC):
         advances it.
         """
         return self._next_checkpoint
+
+    def prepare_poll(self, *, since_seconds: int, last_sync: datetime | None, started_at: datetime) -> dict[str, Any] | None:
+        """Prepare a stable query window before source I/O.
+
+        A returned checkpoint is an initial replay floor, not an advanced
+        success cursor. The scheduler must persist it before fetching so
+        even a first-poll failure can be replayed after a process restart.
+        Existing connectors do not need this bootstrap step.
+        """
+        return None
 
     # ----------------------------- acknowledgement (phase 3) -----------------
     #

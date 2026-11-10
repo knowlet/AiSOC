@@ -103,6 +103,12 @@ jobs:
           ISOLATION_CONNECTOR_DSN: ${{ env.CONNECTOR_DSN }}
         run: python -m pytest ../../tests/isolation/test_connector_scheduler_live.py -v --tb=short
 
+      - name: Indexer polling drains every page and records failed searches as unhealthy
+        working-directory: services/connectors
+        env:
+          ISOLATION_CONNECTOR_DSN: ${{ env.CONNECTOR_DSN }}
+        run: python -m pytest ../../tests/isolation/test_wazuh_polling_live.py -v --tb=short
+
       # Phase 3. Two properties that only a real socket and a real database
       # can show: that nothing reaches `:acknowledge` while ingest has not
       # confirmed the batch, and that the cursor survives the JSONB round

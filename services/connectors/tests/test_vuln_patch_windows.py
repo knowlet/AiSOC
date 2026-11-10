@@ -76,8 +76,21 @@ def _real_alert_hit() -> dict:
     }
 
 
-def _hits_response(hits: list[dict]):
-    return httpx.Response(200, json={"hits": {"hits": hits}})
+def _hits_response(hits: list[dict], *, total: int | None = None, scroll_id: str = "vulnerabilities"):
+    return httpx.Response(
+        200,
+        json={
+            "_scroll_id": scroll_id,
+            "timed_out": False,
+            "_shards": {"total": 2, "successful": 2, "skipped": 0, "failed": 0},
+            "hits": {"total": {"value": len(hits) if total is None else total, "relation": "eq"}, "hits": hits},
+        },
+    )
+
+
+def _finish_scroll(*, total: int):
+    respx.post(f"{INDEXER}/_search/scroll").mock(return_value=_hits_response([], total=total))
+    respx.delete(f"{INDEXER}/_search/scroll").mock(return_value=httpx.Response(200, json={"succeeded": True}))
 
 
 class TestTheCalendar:
@@ -135,6 +148,7 @@ class TestTheStreamSplit:
     @pytest.mark.asyncio
     @respx.mock
     async def test_detector_events_leave_the_alert_stream(self):
+        _finish_scroll(total=2)
         route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response([_detector_hit(), _real_alert_hit()]))
         connector = WazuhConnector(INDEXER, USERNAME, PASSWORD)
         events = await connector.fetch_alerts(since_seconds=300)
@@ -144,13 +158,14 @@ class TestTheStreamSplit:
         assert len(events) == 1
         assert events[0]["title"] == "Possible rootkit installation"
         # and the query itself asked the indexer to exclude the group, so
-        # the 1000-hit page cap can't smuggle scan noise back in.
+        # scan noise does not consume the alert pages.
         body = route.calls.last.request.content.decode()
         assert "vulnerability-detector" in body
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_legacy_mode_keeps_the_old_behaviour(self):
+        _finish_scroll(total=2)
         route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response([_detector_hit(), _real_alert_hit()]))
         connector = WazuhConnector(INDEXER, USERNAME, PASSWORD, vuln_mode="alerts")
         events = await connector.fetch_alerts(since_seconds=300)
@@ -165,6 +180,7 @@ class TestTheStreamSplit:
     @pytest.mark.asyncio
     @respx.mock
     async def test_findings_fetch_names_cve_host_and_cvss(self):
+        _finish_scroll(total=1)
         route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(
             return_value=_hits_response([_detector_hit(cve="CVE-2021-44228", host="dev-tmc-01")])
         )
@@ -183,6 +199,7 @@ class TestTheStreamSplit:
     @pytest.mark.asyncio
     @respx.mock
     async def test_anonymous_events_are_skipped_not_guessed(self):
+        _finish_scroll(total=1)
         hit = _detector_hit()
         del hit["_source"]["data"]["vulnerability"]["cve"]
         hit["_source"]["agent"] = {}
@@ -190,6 +207,42 @@ class TestTheStreamSplit:
         connector = WazuhConnector(INDEXER, USERNAME, PASSWORD)
 
         assert await connector.fetch_vulnerability_findings() == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [1001, 2501])
+    @respx.mock
+    async def test_findings_fetch_drains_all_pages_with_identical_timestamps(self, count):
+        hits = [{**_detector_hit(cve=f"CVE-2026-{i:04}"), "_id": f"finding-{i}"} for i in range(count)]
+        respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response(hits[:1000], total=count))
+        pages = [hits[start : start + 1000] for start in range(1000, count, 1000)] + [[]]
+        respx.post(f"{INDEXER}/_search/scroll").mock(side_effect=[_hits_response(page, total=count) for page in pages])
+        respx.delete(f"{INDEXER}/_search/scroll").mock(return_value=httpx.Response(200, json={"succeeded": True}))
+
+        findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
+
+        assert len(findings) == count
+        assert {finding["cve_id"] for finding in findings} == {f"CVE-2026-{i:04}" for i in range(count)}
+        assert {finding["external_id"] for finding in findings} == {f"finding-{i}" for i in range(count)}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_findings_later_page_failure_discards_partial_results_and_retry_drains_all(self):
+        hits = [{**_detector_hit(cve=f"CVE-2026-{i:04}"), "_id": f"finding-{i}"} for i in range(1001)]
+        initial = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response(hits[:1000], total=1001))
+        continuation = respx.post(f"{INDEXER}/_search/scroll").mock(
+            side_effect=[httpx.Response(503), _hits_response(hits[1000:], total=1001), _hits_response([], total=1001)]
+        )
+        clear = respx.delete(f"{INDEXER}/_search/scroll").mock(return_value=httpx.Response(200, json={"succeeded": True}))
+        connector = WazuhConnector(INDEXER, USERNAME, PASSWORD)
+
+        with pytest.raises(RuntimeError, match="503"):
+            await connector.fetch_vulnerability_findings()
+        assert initial.call_count == continuation.call_count == clear.call_count == 1
+
+        findings = await connector.fetch_vulnerability_findings()
+        assert len(findings) == 1001
+        assert initial.call_count == clear.call_count == 2
+        assert continuation.call_count == 3
 
 
 class TestThePromotionContract:
