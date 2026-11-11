@@ -358,7 +358,7 @@ jobs:
           # installer tells a Windows user to install 3.12 — the host
           # scripts are stdlib-only and support 3.9+ — but CI must exercise
           # the interpreter the project actually ships.
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Initialize-EnvFile produces a bootable .env
         shell: pwsh

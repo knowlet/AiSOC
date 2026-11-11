@@ -6,7 +6,7 @@
 # runtime image, and `poetry export` still refuses a lock that no longer
 # matches the manifest — editing pyproject.toml without re-locking stays a
 # build error rather than a silent re-resolution.
-FROM python:3.11-slim AS deps
+FROM python:3.13-slim AS deps
 
 RUN pip install --no-cache-dir poetry==2.4.1 poetry-plugin-export==1.9.0
 
@@ -17,7 +17,7 @@ RUN poetry export --only main --format requirements.txt --output /requirements.t
 
 
 # ── Stage 2: the runtime image ───────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \

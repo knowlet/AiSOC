@@ -72,7 +72,7 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       # Ahead of the gate, so a staleness check that has stopped detecting
       # anything cannot report the tree clean.

@@ -5,7 +5,7 @@
 # behaves the same way locally and in `.github/workflows/ci.yml`.
 
 line-length = 140
-target-version = "py311"
+target-version = "py313"
 
 # The archived prototype subtree. `.github/workflows/codeql.yml` carries the
 # same exclusion, `scripts/check_mypy_baseline.py` excludes it from every

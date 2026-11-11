@@ -6,7 +6,7 @@ authors = ["Beenu Arora <beenu@cyble.com>"]
 license = "MIT"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.13"
 # Floor 0.117: below it a `-> None` handler under PEP 563 trips FastAPI's
 # "204 must not have a response body" assert at import. One range for
 # every service — see services/api/pyproject.toml for the measurement.
@@ -88,7 +88,7 @@ exclude_lines = [
 # strictness level. `python_version` is pinned so the finding set does not
 # move with whatever interpreter mypy happens to run on.
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 ignore_missing_imports = true
 

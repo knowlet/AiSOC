@@ -10,7 +10,7 @@ license = "MIT"
 # and hid whether the lock was fresh.
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.13"
 # Floor 0.117: below it a `-> None` handler under PEP 563 trips FastAPI's
 # "204 must not have a response body" assert at import. One range for
 # every service — see services/api/pyproject.toml for the measurement.
@@ -53,7 +53,7 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 ignore_missing_imports = true
 

@@ -83,7 +83,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Install clients + test deps
         # sqlglot MUST be pinned to the same range the API service ships
@@ -131,7 +131,7 @@ jobs:
         run: |
           docker run -d --name iso-clickhouse -p 9000:9000 \
             --ulimit nofile=262144:262144 \
-            clickhouse/clickhouse-server:24.8
+            clickhouse/clickhouse-server:26.8
 
       - name: Start Redpanda (Kafka API)
         run: |

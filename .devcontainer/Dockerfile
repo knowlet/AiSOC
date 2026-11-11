@@ -10,7 +10,7 @@
 #
 # Layers, top to bottom:
 #   1. Base: javascript-node bookworm — Node 22 + pnpm-friendly debian
-#   2. System packages: docker.io, python3.11 + uv, go, gh
+#   2. System packages: docker.io, python3.13 (via uv) + uv, go, gh
 #   3. Workspace bootstrap: corepack-prepare pnpm, prime turbo/eslint caches
 #
 # Keep this image small enough that `docker pull` over a Codespaces machine's
@@ -38,7 +38,7 @@ ARG TARGETARCH
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg2 lsb-release software-properties-common \
-        python3.11 python3.11-venv python3-pip pipx \
+        python3 python3-venv python3-pip pipx \
         build-essential libffi-dev libssl-dev \
         docker.io \
         ripgrep jq \
@@ -89,6 +89,9 @@ RUN set -eux; \
     ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 ENV PATH="/usr/local/go/bin:${PATH}"
 
+# Declared for scripts/check_toolchain_pins.py (`_APT_PYTHON` scans this file).
+ENV AISOC_DEV_PYTHON=python3.13
+
 # ─── Python toolchain (uv + ruff) ───────────────────────────────────────────
 # `ruff` is pinned to the range CI enforces. An unpinned ruff in the
 # devcontainer formats differently from `ruff format --check services/`,
@@ -103,8 +106,11 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 # `node` at runtime, and any uid the workflow runner gates the container to.
 # The previous pipx approach installed to `/root/.local/bin/`, which is
 # unreadable by `node` (uid 1000) and broke the cold-start KPI probe.
-RUN python3.11 -m pip install --break-system-packages --no-cache-dir \
-        uv "ruff>=0.16.8,<0.17"
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+        uv "ruff>=0.16.8,<0.17" \
+ && uv python install 3.13 \
+ && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3.13 \
+ && ln -sf /usr/local/bin/python3.13 /usr/local/bin/python3
 
 # ─── pnpm via corepack ──────────────────────────────────────────────────────
 RUN corepack enable \

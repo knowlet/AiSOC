@@ -19,7 +19,7 @@ name: Devcontainer · cold-start KPI
 #   1. image pull — the "before any keystroke is possible" phase.
 #      Budget: 60 s.
 #   2. toolchain ready — every executable a contributor needs on PATH
-#      (node, pnpm, python3.11, uv, ruff, go, gh, docker, docker compose,
+#      (node, pnpm, python3.13, uv, ruff, go, gh, docker, docker compose,
 #      rg, jq) responds to `--version` from inside a single `docker run`.
 #      This is what the user actually experiences when they open
 #      Codespaces: from `docker pull` complete to first usable shell.
@@ -138,7 +138,7 @@ jobs:
               set -euo pipefail
               echo "── node ──";            node --version
               echo "── pnpm ──";            pnpm --version
-              echo "── python3.11 ──";      python3.11 --version
+              echo "── python3.13 ──";      python3.13 --version
               echo "── uv ──";              uv --version
               echo "── ruff ──";            ruff --version
               echo "── go ──";              go version

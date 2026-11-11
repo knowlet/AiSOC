@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
       # The gate first: it names every file it scanned and every critical
       # package it compared, so the log shows what was checked rather than
       # only that something passed.
@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
       # Names its root and every path it scanned, so the log shows which tree
       # was checked. This gate used to resolve its own root from its file
       # location — the tree the *script* lives in, not the one anyone asked
@@ -139,7 +139,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
       # Pinned to the version the Dockerfiles install. A different resolver is
       # a different answer to "what does this commit install", which is the
       # question this workflow exists to make deterministic.
@@ -179,7 +179,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
       # PEP 508 marker comparison is *version* comparison, not string
       # comparison, and the difference is live here: `async-timeout` in
       # services/actions is gated `python_full_version < "3.11.3"`, which a
@@ -239,7 +239,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
           cache: pip
       - name: Install with fastapi pinned to ${{ matrix.fastapi }}
         run: pip install --quiet ${{ env.API_DEPS }} "fastapi==${{ matrix.fastapi }}"
@@ -435,7 +435,7 @@ jobs:
       fail-fast: false
       matrix:
         service: ${{ fromJson(needs.discover.outputs.lockonly) }}
-    container: python:3.11-slim
+    container: python:3.13-slim
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # Same resolver the images install with — a different one is a

@@ -10,7 +10,7 @@ license = "MIT"
 # and hid whether the lock was fresh.
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.13"
 # Floored at 0.117 because below it this service cannot be imported at all.
 # Under `from __future__ import annotations` a `-> None` handler reaches
 # FastAPI as the string "None", which ForwardRef resolution turns into
@@ -173,7 +173,7 @@ build-backend = "poetry.core.masonry.api"
 # across services. Don't add `[tool.ruff]` here — it would shadow the root.
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 ignore_missing_imports = true
 

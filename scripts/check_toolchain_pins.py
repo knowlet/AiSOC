@@ -108,7 +108,7 @@ RUNTIMES: dict[str, str] = {
         "resolvers are two answers to 'what does this commit install' — the "
         "same defect as two poetry versions, which this repository already hit"
     ),
-    "python": ("the interpreter the thirteen Python services run on. Their manifests declare ^3.11 and every image ships 3.11"),
+    "python": ("the interpreter the thirteen Python services run on. Their manifests declare ^3.13 and every image ships 3.13"),
 }
 
 # ── Declared exemptions ──────────────────────────────────────────────────────
