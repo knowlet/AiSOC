@@ -81,6 +81,8 @@ class Report:
     #: lock resolved an idna and a pydantic-settings version with known
     #: advisories that every other service had already moved past (#650).
     unscanned: list[str] = field(default_factory=list)
+    #: Targets that completed export + pip-audit (or equivalent) successfully.
+    scanned: list[str] = field(default_factory=list)
 
     @property
     def high_critical(self) -> list[Finding]:
@@ -450,6 +452,7 @@ def run_pip_audit(repo_root: Path, ignores: list[Ignore]) -> Report:
             sub = classify_pip_audit(target, deps, ignores)
             combined.findings.extend(sub.findings)
             combined.ignored.extend(sub.ignored)
+            combined.scanned.append(target)
 
     return combined
 
@@ -713,7 +716,19 @@ def cmd_python(args: argparse.Namespace) -> int:
     emit_summary(report)
     code = exit_code_for(report)
     n = len(report.findings)
-    print(f"python: {n} findings, {len(report.ignored)} ignored")
+    manifests = _python_manifests(get_repo_root())
+    intended = len(manifests)
+    services = [m for m in manifests if m.parts[0] == "services"]
+    print(
+        f"python: {n} findings, {len(report.ignored)} ignored; "
+        f"scanned {len(report.scanned)}/{intended} manifests "
+        f"({len(services)} services under services/)"
+    )
+    if report.scanned:
+        print("scanned: " + ", ".join(report.scanned))
+    if report.unscanned:
+        for gap in report.unscanned:
+            print(f"unscanned: {gap}", file=sys.stderr)
     return code
 
 

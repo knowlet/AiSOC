@@ -12,8 +12,8 @@ transcript below.
 | ClickHouse 23.8 → **26.8** | Yes | **Yes** (`sum(n)=42`, `count=1` after upgrade) | **Yes** (`BACKUP DATABASE` + `RESTORE` on **fresh** 23.8 volume → `42 1`) | **Conditional GO** — backup path required; downgrade without restore **no** |
 | Qdrant **v1.7.0** → **v1.20.0** | Yes | **No** — v1.20 panics on v1.7 volume (`on_disk` segment format) | **Yes** after **consecutive-minor ladder** (v1.7→…→v1.20) + post-ladder snapshot upload to fresh v1.20 volume | **NO-GO** for raw volume jump or v1.7 snapshots; **GO** only via ladder + snapshot (`scripts/qdrant_migration_evidence.sh`) |
 | Kafka **7.5.0** → **7.8.12** (ZK paired) | Yes | Producer/consumer **OK** with compose-aligned listeners + stable `--hostname` | Message `probe-msg` retained; offsets `aisoc-probe:0:1` after bump | **Conditional GO** — see script; stop broker before ZK image swap |
-| OpenSearch **2.11.0** → **2.19.7** | **Yes** — doc indexed on 2.11, `_count=1` on 2.19.7 same volume | Not measured (snapshot path open) | N/A | **Conditional GO** for minor 2.x bump; backup/restore still open |
-| Prometheus **v3.13.5** | N/A | Config load: `/-/healthy` **OK** | N/A | **GO** for scrape config mount |
+| OpenSearch **2.11.0** → **2.19.7** | **Yes** — in-place + FS snapshot `pre_upgrade` → fresh 2.19 volume (`docs/upgrade/disposable-opensearch.yml`) | **Yes** — snapshot restore search for `tag:mig-probe` | N/A | **Conditional GO** for 2.x with snapshot DR |
+| Prometheus **v3.13.5** | N/A | `/-/healthy` + **5 rule groups** (`aisoc-availability`, …) after explicit `rule_files` (glob unsupported in v3) | N/A | **GO** with alerts volume mount |
 | Grafana **13.3.1** | N/A | Provisioning mount: `/api/health` **database ok** | N/A | **GO** pending dashboard spot-check in staging |
 | OTel contrib **0.121.0** | Not finished | Config file: [`infra/docker/otel/collector.yaml`](../../infra/docker/otel/collector.yaml) — re-run with corrected mount | N/A | **Pending** |
 

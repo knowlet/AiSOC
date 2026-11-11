@@ -1,0 +1,11 @@
+# Disposable single-node OpenSearch config for snapshot rehearsal only.
+# Not used in production compose.
+cluster.name: aisoc-disposable
+node.name: disposable-node
+path.data: /usr/share/opensearch/data
+path.repo:
+  - /usr/share/opensearch/snapshots
+discovery.type: single-node
+plugins.security.disabled: true
+network.host: 0.0.0.0
+http.port: 9200

@@ -75,6 +75,16 @@ Unchanged (still appropriate):
 |---------|--------|
 | Poetry (`services/*`, `packages/*`) | All **14 service** `poetry.lock` files refreshed with **Python 3.13** (`poetry lock` on host 3.13.18) |
 | pnpm | Not mass-bumped here; root lock unchanged unless CI requires |
+
+### pnpm advisory: `deepmerge` (documented, not overridden)
+
+| Field | Value |
+|-------|--------|
+| Severity | **low** (prototype pollution in `mergeObject`) |
+| Advisory | `pnpm audit` — patched versions listed as `<0.0.0` (no fixed release on advisory) |
+| Exposure | **dev-only**: `apps/web` via `@storybook/test-runner` → `jest` → `jest-config`; `apps/docs` via `@docusaurus/*` → `@svgr/webpack` → `deepmerge@4.3.1` |
+| Runtime | Production web bundle does not ship Jest/Storybook test-runner paths |
+| Mitigation | No bogus `pnpm.overrides` invented; re-audit when upstream publishes a fix; Storybook/Docusaurus bumps tracked separately |
 | Go | `go 1.26` unchanged |
 
 Run local audit: `python3 scripts/security_audit.py` (workflow also on push).

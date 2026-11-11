@@ -161,6 +161,17 @@ echo "probe-msg" | "${DOCKER[@]}" exec -i aisoc-kafka-r kafka-console-producer \
 OFF1=$("${DOCKER[@]}" exec aisoc-kafka-r kafka-run-class kafka.tools.GetOffsetShell \
   --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null | head -3 || echo none)
 log "Kafka 7.5 offsets before: $OFF1"
+# Commit consumer-group offsets before the image bump.
+"${DOCKER[@]}" exec aisoc-kafka-r kafka-console-consumer \
+  --bootstrap-server localhost:9092 --topic aisoc-probe \
+  --group aisoc-rehearsal --from-beginning --timeout-ms 8000 --max-messages 1 \
+  >/dev/null 2>&1 || true
+CG1=$("${DOCKER[@]}" exec aisoc-kafka-r kafka-consumer-groups \
+  --bootstrap-server localhost:9092 --describe --group aisoc-rehearsal 2>/dev/null | tail -1 || echo none)
+log "Kafka 7.5 consumer group aisoc-rehearsal: $CG1"
+# Second message for high-water mark after commit.
+echo "probe-msg-2" | "${DOCKER[@]}" exec -i aisoc-kafka-r kafka-console-producer \
+  --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null || true
 # Stop broker first so ZK ephemeral broker registration clears before the bump.
 "${DOCKER[@]}" stop -t 30 aisoc-kafka-r >/dev/null
 sleep 5
@@ -195,34 +206,84 @@ OFF2=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-run-class kafka.tools.GetOffsetS
   --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null | head -3 || echo none)
 log "Kafka 7.8.12 offsets after upgrade: $OFF2"
 CONS=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-console-consumer \
-  --bootstrap-server localhost:9092 --topic aisoc-probe --from-beginning --timeout-ms 8000 --max-messages 1 2>/dev/null || echo FAIL)
-log "Kafka 7.8 consume: $CONS"
+  --bootstrap-server localhost:9092 --topic aisoc-probe --from-beginning --timeout-ms 8000 --max-messages 2 2>/dev/null || echo FAIL)
+log "Kafka 7.8 consume (from-beginning): $CONS"
+CG2=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-consumer-groups \
+  --bootstrap-server localhost:9092 --describe --group aisoc-rehearsal 2>/dev/null | tail -1 || echo none)
+log "Kafka 7.8 consumer group aisoc-rehearsal: $CG2"
+RESUME=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-console-consumer \
+  --bootstrap-server localhost:9092 --topic aisoc-probe --group aisoc-rehearsal \
+  --timeout-ms 8000 --max-messages 2 2>/dev/null || echo FAIL)
+log "Kafka 7.8 group resume: $RESUME"
+OFF3=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-run-class kafka.tools.GetOffsetShell \
+  --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null | head -3 || echo none)
+log "Kafka 7.8 offsets after upgrade: $OFF3"
 
-log "=== OpenSearch 2.11.0 -> 2.19.7 ==="
-OS_VOL="$WORK/opensearch"
-mkdir -p "$OS_VOL"
-"${DOCKER[@]}" rm -f aisoc-os-r1 aisoc-os-r2 2>/dev/null || true
+log "=== OpenSearch 2.11.0 -> 2.19.7 (volume + snapshot restore) ==="
+OS_VOL="$WORK/opensearch_data"
+OS_SNAP="$WORK/opensearch_snapshots"
+mkdir -p "$OS_VOL" "$OS_SNAP"
+"${DOCKER[@]}" rm -f aisoc-os-r1 aisoc-os-r2 aisoc-os-restore 2>/dev/null || true
 "${DOCKER[@]}" run -d --name aisoc-os-r1 \
-  -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
-  -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" \
+  -e discovery.type=single-node \
+  -e DISABLE_SECURITY_PLUGIN=true \
+  -e 'OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m' \
   -v "$OS_VOL:/usr/share/opensearch/data" \
+  -v "$OS_SNAP:/usr/share/opensearch/snapshots" \
   -p 19200:9200 opensearchproject/opensearch:2.11.0
-sleep 45
+sleep 50
+# path.repo must be on disk before the snapshot repository is registered; append and bounce once.
+"${DOCKER[@]}" exec aisoc-os-r1 bash -c 'grep -q path.repo /usr/share/opensearch/config/opensearch.yml || echo "path.repo: [\"/usr/share/opensearch/snapshots\"]" >> /usr/share/opensearch/config/opensearch.yml'
+"${DOCKER[@]}" restart aisoc-os-r1 >/dev/null
+sleep 50
 curl -fsS -X PUT "http://127.0.0.1:19200/aisoc-probe" -H 'Content-Type: application/json' \
-  -d '{"settings":{"index.number_of_shards":1},"mappings":{"properties":{"n":{"type":"integer"}}}}' >/dev/null || true
-curl -fsS -X POST "http://127.0.0.1:19200/aisoc-probe/_doc" -H 'Content-Type: application/json' \
-  -d '{"n":7}' >/dev/null || true
-curl -fsS "http://127.0.0.1:19200/aisoc-probe/_search?q=n:7" | head -c 200 | tee -a "$LOG" || true
+  -d '{"settings":{"index.number_of_shards":1,"number_of_replicas":0},"mappings":{"properties":{"n":{"type":"integer"},"tag":{"type":"keyword"}}}}' >/dev/null
+curl -fsS -X POST "http://127.0.0.1:19200/aisoc-probe/_doc/7" -H 'Content-Type: application/json' \
+  -d '{"n":7,"tag":"mig-probe"}' >/dev/null
+curl -fsS -X POST "http://127.0.0.1:19200/aisoc-probe/_refresh" >/dev/null
+OS_SEARCH=$(curl -fsS "http://127.0.0.1:19200/aisoc-probe/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"tag":"mig-probe"}}}')
+log "OpenSearch 2.11 search: $(echo "$OS_SEARCH" | head -c 200)"
+curl -fsS -X PUT "http://127.0.0.1:19200/_snapshot/aisoc_backup" -H 'Content-Type: application/json' \
+  -d '{"type":"fs","settings":{"location":"/usr/share/opensearch/snapshots","compress":true}}' >/dev/null
+curl -fsS -X PUT "http://127.0.0.1:19200/_snapshot/aisoc_backup/pre_upgrade?wait_for_completion=true" >/dev/null
 "${DOCKER[@]}" stop aisoc-os-r1 >/dev/null
 sleep 5
+# In-place minor upgrade on same data volume.
 "${DOCKER[@]}" run -d --name aisoc-os-r2 \
-  -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
-  -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" \
+  -e discovery.type=single-node \
+  -e DISABLE_SECURITY_PLUGIN=true \
+  -e 'OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m' \
   -v "$OS_VOL:/usr/share/opensearch/data" \
+  -v "$OS_SNAP:/usr/share/opensearch/snapshots" \
   -p 19201:9200 opensearchproject/opensearch:2.19.7
 sleep 60
 OS2=$(curl -fsS "http://127.0.0.1:19201/aisoc-probe/_count" 2>/dev/null || echo FAIL)
-log "OpenSearch 2.19.7 doc count: $OS2"
+log "OpenSearch 2.19.7 in-place _count: $OS2"
+# Snapshot restore onto a fresh data volume (DR / rollback rehearsal).
+OS_VOL_FRESH="$WORK/opensearch_data_fresh"
+rm -rf "$OS_VOL_FRESH"
+mkdir -p "$OS_VOL_FRESH"
+"${DOCKER[@]}" run -d --name aisoc-os-restore \
+  -e discovery.type=single-node \
+  -e DISABLE_SECURITY_PLUGIN=true \
+  -e 'OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m' \
+  -v "$OS_VOL_FRESH:/usr/share/opensearch/data" \
+  -v "$OS_SNAP:/usr/share/opensearch/snapshots" \
+  -p 19202:9200 opensearchproject/opensearch:2.19.7
+sleep 50
+"${DOCKER[@]}" exec aisoc-os-restore bash -c 'grep -q path.repo /usr/share/opensearch/config/opensearch.yml || echo "path.repo: [\"/usr/share/opensearch/snapshots\"]" >> /usr/share/opensearch/config/opensearch.yml'
+"${DOCKER[@]}" restart aisoc-os-restore >/dev/null
+sleep 50
+curl -fsS -X PUT "http://127.0.0.1:19202/_snapshot/aisoc_backup" -H 'Content-Type: application/json' \
+  -d '{"type":"fs","settings":{"location":"/usr/share/opensearch/snapshots","compress":true}}' >/dev/null
+curl -fsS -X POST "http://127.0.0.1:19202/_snapshot/aisoc_backup/pre_upgrade/_restore?wait_for_completion=true" \
+  -H 'Content-Type: application/json' \
+  -d '{"indices":"aisoc-probe"}' >/dev/null
+curl -fsS -X POST "http://127.0.0.1:19202/aisoc-probe/_refresh" >/dev/null
+OS_RESTORE=$(curl -fsS "http://127.0.0.1:19202/aisoc-probe/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"tag":"mig-probe"}}}')
+log "OpenSearch 2.19 fresh volume restore search: $(echo "$OS_RESTORE" | head -c 250)"
 
 log "=== Monitoring stack config load (Prometheus 3 / Grafana 13 / OTel 0.121) ==="
 MON="$WORK/monitoring"
@@ -230,20 +291,34 @@ mkdir -p "$MON/grafana" "$MON/prom"
 "${DOCKER[@]}" rm -f aisoc-prom-r aisoc-graf-r aisoc-otel-r 2>/dev/null || true
 "${DOCKER[@]}" run -d --name aisoc-prom-r \
   -v "$ROOT/infra/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-  -p 19090:9090 prom/prometheus:v3.13.5
+  -v "$ROOT/infra/docker/alerts:/etc/prometheus/alerts:ro" \
+  -p 19090:9090 prom/prometheus:v3.13.5 \
+  --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle
 sleep 5
 PROM=$("${DOCKER[@]}" exec aisoc-prom-r wget -qO- http://localhost:9090/-/healthy 2>/dev/null || echo FAIL)
 log "Prometheus healthy: $PROM"
+RULES=$("${DOCKER[@]}" exec aisoc-prom-r wget -qO- 'http://localhost:9090/api/v1/rules' 2>/dev/null | \
+  python3 -c "import sys,json; g=json.load(sys.stdin)['data']['groups']; print(len(g), [x['name'] for x in g])" 2>/dev/null || echo FAIL)
+log "Prometheus rule groups: $RULES"
 "${DOCKER[@]}" run -d --name aisoc-graf-r \
   -v "$ROOT/infra/docker/grafana:/etc/grafana/provisioning:ro" \
   -p 13000:3000 grafana/grafana:13.3.1
 sleep 10
 GRAF=$("${DOCKER[@]}" exec aisoc-graf-r wget -qO- http://localhost:3000/api/health 2>/dev/null | head -c 120 || echo FAIL)
 log "Grafana health: $GRAF"
-"${DOCKER[@]}" run -d --name aisoc-otel-r \
+NET="aisoc-rehearsal-mon"
+"${DOCKER[@]}" network create "$NET" 2>/dev/null || true
+"${DOCKER[@]}" run -d --name aisoc-tempo-r --hostname tempo --network "$NET" \
+  grafana/tempo:2.7.2 2>/dev/null || true
+sleep 5
+"${DOCKER[@]}" run -d --name aisoc-otel-r --network "$NET" \
   -v "$ROOT/infra/docker/otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
-  otel/opentelemetry-collector-contrib:0.121.0 2>/dev/null || \
-  log "OTel: config mount path may differ — check container logs"
+  otel/opentelemetry-collector-contrib:0.121.0 \
+  --config=/etc/otelcol-contrib/config.yaml 2>/dev/null || \
+  log "OTel: config mount failed — check container logs"
+sleep 3
+OTEL_LOGS=$("${DOCKER[@]}" logs aisoc-otel-r 2>&1 | grep -E 'Everything is ready|error|tempo' | tail -5 || echo none)
+log "OTel/Tail: $OTEL_LOGS"
 
 log "WORK_DIR=$WORK"
 log "DONE"

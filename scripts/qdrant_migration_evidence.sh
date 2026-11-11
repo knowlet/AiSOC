@@ -59,6 +59,25 @@ log "v1.7.0 snapshot: $SNAP_NAME"
 chmod a+r "$WORK/$SNAP_NAME" 2>/dev/null || sudo chmod a+r "$WORK/$SNAP_NAME"
 log "snapshot bytes: $(wc -c < "$WORK/$SNAP_NAME")"
 
+# --- Rollback proof: pre-ladder v1.7 snapshot → fresh v1.7 storage ---
+QV_RB="$WORK/qdrant_rollback"
+rm -rf "$QV_RB"
+mkdir -p "$QV_RB"
+"${DOCKER[@]}" rm -f qdrant-rb 2>/dev/null || true
+"${DOCKER[@]}" run -d --name qdrant-rb -p 16334:6333 -v "$QV_RB:/qdrant/storage" qdrant/qdrant:v1.7.0
+sleep 4
+curl -fsS -X POST "http://127.0.0.1:16334/collections/mig_probe/snapshots/upload?wait=true" \
+  -F "snapshot=@$WORK/$SNAP_NAME" >/dev/null
+RB=$(curl -fsS -X POST "http://127.0.0.1:16334/collections/mig_probe/points/search" \
+  -H 'Content-Type: application/json' \
+  -d "{\"vector\":$VEC,\"limit\":1,\"with_payload\":true}")
+log "v1.7.0 rollback (pre-ladder snapshot → fresh v1.7): $(echo "$RB" | head -c 350)"
+if ! echo "$RB" | grep -q '"tag":"mig-probe"'; then
+  log "FAIL: pre-ladder snapshot did not restore on v1.7.0"
+  exit 1
+fi
+log "GO: pre-ladder backup restores on v1.7.0 (rollback path before any forward ladder)"
+
 # --- NO-GO: same v1.7 volume on v1.20.0 ---
 "${DOCKER[@]}" stop qdrant-mig-old >/dev/null
 if "${DOCKER[@]}" run -d --name qdrant-mig-bad -v "$QV:/qdrant/storage" qdrant/qdrant:v1.20.0 >/dev/null 2>&1; then
