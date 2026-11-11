@@ -133,37 +133,69 @@ mkdir -p "$KZK_VOL/zk-data" "$KZK_VOL/zk-log" "$KZK_VOL/kafka"
   -v "$KZK_VOL/zk-log:/var/lib/zookeeper/log" \
   confluentinc/cp-zookeeper:7.5.0
 sleep 8
+KAFKA_LISTENER_COMMON=(
+  -e KAFKA_BROKER_ID=1
+  -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+  -e KAFKA_DEFAULT_REPLICATION_FACTOR=1
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+  -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+  # Stable hostname across the image bump so log dirs + ZK broker entries match.
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://aisoc-kafka-rehearsal:29092,PLAINTEXT_HOST://127.0.0.1:9092
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+)
 "${DOCKER[@]}" run -d --name aisoc-kafka-r \
+  --hostname aisoc-kafka-rehearsal \
   --link aisoc-zk-r:zookeeper \
   -e KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181 \
-  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:19092 \
   -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  "${KAFKA_LISTENER_COMMON[@]}" \
   -v "$KZK_VOL/kafka:/var/lib/kafka/data" \
   confluentinc/cp-kafka:7.5.0
-sleep 15
+sleep 20
+"${DOCKER[@]}" exec aisoc-kafka-r kafka-topics --bootstrap-server localhost:9092 \
+  --create --if-not-exists --topic aisoc-probe --partitions 1 --replication-factor 1 \
+  >/dev/null 2>&1 || true
 echo "probe-msg" | "${DOCKER[@]}" exec -i aisoc-kafka-r kafka-console-producer \
   --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null || \
   log "Kafka seed: producer failed (check broker readiness)"
 OFF1=$("${DOCKER[@]}" exec aisoc-kafka-r kafka-run-class kafka.tools.GetOffsetShell \
   --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null | head -3 || echo none)
 log "Kafka 7.5 offsets before: $OFF1"
-"${DOCKER[@]}" stop aisoc-kafka-r aisoc-zk-r >/dev/null
-"${DOCKER[@]}" run -d --name aisoc-zk-r2 \
+# Stop broker first so ZK ephemeral broker registration clears before the bump.
+"${DOCKER[@]}" stop -t 30 aisoc-kafka-r >/dev/null
+sleep 5
+"${DOCKER[@]}" stop -t 15 aisoc-zk-r >/dev/null
+sleep 3
+"${DOCKER[@]}" rm -f aisoc-kafka-r aisoc-zk-r 2>/dev/null || true
+"${DOCKER[@]}" run -d --name aisoc-zk-r \
   -e ZOOKEEPER_CLIENT_PORT=2181 \
   -v "$KZK_VOL/zk-data:/var/lib/zookeeper/data" \
   -v "$KZK_VOL/zk-log:/var/lib/zookeeper/log" \
   confluentinc/cp-zookeeper:7.8.12
-sleep 8
+sleep 10
+KAFKA_LISTENER_UPGRADE=(
+  -e KAFKA_BROKER_ID=1
+  -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+  -e KAFKA_DEFAULT_REPLICATION_FACTOR=1
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+  -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://aisoc-kafka-rehearsal:29092,PLAINTEXT_HOST://127.0.0.1:9092
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+)
 "${DOCKER[@]}" run -d --name aisoc-kafka-r2 \
-  --link aisoc-zk-r2:zookeeper \
+  --hostname aisoc-kafka-rehearsal \
+  --link aisoc-zk-r:zookeeper \
   -e KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181 \
-  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:19092 \
   -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  "${KAFKA_LISTENER_UPGRADE[@]}" \
   -v "$KZK_VOL/kafka:/var/lib/kafka/data" \
   confluentinc/cp-kafka:7.8.12
-sleep 20
+sleep 25
+OFF2=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-run-class kafka.tools.GetOffsetShell \
+  --broker-list localhost:9092 --topic aisoc-probe 2>/dev/null | head -3 || echo none)
+log "Kafka 7.8.12 offsets after upgrade: $OFF2"
 CONS=$("${DOCKER[@]}" exec aisoc-kafka-r2 kafka-console-consumer \
-  --bootstrap-server localhost:9092 --topic aisoc-probe --from-beginning --timeout-ms 5000 --max-messages 1 2>/dev/null || echo FAIL)
+  --bootstrap-server localhost:9092 --topic aisoc-probe --from-beginning --timeout-ms 8000 --max-messages 1 2>/dev/null || echo FAIL)
 log "Kafka 7.8 consume: $CONS"
 
 log "=== OpenSearch 2.11.0 -> 2.19.7 ==="

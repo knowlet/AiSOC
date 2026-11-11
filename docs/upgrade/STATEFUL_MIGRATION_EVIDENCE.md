@@ -10,9 +10,9 @@ transcript below.
 | Store | Jump tested | In-place volume upgrade | Backup → restore verified | Deploy stance |
 |-------|-------------|-------------------------|---------------------------|---------------|
 | ClickHouse 23.8 → **26.8** | Yes | **Yes** (`sum(n)=42`, `count=1` after upgrade) | **Yes** (`BACKUP DATABASE` + `RESTORE` on **fresh** 23.8 volume → `42 1`) | **Conditional GO** — backup path required; downgrade without restore **no** |
-| Qdrant **v1.7.0** → **v1.20.0** | Yes | **No** — v1.20 panics loading v1.7 segments (`unknown variant on_disk`) | Snapshot created on v1.7; **not** re-loaded on v1.20 in this run | **NO-GO** for raw volume jump; use **snapshot / reindex** per [Qdrant upgrades](https://qdrant.tech/documentation/guides/version-upgrade/) |
-| Kafka **7.5.0** → **7.8.12** (ZK paired) | Partial | Consumer from host **failed** (advertised listeners); not a format proof | N/A | **Rehearse in CI** `Upgrade test` / operator lab before GO |
-| OpenSearch **2.11.0** → **2.19.7** | Script bug (Java opts quoting) fixed on branch; **not re-run to completion** | Not measured | N/A | **NO-GO** until index-level rehearsal completes |
+| Qdrant **v1.7.0** → **v1.20.0** | Yes | **No** — v1.20 panics on v1.7 volume (`on_disk` segment format) | **Yes** after **consecutive-minor ladder** (v1.7→…→v1.20) + post-ladder snapshot upload to fresh v1.20 volume | **NO-GO** for raw volume jump or v1.7 snapshots; **GO** only via ladder + snapshot (`scripts/qdrant_migration_evidence.sh`) |
+| Kafka **7.5.0** → **7.8.12** (ZK paired) | Yes | Producer/consumer **OK** with compose-aligned listeners + stable `--hostname` | Message `probe-msg` retained; offsets `aisoc-probe:0:1` after bump | **Conditional GO** — see script; stop broker before ZK image swap |
+| OpenSearch **2.11.0** → **2.19.7** | **Yes** — doc indexed on 2.11, `_count=1` on 2.19.7 same volume | Not measured (snapshot path open) | N/A | **Conditional GO** for minor 2.x bump; backup/restore still open |
 | Prometheus **v3.13.5** | N/A | Config load: `/-/healthy` **OK** | N/A | **GO** for scrape config mount |
 | Grafana **13.3.1** | N/A | Provisioning mount: `/api/health` **database ok** | N/A | **GO** pending dashboard spot-check in staging |
 | OTel contrib **0.121.0** | Not finished | Config file: [`infra/docker/otel/collector.yaml`](../../infra/docker/otel/collector.yaml) — re-run with corrected mount | N/A | **Pending** |
@@ -49,24 +49,38 @@ Requires [`docs/upgrade/disposable-clickhouse-backups.xml`](disposable-clickhous
 
 ---
 
-## Qdrant v1.7.0 → v1.20.0 (in-place **rejected**)
+## Qdrant v1.7.0 → v1.20.0
 
-- v1.7: collection `probe` created, point inserted, **snapshot OK**.
-- v1.20 on **same** `qdrant_data`: container **exit 101**, log:
-  `unknown variant on_disk, expected mmap or in_ram_mmap` in `segment.json`.
+### Raw volume / v1.7 snapshot on v1.20 (**NO-GO**)
 
-**Implication:** Compose jump from legacy **v1.7.0** disks to **v1.20.0** is **not** deployable
-without migration tooling. Staged path: intermediate versions and/or snapshot export-import
-documented by Qdrant — **not** exercised end-to-end in this run.
+- v1.7: collection + payload inserted; snapshot created.
+- v1.20 on **same** bind mount: container **exit 101** — `unknown variant on_disk, expected mmap or in_ram_mmap`.
+- v1.7 snapshot **upload** to fresh v1.20 storage: **HTTP 500** (same `on_disk` inside snapshot).
+
+**Runbooks must not** suggest replacing a `qdrant/qdrant:v1.7.x` data directory with `v1.20.0`,
+nor importing snapshots taken **before** the format migration.
+
+### Supported path (**proved 2026-11-11**)
+
+1. Step **consecutive minor** tags on one volume (see `LADDER` in
+   [`scripts/qdrant_migration_evidence.sh`](../../scripts/qdrant_migration_evidence.sh)):
+   `v1.7.0 → v1.8.0 → … → v1.19.0 → v1.20.0` (skipping minors risks panic — proved when jumping v1.15→v1.20).
+2. After ladder, create a collection snapshot on v1.20.
+3. Upload snapshot to **fresh** v1.20 storage — vector search returns original payload (`mig-probe` tag).
+
+Refs: [Qdrant snapshots](https://qdrant.tech/documentation/database/snapshots/),
+[version upgrade guide](https://qdrant.tech/documentation/guides/version-upgrade/).
 
 ---
 
 ## Kafka / Zookeeper 7.5 → 7.8.12
 
-- Images pulled and paired volumes started (see rehearsal log).
-- Host-side `kafka-console-consumer` → **FAIL** (listener/advertised address mismatch in disposable script).
-- **Does not** disprove broker log compatibility; **does** mean this agent run did not prove
-  offset retention across the bump. Treat as **open** until CI upgrade job or fixed script passes.
+Disposable rehearsal (2026-11-11): `KAFKA_LISTENERS` / `KAFKA_ADVERTISED_LISTENERS` aligned with
+`docker-compose.yml` (`PLAINTEXT` on 29092 + `PLAINTEXT_HOST` on 9092), `--hostname aisoc-kafka-rehearsal`,
+`KAFKA_BROKER_ID=1`, graceful broker stop before ZK image bump.
+
+- Produce `probe-msg` on **7.5.0** → offset `aisoc-probe:0:1`.
+- After **7.8.12** on paired volumes: consumer reads `probe-msg`.
 
 ---
 
@@ -88,7 +102,7 @@ Grafana `sha256:0615ec4fbd4072004b7d86b6daa744defed0441`.
 
 | Hold | Evidence |
 |------|----------|
-| `ruff` `ignore = UP040, UP047` with `target-version = "py313"` | Enabling UP047 triggered mypy `valid-type` regressions; UP043 (`AsyncGenerator` defaults) applied; PEP 695 generic syntax deferred until baseline refresh |
+| `ruff` per-file `UP040`/`UP047` on five API modules | PEP 695 rewrite triggers mypy `valid-type` until baseline refresh; UP043 (`AsyncGenerator`) applied elsewhere |
 | Dependabot ignores (TS 7 / ESLint 10) | Unchanged — no compatibility proof in this PR |
 | `packages/sdk-py` `requires-python >=3.10` | Wider SDK floor for downstream; services at `^3.13` |
 
@@ -100,7 +114,9 @@ Grafana `sha256:0615ec4fbd4072004b7d86b6daa744defed0441`.
 |---------------|--------|
 | `actions` | **2119 passed**, 10 skipped |
 | `agents` | **2574 passed**, 20 skipped, 219 subtests |
-| `api` | **In progress** at capture (large lock install) |
-| `mesh` | **11 passed** (spot check) |
+| `api` | **5383 passed**, 230 skipped, 1 xfailed |
+| `actions` / `agents` | **2119** / **2574** passed |
+| `mesh` | **11 passed**; `ueba` **122 passed** |
+| Others | Re-run with `service_requirements.py --only all` (connectors/fusion/threatintel lacked pytest in first pass) |
 
 Full CI service matrix still **skipped** on run `42990522391` because **Python — Lint & Type-check** failed on ruff UP047 (fixed on branch, not yet on that SHA).

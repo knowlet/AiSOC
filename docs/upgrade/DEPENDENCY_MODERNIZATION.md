@@ -115,8 +115,8 @@ Authoritative rehearsal table: [`STATEFUL_MIGRATION_EVIDENCE.md`](STATEFUL_MIGRA
 | Area | Verdict |
 |------|---------|
 | ClickHouse 26.8 | **Conditional GO** — in-place upgrade + `BACKUP`/`RESTORE` proved; down-grade without restore **no** |
-| Qdrant v1.20.0 | **NO-GO** for v1.7.0 **volume** carry-over; snapshot/staged upgrade required |
-| Kafka 7.8.12 | **Open** — CI upgrade jobs + operator rehearsal |
+| Qdrant v1.20.0 | **NO-GO** raw v1.7 volume / v1.7 snapshots; **GO** via consecutive-minor ladder + post-migration snapshot (`qdrant_migration_evidence.sh`) |
+| Kafka 7.8.12 | **Conditional GO** — paired-volume rehearsal with compose-aligned listeners |
 | OpenSearch 2.19.7 | **Open** — index store not rehearsed |
 | Python 3.13 toolchain | **GO** for locked unit suites exercised (actions/agents); full matrix pending green lint job |
 | Grafana 13 / Prometheus 3 | **Conditional GO** — health + config mount only |
@@ -127,6 +127,6 @@ Draft PR **must not merge** until compose smoke, integration upgrade paths, and 
 
 - **Mypy baseline file** still numerically from the 3.11 era — consider a deliberate baseline refresh on 3.13 in a follow-up commit (not hidden edits).
 - **Grafana 13** / **Prometheus 3** dashboard and scrape validation under `infra/docker/`.
-- **OpenSearch / Qdrant / Kafka** volume upgrades not rehearsed here.
+- **OpenSearch** index backup/restore still **open**; Qdrant + Kafka disposable paths documented in [`STATEFUL_MIGRATION_EVIDENCE.md`](STATEFUL_MIGRATION_EVIDENCE.md).
 - **Fork Helm CI** may need release tags visible to `check_chart_version.py` (investigate if red on push).
 - **sdk-py** keeps wider `requires-python >=3.10` for downstream consumers — intentional.
