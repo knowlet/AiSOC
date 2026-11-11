@@ -10,7 +10,7 @@ call it the outcome.
 
 Ollama already knows, and publishes it. `GET /api/ps` lists each loaded model
 with `size` and `size_vram`, and the ratio between them is the answer.
-Verified against the pinned `ollama/ollama:0.6.7` image: a model loaded in a
+Verified against the pinned `ollama/ollama:0.40.16` image: a model loaded in a
 container on an Apple Silicon host reports `size_vram: 0` against
 `size: 820601088`, correctly CPU, while the same host's *native* Ollama
 reports `size_vram == size` because it reaches Metal. Those are the two

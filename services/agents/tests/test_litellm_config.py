@@ -117,7 +117,7 @@ def test_compose_supplies_a_default_for_the_timeout_variable():
     LiteLLM resolves ``os.environ/...`` with ``get_secret``, which returns
     ``None`` for an unset variable and assigns that straight onto
     ``litellm.request_timeout``. Measured against
-    ``ghcr.io/berriai/litellm:v1.102.1``, a gateway in that state answers
+    ``ghcr.io/berriai/litellm:v1.108.5``, a gateway in that state answers
     200 on ``/health/liveliness`` and fails *every* completion with
     ``float() argument must be a string or a real number, not 'NoneType'`` —
     a healthy-looking gateway serving nothing, which is the shape of the defect

@@ -19,7 +19,7 @@
       "ubuntu:24.04"
     ],
     ".github/workflows/integration.yml": [
-      "confluentinc/cp-kafka:7.7.1",
+      "confluentinc/cp-kafka:7.8.12",
       "redis:7-alpine"
     ],
     ".github/workflows/publish-images.yml": [
@@ -69,9 +69,9 @@
       "ghcr.io/beenuar/aisoc-core-api:${AISOC_VERSION:-latest}"
     ],
     "docker-compose.yml": [
-      "clickhouse/clickhouse-server:24.8",
-      "confluentinc/cp-kafka:7.7.1",
-      "confluentinc/cp-zookeeper:7.7.1",
+      "clickhouse/clickhouse-server:26.8",
+      "confluentinc/cp-kafka:7.8.12",
+      "confluentinc/cp-zookeeper:7.8.12",
       "ghcr.io/beenuar/aisoc-actions:${AISOC_VERSION:-latest}",
       "ghcr.io/beenuar/aisoc-agents:${AISOC_VERSION:-latest}",
       "ghcr.io/beenuar/aisoc-connectors:${AISOC_VERSION:-latest}",
@@ -87,26 +87,26 @@
       "ghcr.io/beenuar/aisoc-threatintel:${AISOC_VERSION:-latest}",
       "ghcr.io/beenuar/aisoc-ueba:${AISOC_VERSION:-latest}",
       "ghcr.io/beenuar/aisoc-web:${AISOC_VERSION:-latest}",
-      "ghcr.io/berriai/litellm:v1.102.1",
-      "grafana/grafana:11.5.2",
-      "grafana/tempo:2.7.1",
+      "ghcr.io/berriai/litellm:v1.108.5",
+      "grafana/grafana:13.3.1",
+      "grafana/tempo:2.7.2",
       "neo4j:5.26.0-community",
-      "ollama/ollama:0.6.7",
-      "opensearchproject/opensearch:2.19.0",
-      "otel/opentelemetry-collector-contrib:0.120.0",
+      "ollama/ollama:0.40.16",
+      "opensearchproject/opensearch:2.19.7",
+      "otel/opentelemetry-collector-contrib:0.121.0",
       "postgres:16-alpine",
       "prom/alertmanager:v0.28.1",
-      "prom/prometheus:v2.55.1",
+      "prom/prometheus:v3.13.5",
       "provectuslabs/kafka-ui:v0.7.2",
-      "qdrant/qdrant:v1.12.5",
+      "qdrant/qdrant:v1.20.0",
       "redis:7-alpine"
     ],
     "infra/compose/docker-compose.airgap.yml": [
-      "ollama/ollama:0.6.7"
+      "ollama/ollama:0.40.16"
     ],
     "infra/compose/docker-compose.demo.yml": [
-      "confluentinc/cp-kafka:7.7.1",
-      "confluentinc/cp-zookeeper:7.7.1",
+      "confluentinc/cp-kafka:7.8.12",
+      "confluentinc/cp-zookeeper:7.8.12",
       "ghcr.io/beenuar/aisoc-agents:${AISOC_TAG:-latest}",
       "ghcr.io/beenuar/aisoc-core-api:${AISOC_TAG:-latest}",
       "ghcr.io/beenuar/aisoc-realtime:${AISOC_TAG:-latest}",
@@ -175,36 +175,36 @@
       "repository: qdrant/qdrant"
     ],
     "services/actions/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/agents/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/api/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/connectors/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/demo-producer/Dockerfile": [
       "gcr.io/distroless/static-debian12:nonroot",
       "golang:1.26-alpine"
     ],
     "services/enrichment/Dockerfile": [
-      "alpine:3.21",
+      "alpine:3.23",
       "golang:1.26-alpine"
     ],
     "services/escalations/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/fusion/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/honeytokens/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/ingest/Dockerfile": [
-      "alpine:3.21",
+      "alpine:3.23",
       "golang:1.26-alpine"
     ],
     "services/mcp/Dockerfile": [
@@ -212,38 +212,38 @@
       "node:22-alpine"
     ],
     "services/mesh/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/osquery-tls/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/purple-team/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/realtime/Dockerfile": [
       "node:22-alpine"
     ],
     "services/slack-bot/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/teams-bot/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/threatintel/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ],
     "services/ueba/Dockerfile": [
-      "python:3.11-slim"
+      "python:3.13-slim"
     ]
   },
   "datastore_pins": {
-    "clickhouse/clickhouse-server": "24.8",
-    "confluentinc/cp-kafka": "7.7.1",
-    "confluentinc/cp-zookeeper": "7.7.1",
+    "clickhouse/clickhouse-server": "26.8",
+    "confluentinc/cp-kafka": "7.8.12",
+    "confluentinc/cp-zookeeper": "7.8.12",
     "neo4j": "5.26.0-community",
-    "opensearchproject/opensearch": "2.19.0",
+    "opensearchproject/opensearch": "2.19.7",
     "postgres": "16-alpine",
-    "qdrant/qdrant": "v1.12.5",
+    "qdrant/qdrant": "v1.20.0",
     "redis": "7-alpine"
   },
   "generated_from": "/agent/repos/AiSOC",
@@ -296,7 +296,7 @@
       "22-alpine"
     ],
     "python_base_images": [
-      "3.11-slim"
+      "3.13-slim"
     ]
   }
 }

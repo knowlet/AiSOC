@@ -175,7 +175,7 @@ litellm_settings:
   # every call then times out while the Settings panel still reports the
   # provider Live (issue #1241). The default is unchanged — the knob is new.
   #
-  # Measured against `ghcr.io/berriai/litellm:v1.102.1` (then served by the
+  # Measured against `ghcr.io/berriai/litellm:v1.108.5` (then served by the
   # since-deleted `main-stable` tag), because two
   # plausible-looking alternatives do not work:
   #

@@ -19,7 +19,7 @@ either the reported name differs from the requested one, or the response
 carries its own ``id`` (set by langchain only when the body had one).
 
 Fixtures mirror ``test_cost_provenance.py``: the LiteLLM headers are the
-measured set from ``ghcr.io/berriai/litellm:v1.102.1``; the body shapes are
+measured set from ``ghcr.io/berriai/litellm:v1.108.5``; the body shapes are
 what an Ollama 0.5-class server and OpenAI's API return for a chat
 completion.
 """
