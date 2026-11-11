@@ -125,13 +125,13 @@ jobs:
           docker run -d --name iso-neo4j -p 7687:7687 \
             -e NEO4J_AUTH=neo4j/testpassword123 \
             -e NEO4J_dbms_security_auth__minimum__password__length=8 \
-            neo4j:5.15-community
+            neo4j:5.26.0-community
 
       - name: Start ClickHouse
         run: |
           docker run -d --name iso-clickhouse -p 9000:9000 \
             --ulimit nofile=262144:262144 \
-            clickhouse/clickhouse-server:23.8
+            clickhouse/clickhouse-server:24.8
 
       - name: Start Redpanda (Kafka API)
         run: |

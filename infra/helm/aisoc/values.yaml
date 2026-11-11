@@ -741,7 +741,7 @@ qdrant:
   enabled: true
   image:
     repository: qdrant/qdrant
-    tag: v1.7.0
+    tag: v1.12.5
     pullPolicy: IfNotPresent
   persistence:
     size: 10Gi

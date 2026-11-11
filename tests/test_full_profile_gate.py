@@ -74,7 +74,7 @@ def _published(service: dict) -> set[int]:
 
 # ── OpenSearch: a 512m heap is not a 512m process ──────────────────────────
 #
-# Shipped as `mem_limit: 1g` with `-Xmx512m`. OpenSearch 2.11 loads ~20 bundled
+# Shipped as `mem_limit: 2g` with `-Xmx512m`. OpenSearch 2.19 loads ~20 bundled
 # plugins and settles at ~1.05GB RSS with that heap, so the container was
 # OOM-killed during bootstrap every single time (exit 137, OOMKilled=true,
 # ~10s in). The full profile shipped a store that could not start, and

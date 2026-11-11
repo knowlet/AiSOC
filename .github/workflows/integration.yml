@@ -1347,7 +1347,7 @@ jobs:
     timeout-minutes: 10
     services:
       kafka:
-        image: confluentinc/cp-kafka:7.5.0
+        image: confluentinc/cp-kafka:7.7.1
         ports:
           - 9092:9092
         env:

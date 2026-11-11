@@ -60,7 +60,7 @@ jobs:
             -e NEO4J_AUTH=neo4j/testpassword123 \
             -e NEO4J_PLUGINS='["apoc"]' \
             -e NEO4J_dbms_security_procedures_unrestricted='apoc.*' \
-            neo4j:5.15-community
+            neo4j:5.26.0-community
 
       # The service's own lockfile, not a hand-curated pip list.
       #

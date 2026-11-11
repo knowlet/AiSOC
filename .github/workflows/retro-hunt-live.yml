@@ -82,7 +82,7 @@ jobs:
         run: |
           docker run -d --name rh-clickhouse -p 9000:9000 -p 8123:8123 \
             -e CLICKHOUSE_SKIP_USER_SETUP=1 \
-            clickhouse/clickhouse-server:24.3-alpine
+            clickhouse/clickhouse-server:24.8-alpine
 
       # Redpanda rather than Kafka, matching `isolation-live.yml`: same
       # Kafka API, one container, no ZooKeeper.

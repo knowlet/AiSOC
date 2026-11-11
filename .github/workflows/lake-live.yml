@@ -62,7 +62,7 @@ jobs:
         run: |
           docker run -d --name lake-clickhouse -p 9000:9000 -p 8123:8123 \
             -e CLICKHOUSE_SKIP_USER_SETUP=1 \
-            clickhouse/clickhouse-server:24.3-alpine
+            clickhouse/clickhouse-server:24.8-alpine
 
       # The service's own lockfile, not a hand-curated pip list.
       #
