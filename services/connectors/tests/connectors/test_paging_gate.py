@@ -84,3 +84,24 @@ def test_the_ceiling_is_a_debt_balance_that_only_falls() -> None:
 def test_slack_audit_reads_its_window_to_the_end() -> None:
     _, paging, _ = _load().audit()
     assert "slack_audit" in paging
+
+
+def test_datadog_cloud_siem_reads_its_window_to_the_end() -> None:
+    _, paging, _ = _load().audit()
+    assert "datadog_cloud_siem" in paging
+
+
+def test_duo_security_reads_its_window_to_the_end() -> None:
+    _, paging, _ = _load().audit()
+    assert "duo_security" in paging
+
+
+def test_cortex_xdr_and_xsiam_read_their_windows_to_the_end() -> None:
+    _, paging, _ = _load().audit()
+    assert "cortex_xdr" in paging
+    assert "cortex_xsiam" in paging
+
+
+def test_trend_vision_one_reads_its_window_to_the_end() -> None:
+    _, paging, _ = _load().audit()
+    assert "trend_vision_one" in paging
