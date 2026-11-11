@@ -31,7 +31,7 @@ services:
   # ─── Local LLM (Ollama) ─────────────────────────────────────────────────────
 
   ollama:
-    image: ollama/ollama:0.6.7
+    image: ollama/ollama:0.40.16
     container_name: aisoc-airgap-ollama
     volumes:
       - ollama_data:/root/.ollama
@@ -49,7 +49,7 @@ services:
 
   # Pull the pinned model once (no-op on cache hit)
   ollama-pull:
-    image: ollama/ollama:0.6.7
+    image: ollama/ollama:0.40.16
     container_name: aisoc-airgap-ollama-pull
     depends_on:
       ollama:

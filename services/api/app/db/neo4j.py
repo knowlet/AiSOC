@@ -70,7 +70,7 @@ def get_driver() -> AsyncDriver:
 
 
 @asynccontextmanager
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_session() -> AsyncGenerator[AsyncSession]:
     """Async context manager yielding a Neo4j session."""
     driver = get_driver()
     async with driver.session(database="neo4j") as session:

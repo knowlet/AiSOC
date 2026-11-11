@@ -5,7 +5,7 @@
 # behaves the same way locally and in `.github/workflows/ci.yml`.
 
 line-length = 140
-target-version = "py311"
+target-version = "py313"
 
 # The archived prototype subtree. `.github/workflows/codeql.yml` carries the
 # same exclusion, `scripts/check_mypy_baseline.py` excludes it from every
@@ -64,3 +64,12 @@ extend-immutable-calls = [
 # elsewhere needed wrapping to get there.
 "scripts/detection_specs.py" = ["E501"]
 "scripts/detection_specs_part2.py" = ["E501"]
+
+# PEP 695 `type` / generic-function syntax (UP040, UP047) regresses mypy with
+# `valid-type` on these modules until `mypy-unmanaged.toml` is refreshed
+# (measured 2026-11-11 on Python 3.13).
+"scripts/check_action_contract.py" = ["UP047"]
+"services/api/app/db/best_effort.py" = ["UP047"]
+"services/api/app/services/agent_tools/vendor_aliases.py" = ["UP047"]
+"services/api/app/services/sandbox/base.py" = ["UP040"]
+"services/api/app/services/sandbox/types.py" = ["UP040", "UP047"]

@@ -56,13 +56,13 @@ jobs:
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Start ClickHouse
         run: |
           docker run -d --name lake-clickhouse -p 9000:9000 -p 8123:8123 \
             -e CLICKHOUSE_SKIP_USER_SETUP=1 \
-            clickhouse/clickhouse-server:24.3-alpine
+            clickhouse/clickhouse-server:26.8-alpine
 
       # The service's own lockfile, not a hand-curated pip list.
       #

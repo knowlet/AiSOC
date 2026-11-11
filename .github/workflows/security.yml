@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - name: Enforce no new NO GATE rows
         run: python3 scripts/check_claim_gate_matrix.py
 
@@ -175,7 +175,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - name: Install semgrep
         run: pip install --quiet semgrep==1.86.0
       # Fails on a vendored pack that disagrees with its manifest — a
@@ -313,7 +313,7 @@ jobs:
           version: v3.18.5
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       # Its own step, and blocking. The install used to sit inside the scan
       # step under `continue-on-error`, so a failed `pip install` was
       # absorbed and the only symptom was the ratchet below complaining
@@ -399,7 +399,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - name: Install tfsec
         run: |
           set -euo pipefail

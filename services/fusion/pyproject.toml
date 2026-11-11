@@ -10,7 +10,7 @@ license = "MIT"
 # and hid whether the lock was fresh.
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.13"
 # Floor 0.117: below it a `-> None` handler under PEP 563 trips FastAPI's
 # "204 must not have a response body" assert at import. One range for
 # every service — see services/api/pyproject.toml for the measurement.
@@ -23,10 +23,10 @@ fastapi = ">=0.117,<0.163"
 uvicorn = {extras = ["standard"], version = ">=0.29,<0.54"}
 pydantic = "^2.5.0"
 pydantic-settings = "^2.1.0"
-aiokafka = "^0.10.0"
+aiokafka = "^0.14.0"
 aioredis = "^2.0.1"
 redis = {extras = ["hiredis"], version = "^5.0.1"}
-asyncpg = "^0.29.0"
+asyncpg = ">=0.30.0,<0.33"
 sqlalchemy = {extras = ["asyncio"], version = "^2.0.25"}
 structlog = "^24.1.0"
 prometheus-client = "^0.19.0"
@@ -42,7 +42,7 @@ python-dateutil = "^2.8.2"
 simhash = "^2.1.2"
 scikit-learn = "^1.4.0"
 lightgbm = "^4.3.0"
-numpy = "^1.26.0"
+numpy = ">=2.1.0,<3.0.0"
 clickhouse-driver = "^0.2.6"
 # `app/memory/pack.py` imports `cryptography.hazmat` at module scope to verify
 # the Ed25519 signature on a memory pack, and this manifest did not declare it.
@@ -76,7 +76,7 @@ build-backend = "poetry.core.masonry.api"
 # across services. Don't add `[tool.ruff]` here — it would shadow the root.
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 ignore_missing_imports = true
 
 

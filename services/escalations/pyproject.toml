@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "aisoc-escalations"
 version = "0.1.0"
 description = "Ack-clock escalation bridge: Teams escalations for unacknowledged CRITICAL/HIGH cases while the native outbound-webhook emitters are unwired."
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     # The service's only dependency. Sync psycopg on purpose: one query burst
     # every ESC_TICK_SECONDS from a single loop needs no event loop, and a
@@ -21,7 +21,7 @@ dependencies = [
 dev = ["pytest>=9,<10", "pytest-cov>=5,<8"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 ignore_missing_imports = true
 

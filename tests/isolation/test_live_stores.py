@@ -110,11 +110,13 @@ def _load_lake_sql():
 def test_clickhouse_lake_query_as_A_excludes_B():
     host = _require("ISOLATION_CLICKHOUSE_HOST")
     port = int(os.environ.get("ISOLATION_CLICKHOUSE_PORT", "9000"))
+    user = os.environ.get("ISOLATION_CLICKHOUSE_USER", "default")
+    password = os.environ.get("ISOLATION_CLICKHOUSE_PASSWORD", "")
 
     clickhouse_driver = _client("clickhouse_driver", "clickhouse-driver")
     lake_sql = _load_lake_sql()
 
-    client = clickhouse_driver.Client(host=host, port=port)
+    client = clickhouse_driver.Client(host=host, port=port, user=user, password=password)
 
     # A faithful subset of services/api/clickhouse/001_init.sql — the columns
     # the rewriter and this assertion touch. tenant_id is the isolation key.

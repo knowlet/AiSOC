@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Security",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
   "httpx>=0.27",
   "pydantic>=2.5",
@@ -46,11 +46,11 @@ packages = ["src/aisoc_plugin_sdk"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py313"
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+python_version = "3.13"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

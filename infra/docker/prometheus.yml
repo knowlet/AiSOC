@@ -49,8 +49,11 @@ global:
 # start-up; reloading rules at runtime requires SIGHUP'ing the
 # container. The shipped ruleset lives under `infra/docker/alerts/`
 # so adding a rule = adding a file + including it here.
+# Prometheus v3 does not expand globs in `rule_files`; list each file explicitly
+# (see promtool / startup logs — `*.yml` silently loaded zero groups pre-fix).
 rule_files:
-  - /etc/prometheus/alerts/*.yml
+  - /etc/prometheus/alerts/aisoc.rules.yml
+  - /etc/prometheus/alerts/slo.rules.yml
 
 # Phase 2.4 — Alertmanager wiring. Prometheus forwards firing /
 # resolved alerts to the in-cluster Alertmanager defined in

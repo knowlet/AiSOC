@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       # xmlsec1 is a C library and `python3-saml` will not import without
       # it. Installed before the lockfile so a missing system package is a
@@ -177,7 +177,7 @@ jobs:
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       # `docker run`, not a `services:` container: Keycloak's entrypoint
       # needs the `start-dev` argument and a service container has no way
@@ -285,7 +285,7 @@ jobs:
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       # `docker run`, not a `services:` container: Keycloak's entrypoint
       # needs the `start-dev` argument and a service container has no way

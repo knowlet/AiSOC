@@ -63,4 +63,4 @@ testpaths = ["tests"]
 # and 3.11 is the interpreter CI runs.
 [tool.mypy]
 strict = true
-python_version = "3.11"
+python_version = "3.13"

@@ -6,7 +6,7 @@ name: Compose Smoke (nightly cold-cache)
 # published images, this workflow exists to catch the regressions that only
 # show up when you build everything from source on a fresh machine:
 #
-#   - Upstream base image (`python:3.11-slim` etc.) breakage
+#   - Upstream base image (`python:3.13-slim` etc.) breakage
 #   - Poetry/pip resolution drift on a cold cache
 #   - `pyproject.toml` ↔ pip-fallback list drift in service Dockerfiles
 #   - Build-time toolchain regressions (apt mirrors, system deps)
@@ -89,7 +89,7 @@ jobs:
       - name: Build every service from scratch
         run: |
           # --no-cache: force every Dockerfile layer to re-execute.
-          # --pull:    force base image (`python:3.11-slim`, etc.) refetch so
+          # --pull:    force base image (`python:3.13-slim`, etc.) refetch so
           #            we surface upstream breakage instead of using a stale
           #            cached layer.
           docker compose build --no-cache --pull

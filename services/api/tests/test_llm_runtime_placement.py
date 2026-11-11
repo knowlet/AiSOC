@@ -10,7 +10,7 @@ Ollama knows and publishes it on `/api/ps`.
 The payloads below are not invented. They were captured from real Ollama
 instances while building this:
 
-* **CPU** -- the pinned `ollama/ollama:0.6.7` image running in a container on
+* **CPU** -- the pinned `ollama/ollama:0.40.16` image running in a container on
   an Apple Silicon host, which reports `size_vram: 0` against a real `size`.
   That is the configuration `make up` produces on a Mac.
 * **GPU** -- the same host's *native* Ollama 0.30.7, which reaches Metal and
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import pytest
 
-# Captured from `ollama/ollama:0.6.7` in a container on Apple Silicon.
+# Captured from `ollama/ollama:0.40.16` in a container on Apple Silicon.
 CPU_PAYLOAD = [
     {
         "name": "qwen2.5:0.5b",

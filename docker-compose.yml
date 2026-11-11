@@ -167,7 +167,7 @@ services:
       retries: 5
 
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
+    image: confluentinc/cp-zookeeper:7.8.12
     container_name: aisoc-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
@@ -198,7 +198,7 @@ services:
       retries: 5
 
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
+    image: confluentinc/cp-kafka:7.8.12
     container_name: aisoc-kafka
     depends_on:
       zookeeper:
@@ -231,7 +231,7 @@ services:
   kafka-ui:
     # full profile — Kafka topic browser. A debugging convenience, not a pipeline component.
     profiles: ["full"]
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     container_name: aisoc-kafka-ui
     depends_on:
       kafka:
@@ -247,7 +247,7 @@ services:
   clickhouse:
     # full profile — Event lake. Backs /lake/sql and the hunt surface; alerting does not read it.
     profiles: ["full"]
-    image: clickhouse/clickhouse-server:23.8
+    image: clickhouse/clickhouse-server:26.8
     container_name: aisoc-clickhouse
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8123:8123"
@@ -272,7 +272,7 @@ services:
   opensearch:
     # full profile — Full-text search over archived events. No CORE code path queries it.
     profiles: ["full"]
-    image: opensearchproject/opensearch:2.11.0
+    image: opensearchproject/opensearch:2.19.7
     container_name: aisoc-opensearch
     environment:
       - cluster.name=aisoc-cluster
@@ -303,7 +303,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
-    # A 512m heap is not a 512m process. OpenSearch 2.11 loads ~20 bundled
+    # A 512m heap is not a 512m process. OpenSearch 2.19 loads ~20 bundled
     # plugins (knn, ml, security-analytics, performance-analyzer) and settles
     # at ~1.05GB RSS with this heap — measured, steady-state, single node,
     # no indices. At `mem_limit: 1g` it was OOM-killed during bootstrap every
@@ -321,7 +321,7 @@ services:
     # created. It is by a wide margin the cheapest of the four stores — the
     # next one up, OpenSearch, is 2 GB of image and ~1.05 GB resident — which
     # is why it is the one CORE takes.
-    image: qdrant/qdrant:v1.7.0
+    image: qdrant/qdrant:v1.20.0
     container_name: aisoc-qdrant
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:6333:6333"
@@ -343,7 +343,7 @@ services:
   neo4j:
     # full profile — Entity graph. Backs graph traversals and blast radius, not alert generation.
     profiles: ["full"]
-    image: neo4j:5.15-community
+    image: neo4j:5.26.0-community
     container_name: aisoc-neo4j
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:7474:7474"   # HTTP browser
@@ -897,7 +897,7 @@ services:
     # the model is mapped in on first inference and the container measured
     # 2.96 GiB while serving. That is what moved the README's memory figure to
     # 8 GB, not the idle number.
-    image: ollama/ollama:0.6.7
+    image: ollama/ollama:0.40.16
     container_name: aisoc-ollama
     volumes:
       - ollama_data:/root/.ollama
@@ -945,7 +945,7 @@ services:
     # The state is therefore reported where it is *used* rather than inferred
     # from this container's exit code: `make doctor` asks Ollama whether the
     # model is present, which is the thing it names.
-    image: ollama/ollama:0.6.7
+    image: ollama/ollama:0.40.16
     container_name: aisoc-ollama-pull
     depends_on:
       ollama:
@@ -1044,7 +1044,7 @@ services:
     # the measurements recorded in docs/decisions/0006-llm-gateway-in-core.md
     # and the agents test fixtures. Keep this and the Helm chart's
     # `llmGateway.image.tag` in lockstep when bumping.
-    image: ghcr.io/berriai/litellm:v1.102.1
+    image: ghcr.io/berriai/litellm:v1.108.5
     container_name: aisoc-litellm
     command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
     volumes:
@@ -1837,7 +1837,7 @@ services:
   # ─── Observability ────────────────────────────────────────────────────────────
 
   prometheus:
-    image: prom/prometheus:v2.48.0
+    image: prom/prometheus:v3.13.5
     container_name: aisoc-prometheus
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:9091:9090"
@@ -1873,7 +1873,7 @@ services:
   # default surface so a stock `aisoc serve` doesn't fail when the
   # operator hasn't provisioned downstream alerting.
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: prom/alertmanager:v0.28.1
     container_name: aisoc-alertmanager
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:9094:9093"
@@ -1913,7 +1913,7 @@ services:
   # ueba and honeytokens are instrumented. ingest (Go) and realtime
   # (TypeScript) are not, and they are the two ends of the Kafka spine.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.109.0
+    image: otel/opentelemetry-collector-contrib:0.121.0
     container_name: aisoc-otel-collector
     command: ["--config=/etc/otel/collector.yaml"]
     depends_on:
@@ -1934,7 +1934,7 @@ services:
       - monitoring
 
   tempo:
-    image: grafana/tempo:2.6.0
+    image: grafana/tempo:2.7.2
     container_name: aisoc-tempo
     command: ["-config.file=/etc/tempo/tempo.yaml"]
     user: "0:0"
@@ -1949,7 +1949,7 @@ services:
       - monitoring
 
   grafana:
-    image: grafana/grafana:10.2.0
+    image: grafana/grafana:13.3.1
     container_name: aisoc-grafana
     depends_on:
       - prometheus

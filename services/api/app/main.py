@@ -323,7 +323,7 @@ REQUEST_LATENCY = Histogram(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Application lifespan handler for startup and shutdown tasks."""
     configure_logging()
     logger.info("AiSOC API starting up", version=settings.VERSION, environment=settings.ENVIRONMENT)

@@ -679,7 +679,7 @@ llmGateway:
     # `main-stable` served when this stack was measured against it. Keep in
     # lockstep with the root docker-compose.yml litellm pin.
     repository: ghcr.io/berriai/litellm
-    tag: v1.102.1
+    tag: v1.108.5
     pullPolicy: IfNotPresent
   replicaCount: 1
   env:
@@ -718,7 +718,7 @@ ollama:
   enabled: true
   image:
     repository: ollama/ollama
-    tag: 0.6.7
+    tag: 0.40.16
     pullPolicy: IfNotPresent
   model: llama3.2:3b-instruct-q4_K_M
   env: {}
@@ -741,7 +741,7 @@ qdrant:
   enabled: true
   image:
     repository: qdrant/qdrant
-    tag: v1.7.0
+    tag: v1.20.0
     pullPolicy: IfNotPresent
   persistence:
     size: 10Gi

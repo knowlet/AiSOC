@@ -6,7 +6,7 @@ authors = ["Beenu Arora <beenu@cyble.com>"]
 license = "MIT"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.13"
 # Aligned with services/api. The previous `<0.137` cap held starlette at
 # 1.0.0, which carries six advisories (PYSEC-2026-161/248/249/2280/2281),
 # and because a stale poetry.lock kept this service out of the dependency
@@ -48,7 +48,7 @@ respx = "^0.21.1"
 # strictness level. `python_version` is pinned so the finding set does not
 # move with whatever interpreter mypy happens to run on.
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 ignore_missing_imports = true
 

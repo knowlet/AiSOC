@@ -1,0 +1,322 @@
+{
+  "ci_action_pins": {
+    "actions/checkout@v7": "3d3c42e5aac5"
+  },
+  "container_images": {
+    ".devcontainer/Dockerfile": [
+      "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm"
+    ],
+    ".github/workflows/e2e.yml": [
+      "mcr.microsoft.com/playwright:v1.49.0-jammy"
+    ],
+    ".github/workflows/installer-smoke.yml": [
+      "alpine:3.20",
+      "archlinux:latest",
+      "debian:12",
+      "fedora:40",
+      "opensuse/leap:15.6",
+      "ubuntu:22.04",
+      "ubuntu:24.04"
+    ],
+    ".github/workflows/integration.yml": [
+      "confluentinc/cp-kafka:7.8.12",
+      "redis:7-alpine"
+    ],
+    ".github/workflows/publish-images.yml": [
+      "ghcr.io/beenuar/aisoc-actions",
+      "ghcr.io/beenuar/aisoc-agents",
+      "ghcr.io/beenuar/aisoc-connectors",
+      "ghcr.io/beenuar/aisoc-core-api",
+      "ghcr.io/beenuar/aisoc-enrichment",
+      "ghcr.io/beenuar/aisoc-fusion",
+      "ghcr.io/beenuar/aisoc-honeytokens",
+      "ghcr.io/beenuar/aisoc-ingest",
+      "ghcr.io/beenuar/aisoc-osquery-tls",
+      "ghcr.io/beenuar/aisoc-purple-team",
+      "ghcr.io/beenuar/aisoc-realtime",
+      "ghcr.io/beenuar/aisoc-slack-bot",
+      "ghcr.io/beenuar/aisoc-teams-bot",
+      "ghcr.io/beenuar/aisoc-threatintel",
+      "ghcr.io/beenuar/aisoc-ueba",
+      "ghcr.io/beenuar/aisoc-web"
+    ],
+    ".github/workflows/release.yml": [
+      "ghcr.io/beenuar/aisoc-actions",
+      "ghcr.io/beenuar/aisoc-agents",
+      "ghcr.io/beenuar/aisoc-connectors",
+      "ghcr.io/beenuar/aisoc-core-api",
+      "ghcr.io/beenuar/aisoc-enrichment",
+      "ghcr.io/beenuar/aisoc-fusion",
+      "ghcr.io/beenuar/aisoc-honeytokens",
+      "ghcr.io/beenuar/aisoc-ingest",
+      "ghcr.io/beenuar/aisoc-osquery-tls",
+      "ghcr.io/beenuar/aisoc-purple-team",
+      "ghcr.io/beenuar/aisoc-realtime",
+      "ghcr.io/beenuar/aisoc-slack-bot",
+      "ghcr.io/beenuar/aisoc-teams-bot",
+      "ghcr.io/beenuar/aisoc-threatintel",
+      "ghcr.io/beenuar/aisoc-ueba",
+      "ghcr.io/beenuar/aisoc-web"
+    ],
+    ".github/workflows/visual-regression.yml": [
+      "mcr.microsoft.com/playwright:v1.49.0-jammy"
+    ],
+    "apps/web/Dockerfile": [
+      "base",
+      "node:22-alpine"
+    ],
+    "docker-compose.prod.yml": [
+      "ghcr.io/beenuar/aisoc-core-api:${AISOC_VERSION:-latest}"
+    ],
+    "docker-compose.yml": [
+      "clickhouse/clickhouse-server:26.8",
+      "confluentinc/cp-kafka:7.8.12",
+      "confluentinc/cp-zookeeper:7.8.12",
+      "ghcr.io/beenuar/aisoc-actions:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-agents:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-connectors:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-core-api:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-enrichment:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-fusion:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-honeytokens:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-ingest:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-osquery-tls:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-purple-team:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-realtime:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-slack-bot:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-threatintel:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-ueba:${AISOC_VERSION:-latest}",
+      "ghcr.io/beenuar/aisoc-web:${AISOC_VERSION:-latest}",
+      "ghcr.io/berriai/litellm:v1.108.5",
+      "grafana/grafana:13.3.1",
+      "grafana/tempo:2.7.2",
+      "neo4j:5.26.0-community",
+      "ollama/ollama:0.40.16",
+      "opensearchproject/opensearch:2.19.7",
+      "otel/opentelemetry-collector-contrib:0.121.0",
+      "postgres:16-alpine",
+      "prom/alertmanager:v0.28.1",
+      "prom/prometheus:v3.13.5",
+      "provectuslabs/kafka-ui:v0.7.2",
+      "qdrant/qdrant:v1.20.0",
+      "redis:7-alpine"
+    ],
+    "infra/compose/docker-compose.airgap.yml": [
+      "ollama/ollama:0.40.16"
+    ],
+    "infra/compose/docker-compose.demo.yml": [
+      "confluentinc/cp-kafka:7.8.12",
+      "confluentinc/cp-zookeeper:7.8.12",
+      "ghcr.io/beenuar/aisoc-agents:${AISOC_TAG:-latest}",
+      "ghcr.io/beenuar/aisoc-core-api:${AISOC_TAG:-latest}",
+      "ghcr.io/beenuar/aisoc-realtime:${AISOC_TAG:-latest}",
+      "ghcr.io/beenuar/aisoc-web:${AISOC_TAG:-demo}",
+      "postgres:16-alpine",
+      "redis:7-alpine"
+    ],
+    "infra/helm/aisoc/ci/datastores.yaml": [
+      "postgres:16-alpine",
+      "redis:7-alpine"
+    ],
+    "infra/helm/aisoc/templates/backup-cronjob.yaml": [
+      "{{ .Values.backup.image.repository }}:{{ .Values.backup.image.tag | default .Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/templates/core-api-deployment.yaml": [
+      "{{ .Values.coreApi.image.repository }}:{{ .Values.coreApi.image.tag }}"
+    ],
+    "infra/helm/aisoc/templates/core-platform.yaml": [
+      "{{ .Values.llmGateway.image.repository }}:{{ .Values.llmGateway.image.tag }}",
+      "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}",
+      "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
+    ],
+    "infra/helm/aisoc/templates/deployment.yaml": [
+      "{{ $.Values.kafka.waitForBroker.image.repository }}:{{ $.Values.kafka.waitForBroker.image.tag }}",
+      "{{ $svc.image.repository }}:{{ $svc.image.tag | default $.Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/templates/honeytokens-deployment.yaml": [
+      "{{ .Values.honeytokens.image.repository }}:{{ .Values.honeytokens.image.tag | default .Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/templates/kafka-statefulset.yaml": [
+      "{{ .Values.kafka.deploy.image.repository }}:{{ .Values.kafka.deploy.image.tag }}"
+    ],
+    "infra/helm/aisoc/templates/kafka-topics-job.yaml": [
+      "{{ .Values.kafka.deploy.image.repository }}:{{ .Values.kafka.deploy.image.tag }}"
+    ],
+    "infra/helm/aisoc/templates/mcp-deployment.yaml": [
+      "{{ required \"mcp.image.repository must be set to install the MCP server; no image is published for it yet\" .Values.mcp.image.repository }}:{{ .Values.mcp.image.tag | default .Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/templates/migrations-job.yaml": [
+      "{{ $api.image.repository }}:{{ $api.image.tag | default $.Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/templates/purple-team-deployment.yaml": [
+      "{{ .Values.purpleTeam.image.repository }}:{{ .Values.purpleTeam.image.tag | default .Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/templates/ueba-deployment.yaml": [
+      "{{ .Values.ueba.image.repository }}:{{ .Values.ueba.image.tag | default .Chart.AppVersion }}"
+    ],
+    "infra/helm/aisoc/values.yaml": [
+      "# Pinned, not floating. This read `main-stable` \u2014 a moving tag, and a",
+      "repository: ",
+      "repository: apache/kafka",
+      "repository: ghcr.io/beenuar/aisoc-actions",
+      "repository: ghcr.io/beenuar/aisoc-agents",
+      "repository: ghcr.io/beenuar/aisoc-connectors",
+      "repository: ghcr.io/beenuar/aisoc-core-api",
+      "repository: ghcr.io/beenuar/aisoc-enrichment",
+      "repository: ghcr.io/beenuar/aisoc-fusion",
+      "repository: ghcr.io/beenuar/aisoc-honeytokens",
+      "repository: ghcr.io/beenuar/aisoc-ingest",
+      "repository: ghcr.io/beenuar/aisoc-purple-team",
+      "repository: ghcr.io/beenuar/aisoc-realtime",
+      "repository: ghcr.io/beenuar/aisoc-threatintel",
+      "repository: ghcr.io/beenuar/aisoc-ueba",
+      "repository: ghcr.io/beenuar/aisoc-web",
+      "repository: ollama/ollama",
+      "repository: qdrant/qdrant"
+    ],
+    "services/actions/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/agents/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/api/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/connectors/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/demo-producer/Dockerfile": [
+      "gcr.io/distroless/static-debian12:nonroot",
+      "golang:1.26-alpine"
+    ],
+    "services/enrichment/Dockerfile": [
+      "alpine:3.23",
+      "golang:1.26-alpine"
+    ],
+    "services/escalations/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/fusion/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/honeytokens/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/ingest/Dockerfile": [
+      "alpine:3.23",
+      "golang:1.26-alpine"
+    ],
+    "services/mcp/Dockerfile": [
+      "base",
+      "node:22-alpine"
+    ],
+    "services/mesh/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/osquery-tls/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/purple-team/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/realtime/Dockerfile": [
+      "node:22-alpine"
+    ],
+    "services/slack-bot/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/teams-bot/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/threatintel/Dockerfile": [
+      "python:3.13-slim"
+    ],
+    "services/ueba/Dockerfile": [
+      "python:3.13-slim"
+    ]
+  },
+  "datastore_pins": {
+    "clickhouse/clickhouse-server": "26.8",
+    "confluentinc/cp-kafka": "7.8.12",
+    "confluentinc/cp-zookeeper": "7.8.12",
+    "neo4j": "5.26.0-community",
+    "opensearchproject/opensearch": "2.19.7",
+    "postgres": "16-alpine",
+    "qdrant/qdrant": "v1.20.0",
+    "redis": "7-alpine"
+  },
+  "generated_from": "/agent/repos/AiSOC",
+  "go_modules": [
+    "packages/plugin-sdk-go/go.mod",
+    "packages/sdk-go/go.mod",
+    "services/demo-producer/go.mod",
+    "services/enrichment/go.mod",
+    "services/ingest/go.mod",
+    "services/osquery-extensions/go.mod"
+  ],
+  "lockfiles": {
+    "pnpm-lock.yaml": "f57529e629113866",
+    "services/actions/poetry.lock": "7028935a372569a6",
+    "services/agents/poetry.lock": "c44a54db7b0ad311",
+    "services/api/poetry.lock": "57b5120adbba04a2",
+    "services/connectors/poetry.lock": "7d672c7e09845b59",
+    "services/enrichment/go.sum": "bdab63196d4e4c21",
+    "services/escalations/poetry.lock": "4ed88f677499994f",
+    "services/fusion/poetry.lock": "0315ec5abe3bec5e",
+    "services/honeytokens/poetry.lock": "709589257ab2a5ae",
+    "services/ingest/go.sum": "e0d7bb8a3da8e53e",
+    "services/mesh/poetry.lock": "2fe5de992b9db406",
+    "services/osquery-extensions/go.sum": "5d45536de63e97e4",
+    "services/osquery-tls/poetry.lock": "d475a3ace1d8ac75",
+    "services/purple-team/poetry.lock": "cb82ced9a6e76eeb",
+    "services/slack-bot/poetry.lock": "27ad482eabd6fd5d",
+    "services/teams-bot/poetry.lock": "4898aebcad938d4f",
+    "services/threatintel/poetry.lock": "8c6e507def442f4e",
+    "services/ueba/poetry.lock": "33a313610928befa"
+  },
+  "package_managers": {
+    "root_package_json": "{\"node_engine\": \">=20.0.0\", \"packageManager\": \"pnpm@8.15.1\", \"pnpm_engine\": \">=8.0.0\"}"
+  },
+  "pnpm_workspace": {
+    "node_engine": ">=20.0.0",
+    "packageManager": "pnpm@8.15.1",
+    "pnpm_engine": ">=8.0.0"
+  },
+  "poetry_services": [
+    "actions",
+    "agents",
+    "api",
+    "connectors",
+    "escalations",
+    "fusion",
+    "honeytokens",
+    "mesh",
+    "osquery-tls",
+    "purple-team",
+    "slack-bot",
+    "teams-bot",
+    "threatintel",
+    "ueba",
+    "pyproject.toml",
+    "pyproject.toml",
+    "pyproject.toml",
+    "pyproject.toml",
+    "pyproject.toml",
+    "pyproject.toml",
+    "pyproject.toml"
+  ],
+  "runtimes": {
+    "go_toolchain": [
+      "1.26-alpine",
+      "1.26.0"
+    ],
+    "node_base_images": [
+      "1-22-bookworm",
+      "22-alpine"
+    ],
+    "python_base_images": [
+      "3.13-slim"
+    ]
+  }
+}

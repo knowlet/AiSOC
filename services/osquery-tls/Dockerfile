@@ -16,7 +16,7 @@
 # significantly since poetry.lock was last generated"), so editing the manifest
 # without re-locking remains a build error rather than a silent re-resolution
 # nobody reviewed.
-FROM python:3.11-slim AS deps
+FROM python:3.13-slim AS deps
 
 # `export` left poetry's core in 2.x, so the plugin that provides it is pinned
 # beside poetry rather than resolved at build time.
@@ -31,7 +31,7 @@ RUN poetry export --only main --format requirements.txt --output /requirements.t
 
 
 # ── Stage 2: the runtime image ───────────────────────────────────────────────
-FROM python:3.11-slim AS base
+FROM python:3.13-slim AS base
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \

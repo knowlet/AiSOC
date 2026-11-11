@@ -11,7 +11,7 @@ number reached the cost dashboard, the funnel, the per-run ledger and the
 budget circuit breaker.
 
 The header fixtures below are not invented. They are the literal header sets
-returned by ``ghcr.io/berriai/litellm:v1.102.1`` (then served by the
+returned by ``ghcr.io/berriai/litellm:v1.108.5`` (then served by the
 since-deleted ``main-stable`` tag) driving a local
 ``ollama/qwen2:1.5b`` and a hosted ``openai/gpt-4o-mini`` from the same alias
 config — including the fact that the local success response carries

@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Topic :: Security",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = []
 
 [project.scripts]
@@ -51,7 +51,7 @@ include = [
 
 [tool.ruff]
 line-length = 140
-target-version = "py311"
+target-version = "py313"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,4 +60,4 @@ testpaths = ["tests"]
 # package trees that already declare one.
 [tool.mypy]
 strict = true
-python_version = "3.11"
+python_version = "3.13"

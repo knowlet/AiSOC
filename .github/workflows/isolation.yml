@@ -89,7 +89,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Install deps
         run: pip install --quiet qdrant-client structlog pytest pytest-asyncio
@@ -109,7 +109,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       # The gate itself is stdlib-only (ast). The suites additionally drive the
       # real fusion and agents routers over ASGI, which is the point — a

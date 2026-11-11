@@ -57,7 +57,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       # Same reasoning as golden-pipeline.yml: image builds fill the runner
       # and the resulting failure reads as something else entirely.
@@ -93,7 +93,7 @@ jobs:
           # a runner's /tmp carries files the daemon cannot read.
           mkdir -p "$RUNNER_TEMP/egress-leak"
           cat > "$RUNNER_TEMP/egress-leak/Dockerfile" <<'DOCKERFILE'
-          FROM python:3.11-slim
+          FROM python:3.13-slim
           CMD ["python", "-c", "import socket, time\ntry:\n    socket.gethostbyname('telemetry.example.net')\nexcept OSError:\n    pass\ntime.sleep(120)\n"]
           DOCKERFILE
           # `--load` explicitly: a container-driver builder keeps the result

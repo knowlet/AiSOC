@@ -76,7 +76,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Unit-test the gate driver
         run: |
@@ -101,7 +101,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install aisoc-sandbox from source
         run: |
@@ -155,7 +155,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       # The gate reads `.github/release-packages.yml` and `release.yml`'s
       # publish matrices, so it needs a YAML parser. Installed rather than
@@ -198,7 +198,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       # Deliberately no checkout: a visitor running the README's hero command
       # does not have the repo, and neither should this job.

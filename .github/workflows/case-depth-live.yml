@@ -61,7 +61,7 @@ jobs:
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Install api from its lockfile
         working-directory: services/api

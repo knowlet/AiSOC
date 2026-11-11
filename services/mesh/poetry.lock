@@ -942,7 +942,6 @@ files = [
 
 [package.dependencies]
 anyio = ">=4.0.0,<5"
-typing-extensions = {version = ">=4.10.0", markers = "python_version < \"3.13\""}
 
 [package.extras]
 full = ["httpx (>=0.27.0,<0.29.0)", "httpx2 (>=2.0.0)", "itsdangerous", "jinja2", "opentelemetry-api", "python-multipart (>=0.0.18)", "pyyaml"]
@@ -1270,5 +1269,5 @@ files = [
 
 [metadata]
 lock-version = "2.1"
-python-versions = "^3.11"
-content-hash = "e60b745de654821540a268975450c057cb71552e3e3267d05065d65e15e5f804"
+python-versions = "^3.13"
+content-hash = "c1caeda9242149af167ec5b2106e3c5714e1b22f537cd8c090868dd1f72d8e00"

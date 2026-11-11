@@ -39,7 +39,7 @@
 # would be invisible, and the findings are on the ratchet in
 # `scripts/mypy_baseline.json` where they can be read.
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = false
 ignore_missing_imports = true
 

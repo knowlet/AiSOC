@@ -62,7 +62,7 @@ def _log_triage_worker_exit(task: asyncio.Task) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Load resources on startup."""
     # A console token here is checked against the user record, not only
     # against its own signature (GHSA-8cpf-mchw-jpf2, F16). `tenant_scope` is
