@@ -2741,15 +2741,17 @@ paths:
       description: 'Update a connector''s configuration or state.
 
 
-        The PATCH semantics here are deliberately conservative: only fields
+        The original config fields replace their entire objects. Editing forms
 
-        the caller actually supplies are touched. Notably, sending an empty
+        use the additive ``*_patch`` fields instead: blank credentials retain
 
-        ``auth_config`` dict will overwrite all secrets — the wizard must
+        the stored values and unknown runtime keys (including checkpoints)
 
-        therefore omit the field entirely when the operator hasn''t re-typed
+        survive an update. JSONB merging happens in the write itself so a
 
-        credentials.'
+        scheduler checkpoint or OAuth refresh cannot be overwritten by a stale
+
+        form snapshot.'
       operationId: update_connector_api_v1_connectors__connector_id__patch
       security:
       - HTTPBearer: []
@@ -2799,6 +2801,45 @@ paths:
       responses:
         '204':
           description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/connectors/{connector_id}/edit_config:
+    get:
+      tags:
+      - connectors
+      summary: Get Connector Edit Config
+      description: 'Return schema-allowlisted form values, never stored secret values.
+
+
+        Legacy API clients stored non-secret fields in auth_config as well.
+
+        Resolve those server-side only after the schema is known. Unknown auth
+
+        keys remain private; secret fields expose presence, not a mask that a
+
+        form could accidentally save as the new password.'
+      operationId: get_connector_edit_config_api_v1_connectors__connector_id__edit_config_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: connector_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Connector Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EditConnectorConfigResponse'
         '422':
           description: Validation Error
           content:
@@ -2863,7 +2904,9 @@ paths:
         \ via the vault.\n3. Forward to the connectors microservice with both the\
         \ decrypted\n   credentials and the non-secret ``connector_config``.\n4. Update\
         \ the row's ``health_status`` / ``last_health_check`` based on\n   the verdict\
-        \ so the dashboard reflects reality."
+        \ so the dashboard reflects reality.\n\nAn optional body tests an unsaved\
+        \ edit using retained stored credentials.\nThat preview never changes config\
+        \ or health, even when the body is empty."
       operationId: test_existing_connector_api_v1_connectors__connector_id__test_post
       security:
       - HTTPBearer: []
@@ -2875,6 +2918,14 @@ paths:
           type: string
           format: uuid
           title: Connector Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: '#/components/schemas/TestExistingConnectorRequest'
+              - type: 'null'
+              title: Request
       responses:
         '200':
           description: Successful Response
@@ -29936,6 +29987,25 @@ components:
       - valid_from
       - created_at
       title: EdgeOut
+    EditConnectorConfigResponse:
+      properties:
+        connector:
+          $ref: '#/components/schemas/ConnectorResponse'
+        values:
+          additionalProperties: true
+          type: object
+          title: Values
+        configured_secret_fields:
+          items:
+            type: string
+          type: array
+          title: Configured Secret Fields
+      type: object
+      required:
+      - connector
+      - values
+      - configured_secret_fields
+      title: EditConnectorConfigResponse
     EffectiveAutonomy:
       properties:
         tier:
@@ -42386,6 +42456,20 @@ components:
         a separate path (:func:`test_existing_connector`) that decrypts the
 
         stored creds first.'
+    TestExistingConnectorRequest:
+      properties:
+        auth_config_patch:
+          additionalProperties: true
+          type: object
+          title: Auth Config Patch
+        connector_config_patch:
+          additionalProperties: true
+          type: object
+          title: Connector Config Patch
+      additionalProperties: false
+      type: object
+      title: TestExistingConnectorRequest
+      description: Overrides for a preview that neither saves config nor changes health.
     TestResponse:
       properties:
         matches:
@@ -43401,6 +43485,18 @@ components:
             type: array
           - type: 'null'
           title: Tags
+        auth_config_patch:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Auth Config Patch
+        connector_config_patch:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Connector Config Patch
       type: object
       title: UpdateConnectorRequest
     UpdateHuntRequest:

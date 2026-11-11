@@ -3429,6 +3429,8 @@ export interface Connector {
   tenantId?: string;
   category?: string;
   config?: Record<string, unknown>;
+  tags?: string[];
+  oauthProvisioned?: boolean;
   lastSync?: string;
   /** Number of alerts ingested through this connector. */
   alertCount?: number;
@@ -3536,6 +3538,7 @@ interface BackendConnectorResponse {
   category: string;
   is_enabled: boolean;
   connector_config: Record<string, unknown>;
+  oauth_provisioned?: boolean;
   health_status: string;
   last_health_check: string | null;
   last_sync: string | null;
@@ -3621,6 +3624,8 @@ function mapBackendConnector(row: BackendConnectorResponse): Connector {
     enabled: row.is_enabled,
     tenantId: row.tenant_id,
     config: row.connector_config,
+    tags: row.tags,
+    oauthProvisioned: row.oauth_provisioned ?? false,
     lastSync: row.last_sync ?? undefined,
     alertCount: row.events_ingested,
     alertsIngested: row.events_ingested,
@@ -3645,7 +3650,19 @@ export interface CreateConnectorPayload {
   tags?: string[];
 }
 
-export interface UpdateConnectorPayload {
+/** Partial drafts are merged on the server without exposing saved secrets. */
+export interface ConnectorConfigPatch {
+  auth_config_patch?: Record<string, unknown>;
+  connector_config_patch?: Record<string, unknown>;
+}
+
+export interface ConnectorEditConfig {
+  connector: Connector;
+  values: Record<string, unknown>;
+  configuredSecretFields: string[];
+}
+
+export interface UpdateConnectorPayload extends ConnectorConfigPatch {
   name?: string;
   is_enabled?: boolean;
   auth_config?: Record<string, unknown>;
@@ -3726,6 +3743,20 @@ export const connectorsApi = {
     return mapBackendConnector(row);
   },
 
+  /** Write-authorized projection of editable values; never returns secrets. */
+  editConfig: async (id: string): Promise<ConnectorEditConfig> => {
+    const result = await request<{
+      connector: BackendConnectorResponse;
+      values: Record<string, unknown>;
+      configured_secret_fields: string[];
+    }>(`/api/v1/connectors/${id}/edit_config`);
+    return {
+      connector: mapBackendConnector(result.connector),
+      values: result.values,
+      configuredSecretFields: result.configured_secret_fields,
+    };
+  },
+
   create: async (data: CreateConnectorPayload): Promise<Connector> => {
     const row = await request<BackendConnectorResponse>("/api/v1/connectors", {
       method: "POST",
@@ -3742,10 +3773,11 @@ export const connectorsApi = {
     return mapBackendConnector(row);
   },
 
-  /** Run "Test connection" against a saved instance. */
-  test: (id: string) =>
+  /** Optional patches test a draft without saving it or changing saved health. */
+  test: (id: string, draft?: ConnectorConfigPatch) =>
     request<ConnectorTestResult>(`/api/v1/connectors/${id}/test`, {
       method: "POST",
+      ...(draft !== undefined ? { body: JSON.stringify(draft) } : {}),
     }),
 
   /** Run "Test connection" with un-saved credentials from the wizard. */

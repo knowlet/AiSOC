@@ -152,6 +152,32 @@ list returns **503**, not 422. A connectors service rolled ahead of the API
 image legitimately knows types that image does not, and reporting "unknown
 connector_type" would send you to debug a connector that is fine.
 
+## Editing a connector
+
+Open **Connectors** and click **Configure** on an existing instance. The editor
+loads its saved name, enabled state, tags, and the fields declared by its
+connector schema. The connector type and instance ID stay the same.
+
+- Leave a saved credential blank to keep it. Enter a replacement to rotate that
+  field; other credentials, including OAuth refresh state, are retained. Stored
+  secret values are never populated in the form.
+- **Test connection** checks the current draft with retained credentials on the
+  server. It does not save the draft or change the saved instance's health.
+  Changing the draft clears the previous test result.
+- **Save changes** applies only the edited fields. Internal polling state and
+  settings outside the schema are preserved. Connection-setting changes reset
+  the previous health result until the saved configuration is checked again.
+  Testing and saving are separate actions, so a disabled connector can still be
+  configured while its vendor is unavailable.
+- **Cancel** discards the draft, including replacement credentials. A failed save
+  keeps the form open with its error and entered values so it can be retried.
+
+Editing requires `connectors:write`. The edit projection and draft test remain
+scoped to the authenticated tenant. API clients can use `auth_config_patch` and
+`connector_config_patch` for partial updates; the original `auth_config` and
+`connector_config` fields retain whole-object replacement semantics. Do not mix
+replacement fields and patch fields in the same request.
+
 ## How polling works
 
 Each enabled connector instance becomes one job in an in-process [`APScheduler`](https://apscheduler.readthedocs.io/) running inside `services/connectors`:

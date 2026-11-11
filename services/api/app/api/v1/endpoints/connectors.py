@@ -69,8 +69,9 @@ def _safe_connector_type(value: str) -> str:
 
 import httpx  # noqa: E402
 from fastapi import APIRouter, Depends, HTTPException, status  # noqa: E402
-from pydantic import BaseModel, Field  # noqa: E402
-from sqlalchemy import select, update  # noqa: E402
+from pydantic import BaseModel, Field, model_validator  # noqa: E402
+from sqlalchemy import cast, func, select, update  # noqa: E402
+from sqlalchemy.dialects.postgresql import JSONB  # noqa: E402
 
 from app._vendor.ssrf_guard import SSRFError, validate_outbound_url  # noqa: E402
 from app.api.v1.deps import AuthUser, DBSession, require_permission  # noqa: E402
@@ -271,6 +272,32 @@ class UpdateConnectorRequest(BaseModel):
     auth_config: dict[str, Any] | None = None
     connector_config: dict[str, Any] | None = None
     tags: list[str] | None = None
+    # Additive editing contract. The original fields retain whole-object
+    # replacement semantics for API clients that intentionally clear a config.
+    auth_config_patch: dict[str, Any] | None = None
+    connector_config_patch: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def refuse_ambiguous_config_updates(self) -> UpdateConnectorRequest:
+        replacing = self.auth_config is not None or self.connector_config is not None
+        patching = self.auth_config_patch is not None or self.connector_config_patch is not None
+        if replacing and patching:
+            raise ValueError("whole config replacement and config patches are mutually exclusive")
+        return self
+
+
+class EditConnectorConfigResponse(BaseModel):
+    connector: ConnectorResponse
+    values: dict[str, Any]
+    configured_secret_fields: list[str]
+
+
+class TestExistingConnectorRequest(BaseModel):
+    """Overrides for a preview that neither saves config nor changes health."""
+
+    auth_config_patch: dict[str, Any] = Field(default_factory=dict)
+    connector_config_patch: dict[str, Any] = Field(default_factory=dict)
+    model_config = {"extra": "forbid"}
 
 
 class TestConnectionRequest(BaseModel):
@@ -883,6 +910,142 @@ async def get_connector(
     return _build_connector_response(connector)
 
 
+def _nonempty_auth_patch(patch: dict[str, Any] | None) -> dict[str, Any]:
+    """An untouched password input means keep the stored credential."""
+    return {key: value for key, value in (patch or {}).items() if value is not None and not (isinstance(value, str) and not value.strip())}
+
+
+def _redact_auth_values(value: Any, auth_config: dict[str, Any]) -> Any:
+    """Never echo a stored credential in a connector's diagnostic response.
+
+    Some vendor clients include their rejected request in error messages.
+    Previewing an edit must not turn that response into a vault read API.
+    """
+    secrets: set[str] = set()
+
+    def collect(item: Any) -> None:
+        if isinstance(item, str) and item:
+            secrets.add(item)
+        elif isinstance(item, dict):
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(auth_config)
+    ordered = sorted(secrets, key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(secret) for secret in ordered)) if ordered else None
+    # Credential text can coincidentally equal a protocol key (a password of
+    # "success", for example). Scrubbing that key turns a successful test
+    # into a failure at the caller. Only diagnostic keys are free-form.
+    protocol_keys = {"success", "error", "message", "details", "latency_ms", "latencyMs", "connector", "detail"}
+
+    def redact(item: Any) -> Any:
+        if isinstance(item, str):
+            return pattern.sub("[redacted]", item) if pattern is not None else item
+        if isinstance(item, dict):
+            return {(key if key in protocol_keys else redact(key)): redact(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return [redact(child) for child in item]
+        return item
+
+    return redact(value)
+
+
+def _diagnostic_credentials(auth: dict[str, Any], config: dict[str, Any], public_names: set[str], secret_names: set[str]) -> dict[str, Any]:
+    """Exclude public form values while retaining unknown private auth keys."""
+    return {
+        "auth": {key: value for key, value in auth.items() if key not in public_names},
+        "legacy": {key: value for key, value in config.items() if key in secret_names},
+    }
+
+
+def _preview_config(
+    connector: Connector,
+    auth_patch: dict[str, Any],
+    config_patch: dict[str, Any],
+    public_names: set[str],
+    secret_names: set[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve an edit in memory, preserving keys the form does not know."""
+    try:
+        auth = {**get_vault().decrypt_dict(connector.auth_config or {}), **auth_patch}
+    except CredentialVaultError as exc:
+        raise HTTPException(
+            status_code=500, detail="could not decrypt stored credentials; check the credential vault configuration"
+        ) from exc
+    config = {**(connector.connector_config or {}), **config_patch}
+    # A legacy row may have a credential in the non-secret config. Runtime
+    # kwargs give that map precedence, so it must not shadow a replacement.
+    for key in auth_patch:
+        if key not in config_patch:
+            config.pop(key, None)
+    try:
+        _refuse_internal_destinations(auth, config)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=_redact_auth_values(exc.detail, _diagnostic_credentials(auth, config, public_names, secret_names)),
+        ) from exc
+    return auth, config
+
+
+def _field_names(entry: dict[str, Any]) -> tuple[set[str], set[str]]:
+    fields = entry.get("fields")
+    if not isinstance(fields, list) or any(
+        not isinstance(field, dict)
+        or not isinstance(field.get("name"), str)
+        or field.get("type") not in {"secret", "string", "textarea", "select", "number", "boolean"}
+        for field in fields
+    ):
+        raise HTTPException(status_code=502, detail="connector catalog returned an invalid configuration schema")
+    secret_names = {field["name"] for field in fields if field["type"] == "secret"}
+    return {field["name"] for field in fields} - secret_names, secret_names
+
+
+async def _editor_field_names(connector: Connector, tenant_id: uuid.UUID) -> tuple[set[str], set[str]]:
+    return _field_names(await _validate_connector_type(connector.connector_type, tenant_id))
+
+
+def _bundled_field_names(connector: Connector) -> tuple[set[str], set[str]]:
+    """Protect legacy responses without requiring live catalog discovery."""
+    entry = next((item for item in _load_fallback_catalog() if item.get("connector_id") == connector.connector_type), None)
+    return _field_names(entry) if entry is not None else (set(), set(connector.connector_config or {}))
+
+
+@router.get("/{connector_id}/edit_config", response_model=EditConnectorConfigResponse)
+async def get_connector_edit_config(
+    connector_id: uuid.UUID,
+    current_user: Annotated[AuthUser, Depends(require_permission("connectors:write"))],
+    db: DBSession,
+) -> EditConnectorConfigResponse:
+    """Return schema-allowlisted form values, never stored secret values.
+
+    Legacy API clients stored non-secret fields in auth_config as well.
+    Resolve those server-side only after the schema is known. Unknown auth
+    keys remain private; secret fields expose presence, not a mask that a
+    form could accidentally save as the new password.
+    """
+    result = await db.execute(select(Connector).where(Connector.id == connector_id, Connector.tenant_id == current_user.tenant_id))
+    connector = result.scalar_one_or_none()
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    public_names, secret_names = await _editor_field_names(connector, current_user.tenant_id)
+    allowed_names = public_names | secret_names
+    try:
+        auth = get_vault().decrypt_dict({key: value for key, value in (connector.auth_config or {}).items() if key in allowed_names})
+    except CredentialVaultError as exc:
+        raise HTTPException(status_code=500, detail="could not load connector settings; check the credential vault configuration") from exc
+    effective = {**auth, **(connector.connector_config or {})}
+    values = {key: effective[key] for key in public_names if key in effective}
+    configured_secrets = sorted(key for key in secret_names if _nonempty_auth_patch({key: effective.get(key)}))
+    projection = _build_connector_response(connector)
+    # Do not leak a legacy misfiled secret through the nested row either.
+    projection.connector_config = {key: value for key, value in projection.connector_config.items() if key not in secret_names}
+    return EditConnectorConfigResponse(connector=projection, values=values, configured_secret_fields=configured_secrets)
+
+
 @router.patch("/{connector_id}", response_model=ConnectorResponse)
 async def update_connector(
     connector_id: uuid.UUID,
@@ -892,11 +1055,12 @@ async def update_connector(
 ) -> ConnectorResponse:
     """Update a connector's configuration or state.
 
-    The PATCH semantics here are deliberately conservative: only fields
-    the caller actually supplies are touched. Notably, sending an empty
-    ``auth_config`` dict will overwrite all secrets — the wizard must
-    therefore omit the field entirely when the operator hasn't re-typed
-    credentials.
+    The original config fields replace their entire objects. Editing forms
+    use the additive ``*_patch`` fields instead: blank credentials retain
+    the stored values and unknown runtime keys (including checkpoints)
+    survive an update. JSONB merging happens in the write itself so a
+    scheduler checkpoint or OAuth refresh cannot be overwritten by a stale
+    form snapshot.
     """
     result = await db.execute(
         select(Connector).where(
@@ -911,6 +1075,31 @@ async def update_connector(
     # Same rule as create: a saved destination edited to point inside the
     # deployment is the update-model half of GHSA-cq4g-g6wp-4m2w.
     _refuse_internal_destinations(request.auth_config, request.connector_config)
+
+    auth_patch = _nonempty_auth_patch(request.auth_config_patch)
+    config_patch = request.connector_config_patch or {}
+    public_names: set[str] = set()
+    secret_names: set[str] = set()
+    if request.auth_config_patch is not None or request.connector_config_patch is not None:
+        public_names, secret_names = await _editor_field_names(connector, current_user.tenant_id)
+        if config_patch.keys() & secret_names:
+            raise HTTPException(status_code=422, detail="secret fields must be supplied through auth_config_patch")
+    else:
+        # A name-only update must not expose a credential misplaced in a
+        # legacy runtime config, even when it uses the original API contract.
+        public_names, secret_names = _bundled_field_names(connector)
+    runtime_changed = False
+    if auth_patch or config_patch:
+        if auth_patch.keys() & config_patch.keys():
+            raise HTTPException(status_code=422, detail="a field cannot appear in both auth_config_patch and connector_config_patch")
+        candidate_auth, candidate_config = _preview_config(connector, auth_patch, config_patch, public_names, secret_names)
+        # Compare plaintext values only inside the service. Re-encrypting an
+        # unchanged password produces different ciphertext but is not a new
+        # connection; changing a URL or credential invalidates the old verdict.
+        previous_auth = get_vault().decrypt_dict({key: value for key, value in (connector.auth_config or {}).items() if key in auth_patch})
+        runtime_changed = candidate_config != (connector.connector_config or {}) or any(
+            key not in previous_auth or candidate_auth[key] != previous_auth[key] for key in auth_patch
+        )
 
     updates: dict[str, Any] = {}
     for field in ("name", "is_enabled", "auth_config", "connector_config", "tags"):
@@ -929,15 +1118,38 @@ async def update_connector(
                 ) from exc
         updates[field] = val
 
+    if auth_patch:
+        try:
+            encrypted_patch = get_vault().encrypt_dict(auth_patch)
+        except CredentialVaultError as exc:
+            raise HTTPException(status_code=500, detail=f"credential vault unavailable. {_VAULT_HINT}") from exc
+        updates["auth_config"] = func.coalesce(Connector.auth_config, cast({}, JSONB)).op("||")(cast(encrypted_patch, JSONB))
+    if config_patch or auth_patch:
+        config_update = func.coalesce(Connector.connector_config, cast({}, JSONB))
+        # See _preview_config: a rotated secret must not remain shadowed by
+        # the same key in a legacy connector_config object.
+        for key in auth_patch:
+            config_update = config_update.op("-")(key)
+        updates["connector_config"] = config_update.op("||")(cast(config_patch, JSONB))
+
+    if runtime_changed:
+        updates["health_status"] = "unknown"
+        updates["last_health_check"] = None
+
     if updates:
         updates["updated_at"] = datetime.now(UTC)
         await db.execute(
-            update(Connector).where(Connector.id == connector_id, Connector.tenant_id == current_user.tenant_id).values(**updates)
+            update(Connector)
+            .where(Connector.id == connector_id, Connector.tenant_id == current_user.tenant_id)
+            .values(**updates)
+            .execution_options(synchronize_session=False)
         )
         await db.commit()
         await db.refresh(connector)
 
-    return _build_connector_response(connector)
+    response = _build_connector_response(connector)
+    response.connector_config = {key: value for key, value in response.connector_config.items() if key not in secret_names}
+    return response
 
 
 @router.put("/{connector_id}/capabilities", response_model=ConnectorResponse)
@@ -1059,6 +1271,7 @@ async def test_existing_connector(
     connector_id: uuid.UUID,
     current_user: Annotated[AuthUser, Depends(require_permission("connectors:write"))],
     db: DBSession,
+    request: TestExistingConnectorRequest | None = None,
 ) -> dict[str, Any]:
     """Run a live ``test_connection`` against a saved connector instance.
 
@@ -1070,6 +1283,9 @@ async def test_existing_connector(
        credentials and the non-secret ``connector_config``.
     4. Update the row's ``health_status`` / ``last_health_check`` based on
        the verdict so the dashboard reflects reality.
+
+    An optional body tests an unsaved edit using retained stored credentials.
+    That preview never changes config or health, even when the body is empty.
     """
     result = await db.execute(
         select(Connector).where(
@@ -1081,26 +1297,38 @@ async def test_existing_connector(
     if connector is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
 
+    if request is None:
+        try:
+            decrypted_auth = get_vault().decrypt_dict(connector.auth_config or {})
+        except CredentialVaultError as exc:
+            raise HTTPException(
+                status_code=500, detail="could not decrypt stored credentials; check the credential vault configuration"
+            ) from exc
+        config = connector.connector_config or {}
+        # Saved-instance testing must not depend on live catalog discovery.
+        # Unknown auth fields remain private when the type is newer than this
+        # build; the bundle only distinguishes public diagnostic values.
+        public_names, secret_names = _bundled_field_names(connector)
+    else:
+        public_names, secret_names = await _editor_field_names(connector, current_user.tenant_id)
+        auth_patch = _nonempty_auth_patch(request.auth_config_patch)
+        if auth_patch.keys() & request.connector_config_patch.keys():
+            raise HTTPException(status_code=422, detail="a field cannot appear in both auth_config_patch and connector_config_patch")
+        if request.connector_config_patch.keys() & secret_names:
+            raise HTTPException(status_code=422, detail="secret fields must be supplied through auth_config_patch")
+        decrypted_auth, config = _preview_config(connector, auth_patch, request.connector_config_patch, public_names, secret_names)
+
+    credentials = _diagnostic_credentials(decrypted_auth, config, public_names, secret_names)
     try:
-        decrypted_auth = get_vault().decrypt_dict(connector.auth_config or {})
-    except CredentialVaultError as exc:
-        # A vault failure on *decryption* almost always means the stored
-        # ciphertext was written under a key that's no longer in the keyring
-        # (key rotation gone wrong). Surface it as 500 rather than pretending
-        # the connector is unhealthy.
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"could not decrypt stored credentials: {exc}",
-        ) from exc
+        verdict = await _proxy_test_connection(connector.connector_type, decrypted_auth, config, current_user.tenant_id)
+    except HTTPException as exc:
+        raise HTTPException(status_code=exc.status_code, detail=_redact_auth_values(exc.detail, credentials)) from exc
+    succeeded = verdict.get("success")
+    verdict = _redact_auth_values(verdict, credentials)
+    if request is not None:
+        return verdict
 
-    verdict = await _proxy_test_connection(
-        connector.connector_type,
-        decrypted_auth,
-        connector.connector_config or {},
-        current_user.tenant_id,
-    )
-
-    health_status = "healthy" if verdict.get("success") else "unhealthy"
+    health_status = "healthy" if succeeded else "unhealthy"
     await db.execute(
         update(Connector)
         .where(Connector.id == connector_id, Connector.tenant_id == current_user.tenant_id)

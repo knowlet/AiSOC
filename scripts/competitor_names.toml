@@ -153,6 +153,16 @@ names = ["Wazuh"]
 reason = """Names the connector the #374 reporter was installing when the marketplace returned 503, so the regression test asserts against the item that actually failed rather than an arbitrary one."""
 
 [[allow]]
+paths = [
+  "apps/web/e2e/journeys/connector-editing.spec.ts",
+  "apps/web/src/components/connectors/ConnectorsView.editing.test.tsx",
+  "services/api/tests/test_connector_editing.py",
+  "services/api/tests/test_connector_editing_live.py",
+]
+names = ["Wazuh"]
+reason = "Connector editing regression fixtures use the shipped integration's schema, credential fields and connector id to exercise prefill, partial updates and secret retention."
+
+[[allow]]
 paths = ["packages/types/src/generated/connector-types.ts", "packages/types/src/generated/connector-types.json"]
 names = ["Torq", "Tines", "Wazuh"]
 reason = "The console's connector_type vocabulary, generated from the connector registry by scripts/generate_connector_types.py. Each name here is a connector id the platform ingests under; removing one would make the type reject events from a connector that ships."

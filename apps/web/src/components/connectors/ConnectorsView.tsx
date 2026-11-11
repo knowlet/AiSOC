@@ -29,6 +29,7 @@ import {
   type ConnectorHealthSummary,
 } from '@/lib/api';
 import { AddConnectorModal } from './AddConnectorModal';
+import { EditConnectorModal } from './EditConnectorModal';
 import { ConnectorInstanceList } from './ConnectorInstanceList';
 import { InboxTokensPanel } from './InboxTokensPanel';
 import { demoFallback } from '@/lib/demoFallback';
@@ -74,6 +75,7 @@ const DEMO_CONNECTORS: Connector[] = [
 
 export function ConnectorsView() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingConnectorId, setEditingConnectorId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, boolean | undefined>>({});
 
@@ -89,7 +91,7 @@ export function ConnectorsView() {
   // Health summary is a separate endpoint so the empty/error case is silent —
   // we just fall back to the locally-derived stats. SWR keys are namespaced so
   // the two queries don't fight over the cache.
-  const { data: healthSummary } = useSWR<ConnectorHealthSummary | null>(
+  const { data: healthSummary, mutate: mutateHealth } = useSWR<ConnectorHealthSummary | null>(
     'connectors:health',
     async () => {
       try {
@@ -184,13 +186,17 @@ export function ConnectorsView() {
     }
   };
 
-  const handleConfigure = (_connector: Connector) => {
-    // Inline edit dialog ships in a follow-up. For now, surface a hint so
-    // operators don't think the button is broken — the modal already covers
-    // create + test, which is the high-value path for v1.
-    toast('Connector editing UI is coming soon. Delete + re-add for now.', {
-      icon: '🔧',
-    });
+  const handleConfigure = (connector: Connector) => {
+    setEditingConnectorId(connector.id);
+  };
+
+  const handleUpdated = (connector: Connector) => {
+    setTestResults((previous) => ({ ...previous, [connector.id]: undefined }));
+    void mutate((current) => current ? {
+      ...current,
+      connectors: current.connectors.map((row) => row.id === connector.id ? connector : row),
+    } : current, { revalidate: true });
+    void mutateHealth();
   };
 
   const handleCreated = () => {
@@ -323,6 +329,14 @@ export function ConnectorsView() {
         onClose={() => setModalOpen(false)}
         onCreated={handleCreated}
       />
+      {editingConnectorId && (
+        <EditConnectorModal
+          key={editingConnectorId}
+          connectorId={editingConnectorId}
+          onClose={() => setEditingConnectorId(null)}
+          onUpdated={handleUpdated}
+        />
+      )}
     </div>
   );
 }
