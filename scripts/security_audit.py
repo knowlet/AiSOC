@@ -718,7 +718,8 @@ def cmd_python(args: argparse.Namespace) -> int:
     n = len(report.findings)
     manifests = _python_manifests(get_repo_root())
     intended = len(manifests)
-    services = [m for m in manifests if m.parts[0] == "services"]
+    root = get_repo_root()
+    services = [m for m in manifests if m.relative_to(root).parts[0] == "services"]
     print(
         f"python: {n} findings, {len(report.ignored)} ignored; "
         f"scanned {len(report.scanned)}/{intended} manifests "
