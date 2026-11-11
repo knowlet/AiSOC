@@ -624,10 +624,7 @@ files = [
 ]
 
 [package.dependencies]
-cffi = [
-    {version = ">=1.0.0", markers = "python_version < \"3.13\""},
-    {version = ">=1.17.0", markers = "python_version >= \"3.13\""},
-]
+cffi = {version = ">=1.17.0", markers = "python_version >= \"3.13\""}
 
 [[package]]
 name = "cbor2"
@@ -3134,7 +3131,6 @@ files = [
 
 [package.dependencies]
 cryptography = ">=49.0.0,<51"
-typing-extensions = {version = ">=4.9", markers = "python_version < \"3.13\""}
 
 [package.extras]
 docs = ["sphinx (!=5.2.0,!=5.2.0.post0,!=7.2.5)", "sphinx_rtd_theme"]
@@ -3258,7 +3254,6 @@ files = [
 
 [package.dependencies]
 pytest = ">=8.4"
-typing-extensions = {version = ">=4.12", markers = "python_version < \"3.13\""}
 
 [package.extras]
 docs = ["sphinx (>=5.3)", "sphinx-rtd-theme (>=1)", "sphinx-tabs (>=3.5)"]
@@ -3455,7 +3450,6 @@ files = [
 ]
 
 [package.dependencies]
-async-timeout = {version = ">=4.0.3", markers = "python_full_version < \"3.11.3\""}
 hiredis = {version = ">=3.2.0", optional = true, markers = "extra == \"hiredis\""}
 
 [package.extras]
@@ -3691,7 +3685,6 @@ files = [
 
 [package.dependencies]
 anyio = ">=4.0.0,<5"
-typing-extensions = {version = ">=4.10.0", markers = "python_version < \"3.13\""}
 
 [package.extras]
 full = ["httpx (>=0.27.0,<0.29.0)", "httpx2 (>=2.0.0)", "itsdangerous", "jinja2", "opentelemetry-api", "python-multipart (>=0.0.18)", "pyyaml"]
@@ -4491,5 +4484,5 @@ test = ["pytest"]
 
 [metadata]
 lock-version = "2.1"
-python-versions = "^3.11"
-content-hash = "9343a5e238e72af7d8f0e60c3a32dcbaa26d2bccc82c8f6771b1eec75a638f20"
+python-versions = "^3.13"
+content-hash = "c50ce28005c01a4ec1262a4f8868c42175c2a38c27949d0bd6ca725801158737"
