@@ -255,6 +255,26 @@
     "services/ingest/go.mod",
     "services/osquery-extensions/go.mod"
   ],
+  "lockfiles": {
+    "pnpm-lock.yaml": "f57529e629113866",
+    "services/actions/poetry.lock": "7028935a372569a6",
+    "services/agents/poetry.lock": "c44a54db7b0ad311",
+    "services/api/poetry.lock": "57b5120adbba04a2",
+    "services/connectors/poetry.lock": "add8cf830e99bfc3",
+    "services/enrichment/go.sum": "bdab63196d4e4c21",
+    "services/escalations/poetry.lock": "4ed88f677499994f",
+    "services/fusion/poetry.lock": "337b99e1e730322f",
+    "services/honeytokens/poetry.lock": "709589257ab2a5ae",
+    "services/ingest/go.sum": "e0d7bb8a3da8e53e",
+    "services/mesh/poetry.lock": "2fe5de992b9db406",
+    "services/osquery-extensions/go.sum": "5d45536de63e97e4",
+    "services/osquery-tls/poetry.lock": "d475a3ace1d8ac75",
+    "services/purple-team/poetry.lock": "cb82ced9a6e76eeb",
+    "services/slack-bot/poetry.lock": "27ad482eabd6fd5d",
+    "services/teams-bot/poetry.lock": "4898aebcad938d4f",
+    "services/threatintel/poetry.lock": "8c6e507def442f4e",
+    "services/ueba/poetry.lock": "33a313610928befa"
+  },
   "package_managers": {
     "root_package_json": "{\"node_engine\": \">=20.0.0\", \"packageManager\": \"pnpm@8.15.1\", \"pnpm_engine\": \">=8.0.0\"}"
   },

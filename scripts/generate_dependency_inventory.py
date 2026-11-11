@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -64,6 +65,7 @@ class Inventory:
     go_modules: list[str] = field(default_factory=list)
     pnpm_workspace: dict[str, str] = field(default_factory=dict)
     ci_action_pins: dict[str, str] = field(default_factory=dict)
+    lockfiles: dict[str, str] = field(default_factory=dict)
 
 
 def _read_text(path: Path) -> str:
@@ -171,6 +173,23 @@ def _pnpm_root() -> dict[str, str]:
     }
 
 
+def _lockfile_digest() -> dict[str, str]:
+    paths: list[Path] = []
+    paths.extend(ROOT.glob("services/*/poetry.lock"))
+    paths.extend(ROOT.glob("packages/*/poetry.lock"))
+    paths.append(ROOT / "pnpm-lock.yaml")
+    paths.extend(ROOT.glob("**/go.sum"))
+    for p in sorted(ROOT.glob("apps/*/package-lock.json")):
+        paths.append(p)
+    out: dict[str, str] = {}
+    for path in sorted(set(paths)):
+        if not path.is_file() or "plans" in path.parts:
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        out[str(path.relative_to(ROOT))] = digest
+    return dict(sorted(out.items()))
+
+
 def _ci_pins() -> dict[str, str]:
     pins: dict[str, str] = {}
     for wf in (ROOT / ".github" / "workflows").glob("*.yml"):
@@ -191,6 +210,7 @@ def build_inventory() -> Inventory:
         go_modules=_go_modules(),
         pnpm_workspace=_pnpm_root(),
         ci_action_pins=_ci_pins(),
+        lockfiles=_lockfile_digest(),
     )
 
 

@@ -108,6 +108,21 @@ ClickHouse/OpenSearch/Kafka if forward upgrade mutated on-disk format (see evide
 
 ---
 
+## Deployability (go / no-go)
+
+Authoritative rehearsal table: [`STATEFUL_MIGRATION_EVIDENCE.md`](STATEFUL_MIGRATION_EVIDENCE.md).
+
+| Area | Verdict |
+|------|---------|
+| ClickHouse 26.8 | **Conditional GO** — in-place upgrade + `BACKUP`/`RESTORE` proved; down-grade without restore **no** |
+| Qdrant v1.20.0 | **NO-GO** for v1.7.0 **volume** carry-over; snapshot/staged upgrade required |
+| Kafka 7.8.12 | **Open** — CI upgrade jobs + operator rehearsal |
+| OpenSearch 2.19.7 | **Open** — index store not rehearsed |
+| Python 3.13 toolchain | **GO** for locked unit suites exercised (actions/agents); full matrix pending green lint job |
+| Grafana 13 / Prometheus 3 | **Conditional GO** — health + config mount only |
+
+Draft PR **must not merge** until compose smoke, integration upgrade paths, and Qdrant migration plan are green in your environment.
+
 ## Remaining risks / open items
 
 - **Mypy baseline file** still numerically from the 3.11 era — consider a deliberate baseline refresh on 3.13 in a follow-up commit (not hidden edits).
