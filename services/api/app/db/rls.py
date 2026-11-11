@@ -44,7 +44,7 @@ async def set_rls_context(session: AsyncSession, tenant_id: uuid.UUID) -> None:
 
 async def get_tenant_db(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
-) -> AsyncGenerator[AsyncSession, None]:
+) -> AsyncGenerator[AsyncSession]:
     """DB session scoped to the authenticated user's tenant via Postgres RLS.
 
     Yields an ``AsyncSession`` where ``app.current_tenant_id`` is set to the

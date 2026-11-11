@@ -111,7 +111,7 @@ def _airgap_check_feed_url(feed_name: str, url: str | None) -> bool:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     logger.info(
         "ThreatIntel service starting…",
         airgap=airgap_status(),

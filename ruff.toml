@@ -23,7 +23,10 @@ select = ["E", "W", "F", "I", "B", "C4", "UP"]
 # preference, not a correctness rule. The `(str, Enum)` pattern serializes
 # the same way through Pydantic v2 / SQLAlchemy / json.dumps and migrating
 # every existing model would create churn for no behavioral gain.
-ignore = ["UP042"]
+# UP040/UP047 are PEP 695 / `type` keyword stylistic rules enabled by
+# `target-version = "py313"`. Applying them before a deliberate mypy-baseline
+# refresh produces `valid-type` regressions (measured 2026-11-11).
+ignore = ["UP042", "UP040", "UP047"]
 
 [lint.flake8-bugbear]
 # FastAPI's canonical dependency-injection pattern is
