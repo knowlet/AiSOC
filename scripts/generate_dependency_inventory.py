@@ -89,16 +89,21 @@ def _datastore_pins_from_compose() -> dict[str, str]:
             continue
         name, tag = ref.rsplit(":", 1)
         base = name.split("/")[-1]
-        if base in {
-            "clickhouse-server",
-            "opensearch",
-            "qdrant",
-            "neo4j",
-            "cp-kafka",
-            "cp-zookeeper",
-            "redis",
-            "postgres",
-        } or name.endswith("/opensearch") or "clickhouse-server" in name:
+        if (
+            base
+            in {
+                "clickhouse-server",
+                "opensearch",
+                "qdrant",
+                "neo4j",
+                "cp-kafka",
+                "cp-zookeeper",
+                "redis",
+                "postgres",
+            }
+            or name.endswith("/opensearch")
+            or "clickhouse-server" in name
+        ):
             key = name if "/" in name else base
             pins[key] = tag
     return pins
@@ -182,8 +187,7 @@ def build_inventory() -> Inventory:
         datastore_pins=_datastore_pins_from_compose(),
         runtimes=_runtimes(),
         package_managers={"root_package_json": json.dumps(_pnpm_root(), sort_keys=True)},
-        poetry_services=_python_services()
-        + sorted(p.name for p in ROOT.glob("packages/*/pyproject.toml")),
+        poetry_services=_python_services() + sorted(p.name for p in ROOT.glob("packages/*/pyproject.toml")),
         go_modules=_go_modules(),
         pnpm_workspace=_pnpm_root(),
         ci_action_pins=_ci_pins(),
