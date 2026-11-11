@@ -15,7 +15,7 @@ back to the flag the service used to register:
 
 ## Observed
 
-Against a real `confluentinc/cp-kafka:7.7.1` broker advertising the proxy's
+Against a real `confluentinc/cp-kafka:7.8.12` broker advertising the proxy's
 port, with the proxy then stopped:
 
 ```
