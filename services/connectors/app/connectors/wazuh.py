@@ -422,7 +422,21 @@ class WazuhConnector(BaseConnector):
                                 }
                             }
                         },
-                        {"term": {"rule.groups": "vulnerability-detector"}},
+                        # Include both known groups and custom detector payloads.
+                        # Query indexed CVE leaves, not the object itself: an
+                        # empty vulnerability object may use data.cve instead.
+                        # This is a candidate superset; the classifier below
+                        # keeps exploit alerts carrying data.cve out of inventory.
+                        {
+                            "bool": {
+                                "should": [
+                                    {"terms": {"rule.groups": list(_VULN_RULE_GROUPS)}},
+                                    {"exists": {"field": "data.vulnerability.cve"}},
+                                    {"exists": {"field": "data.cve"}},
+                                ],
+                                "minimum_should_match": 1,
+                            }
+                        },
                     ]
                 }
             },
@@ -431,7 +445,7 @@ class WazuhConnector(BaseConnector):
         hits = await self._search(query)
         findings: list[dict[str, Any]] = []
         for hit in hits:
-            if not isinstance(hit, dict):
+            if not isinstance(hit, dict) or not is_vulnerability_source(hit.get("_source") or {}):
                 continue
             finding = self.normalize_vulnerability(hit)
             if finding is not None:
