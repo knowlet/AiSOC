@@ -601,6 +601,7 @@ async def persist_auto_triage(
                     shadow=shadow,
                     ungrounded=bool(ungrounded),
                     tier=tier,
+                    business_context=business_context,
                 )
                 if not authorization.allowed:
                     auto_closed = False
@@ -854,6 +855,12 @@ async def persist_auto_triage(
                                ELSE status
                            END,
                                resolved_at = CASE WHEN $7 AND NOT $10 THEN now() ELSE resolved_at END,
+                               severity = CASE
+                                   WHEN NOT $10 AND $11::text IS NOT NULL AND
+                                       COALESCE(array_position(ARRAY['info','low','medium','high','critical'], severity), 0)
+                                       < array_position(ARRAY['info','low','medium','high','critical'], $11::text)
+                                   THEN $11::text ELSE severity
+                               END,
                                -- Nullable on purpose: NULL is "not scored",
                                -- which is a different fact from "scored zero".
                                -- The deterministic path never assesses
@@ -874,6 +881,11 @@ async def persist_auto_triage(
                         float(groundedness) if groundedness is not None else None,
                         ungrounded,
                         shadow,
+                        (
+                            business_context.get("severity_after")
+                            if business_context and business_context.get("require_escalation") is True
+                            else None
+                        ),
                     )
         logger.info(
             "ledger.auto_triage_persisted",

@@ -38,6 +38,7 @@ from typing import Any
 from uuid import UUID
 
 from .models import (
+    ALLOWED_SEVERITIES,
     BusinessContextRule,
     RuleAction,
     RuleCondition,
@@ -177,6 +178,8 @@ class AlertEvaluation:
     before: dict[str, Any] = field(default_factory=dict)
     after: dict[str, Any] = field(default_factory=dict)
     suppressed: bool = False
+    require_escalation: bool = False
+    escalation_rule_ids: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -259,6 +262,60 @@ def _apply_action(alert: dict[str, Any], action: RuleAction) -> dict[str, Any]:
     return out
 
 
+_SEVERITY_RANK = {severity: index for index, severity in enumerate(ALLOWED_SEVERITIES)}
+
+
+def _evaluate_rules(rules: tuple[BusinessContextRule, ...], alert: Mapping[str, Any]) -> AlertEvaluation:
+    """Evaluate saved and preview rules with the same escalation guarantees.
+
+    Mandatory conditions see the original alert, before an ordinary rule can
+    suppress it or change a field they depend on. Ordinary conditions retain
+    their ordered, cumulative semantics. The severity floor is applied only
+    after those conditions have run.
+    """
+    escalation_rules = tuple(rule for rule in rules if rule.then.require_escalation and evaluate_condition(rule.when, alert))
+    escalation_rule_ids = [rule.id for rule in escalation_rules]
+    escalation_ids = set(escalation_rule_ids)
+    before = _projection(alert)
+    result = AlertEvaluation(
+        alert_id=str(alert.get("id", "")),
+        before=dict(before),
+        after=dict(before),
+        require_escalation=bool(escalation_rules),
+        escalation_rule_ids=escalation_rule_ids,
+    )
+    current = dict(alert)
+    for rule in rules:
+        matches = rule.id in escalation_ids if rule.then.require_escalation else evaluate_condition(rule.when, current)
+        if not matches:
+            continue
+        current = _apply_action(current, rule.then)
+        result.matched_rule_ids.append(rule.id)
+        if current.get("__suppressed__"):
+            if escalation_rules:
+                current.pop("__suppressed__", None)
+            else:
+                result.suppressed = True
+                break
+
+    if escalation_rules:
+        current.pop("__suppressed__", None)
+        severity_floor = max(
+            (rule.then.set_severity for rule in escalation_rules if rule.then.set_severity is not None),
+            key=_SEVERITY_RANK.__getitem__,
+            default=None,
+        )
+        if severity_floor is not None and _SEVERITY_RANK.get(str(current.get("severity")), -1) < _SEVERITY_RANK[severity_floor]:
+            current["severity"] = severity_floor
+
+    result.after = _projection(
+        current,
+        require_escalation=result.require_escalation,
+        escalation_rule_ids=escalation_rule_ids,
+    )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -332,32 +389,7 @@ class BusinessContextEngine:
         the dry-run preview wire shape.
         """
         snap = self.snapshot_for(tenant_id)
-        before = _projection(alert)
-        result = AlertEvaluation(
-            alert_id=str(alert.get("id", "")),
-            before=dict(before),
-            after=dict(before),
-        )
-
-        if snap is None:
-            return result
-
-        current = dict(alert)
-        for rule in snap.enabled_rules:
-            if not evaluate_condition(rule.when, current):
-                continue
-            current = _apply_action(current, rule.then)
-            result.matched_rule_ids.append(rule.id)
-            if current.get("__suppressed__"):
-                # Once an alert is suppressed, downstream rules can't
-                # un-suppress — short-circuit so the final state is
-                # deterministic.
-                result.suppressed = True
-                result.after = _projection(current)
-                return result
-
-        result.after = _projection(current)
-        return result
+        return _evaluate_rules(snap.enabled_rules if snap is not None else (), alert)
 
     # ------------------------------------------------------------------
     # Dry-run preview (Settings page)
@@ -388,27 +420,7 @@ class BusinessContextEngine:
         # of -1 so anything that accidentally caches it can detect the
         # "preview-only" origin.
         transient = _compile_snapshot(tenant_id, version=-1, rules=rules)
-
-        out: list[AlertEvaluation] = []
-        for alert in alerts:
-            before = _projection(alert)
-            result = AlertEvaluation(
-                alert_id=str(alert.get("id", "")),
-                before=dict(before),
-                after=dict(before),
-            )
-            current = dict(alert)
-            for rule in transient.enabled_rules:
-                if not evaluate_condition(rule.when, current):
-                    continue
-                current = _apply_action(current, rule.then)
-                result.matched_rule_ids.append(rule.id)
-                if current.get("__suppressed__"):
-                    result.suppressed = True
-                    break
-            result.after = _projection(current)
-            out.append(result)
-        return out
+        return [_evaluate_rules(transient.enabled_rules, alert) for alert in alerts]
 
 
 # ---------------------------------------------------------------------------
@@ -416,17 +428,25 @@ class BusinessContextEngine:
 # ---------------------------------------------------------------------------
 
 
-def _projection(alert: Mapping[str, Any]) -> dict[str, Any]:
-    """Pull the four fields the preview UI cares about out of an alert.
+def _projection(
+    alert: Mapping[str, Any],
+    *,
+    require_escalation: bool = False,
+    escalation_rule_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Return the fields and enforced requirements shown in the preview.
 
     Kept narrow on purpose — the alert payload itself can be many KB
-    and the diff renderer only ever shows these four columns.
+    and its escalation-shaped fields are untrusted input. Only the
+    evaluator supplies the requirement and its matching rule ids.
     """
     return {
         "severity": alert.get("severity"),
         "route_to": alert.get("route_to"),
         "tags": list(alert.get("tags") or []),
         "suppressed": bool(alert.get("__suppressed__", False)),
+        "require_escalation": require_escalation,
+        "escalation_rule_ids": list(escalation_rule_ids),
     }
 
 

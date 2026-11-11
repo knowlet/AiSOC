@@ -39114,6 +39114,10 @@ components:
           type: boolean
           title: Suppress
           default: false
+        require_escalation:
+          type: boolean
+          title: Require Escalation
+          default: false
       type: object
       title: RuleActionWire
     RuleConditionWire:
