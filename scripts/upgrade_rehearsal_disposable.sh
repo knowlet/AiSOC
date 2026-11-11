@@ -247,7 +247,31 @@ log "OpenSearch 2.11 search: $(echo "$OS_SEARCH" | head -c 200)"
 curl -fsS -X PUT "http://127.0.0.1:19200/_snapshot/aisoc_backup" -H 'Content-Type: application/json' \
   -d '{"type":"fs","settings":{"location":"/usr/share/opensearch/snapshots","compress":true}}' >/dev/null
 curl -fsS -X PUT "http://127.0.0.1:19200/_snapshot/aisoc_backup/pre_upgrade?wait_for_completion=true" >/dev/null
-"${DOCKER[@]}" stop aisoc-os-r1 >/dev/null
+# Rollback proof: pre-upgrade snapshot → fresh 2.11 volume (same major line).
+OS_VOL_RB211="$WORK/opensearch_rollback_211"
+rm -rf "$OS_VOL_RB211"
+mkdir -p "$OS_VOL_RB211"
+"${DOCKER[@]}" run -d --name aisoc-os-rb211 \
+  -e discovery.type=single-node \
+  -e DISABLE_SECURITY_PLUGIN=true \
+  -e 'OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m' \
+  -v "$OS_VOL_RB211:/usr/share/opensearch/data" \
+  -v "$OS_SNAP:/usr/share/opensearch/snapshots" \
+  -p 19203:9200 opensearchproject/opensearch:2.11.0
+sleep 50
+"${DOCKER[@]}" exec aisoc-os-rb211 bash -c 'grep -q path.repo /usr/share/opensearch/config/opensearch.yml || echo "path.repo: [\"/usr/share/opensearch/snapshots\"]" >> /usr/share/opensearch/config/opensearch.yml'
+"${DOCKER[@]}" restart aisoc-os-rb211 >/dev/null
+sleep 50
+curl -fsS -X PUT "http://127.0.0.1:19203/_snapshot/aisoc_backup" -H 'Content-Type: application/json' \
+  -d '{"type":"fs","settings":{"location":"/usr/share/opensearch/snapshots","compress":true}}' >/dev/null
+curl -fsS -X POST "http://127.0.0.1:19203/_snapshot/aisoc_backup/pre_upgrade/_restore?wait_for_completion=true" \
+  -H 'Content-Type: application/json' \
+  -d '{"indices":"aisoc-probe"}' >/dev/null
+curl -fsS -X POST "http://127.0.0.1:19203/aisoc-probe/_refresh" >/dev/null
+OS_RB=$(curl -fsS "http://127.0.0.1:19203/aisoc-probe/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"tag":"mig-probe"}}}')
+log "OpenSearch 2.11 rollback restore (pre_upgrade snapshot): $(echo "$OS_RB" | head -c 250)"
+"${DOCKER[@]}" stop aisoc-os-rb211 aisoc-os-r1 >/dev/null
 sleep 5
 # In-place minor upgrade on same data volume.
 "${DOCKER[@]}" run -d --name aisoc-os-r2 \
@@ -306,19 +330,11 @@ log "Prometheus rule groups: $RULES"
 sleep 10
 GRAF=$("${DOCKER[@]}" exec aisoc-graf-r wget -qO- http://localhost:3000/api/health 2>/dev/null | head -c 120 || echo FAIL)
 log "Grafana health: $GRAF"
-NET="aisoc-rehearsal-mon"
-"${DOCKER[@]}" network create "$NET" 2>/dev/null || true
-"${DOCKER[@]}" run -d --name aisoc-tempo-r --hostname tempo --network "$NET" \
-  grafana/tempo:2.7.2 2>/dev/null || true
-sleep 5
-"${DOCKER[@]}" run -d --name aisoc-otel-r --network "$NET" \
-  -v "$ROOT/infra/docker/otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
-  otel/opentelemetry-collector-contrib:0.121.0 \
-  --config=/etc/otelcol-contrib/config.yaml 2>/dev/null || \
-  log "OTel: config mount failed — check container logs"
-sleep 3
-OTEL_LOGS=$("${DOCKER[@]}" logs aisoc-otel-r 2>&1 | grep -E 'Everything is ready|error|tempo' | tail -5 || echo none)
-log "OTel/Tail: $OTEL_LOGS"
+if OTEL_EVIDENCE_TAG="rehearsal-$(date +%s)" bash "$ROOT/scripts/otel_tempo_trace_evidence.sh" >>"$LOG" 2>&1; then
+  log "OTel→Tempo: GO (trace injected via collector, retrievable by trace ID)"
+else
+  log "OTel→Tempo: FAIL (see scripts/otel_tempo_trace_evidence.sh output above)"
+fi
 
 log "WORK_DIR=$WORK"
 log "DONE"

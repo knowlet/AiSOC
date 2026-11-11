@@ -129,8 +129,12 @@ jobs:
 
       - name: Start ClickHouse
         run: |
+          # 26.8 enables access management by default. SKIP_USER_SETUP keeps the
+          # default user reachable from the runner on the native port (same pattern
+          # as lake-live.yml).
           docker run -d --name iso-clickhouse -p 9000:9000 \
             --ulimit nofile=262144:262144 \
+            -e CLICKHOUSE_SKIP_USER_SETUP=1 \
             clickhouse/clickhouse-server:26.8
 
       - name: Start Redpanda (Kafka API)
@@ -182,6 +186,8 @@ jobs:
           ISOLATION_NEO4J_PASSWORD: testpassword123
           ISOLATION_CLICKHOUSE_HOST: localhost
           ISOLATION_CLICKHOUSE_PORT: "9000"
+          ISOLATION_CLICKHOUSE_USER: default
+          ISOLATION_CLICKHOUSE_PASSWORD: ""
           ISOLATION_KAFKA_BROKERS: localhost:9092
           LIVE_STORES_REQUIRED: "1"
         run: python -m pytest tests/isolation/test_live_stores.py -v --tb=short
@@ -202,6 +208,8 @@ jobs:
         env:
           ISOLATION_CLICKHOUSE_HOST: localhost
           ISOLATION_CLICKHOUSE_PORT: "9000"
+          ISOLATION_CLICKHOUSE_USER: default
+          ISOLATION_CLICKHOUSE_PASSWORD: ""
           RETRO_HUNT_LAKE_LIVE_REQUIRED: "1"
         run: python -m pytest tests/isolation/test_retro_hunt_live.py -v --tb=short
 
@@ -217,6 +225,8 @@ jobs:
         env:
           ISOLATION_CLICKHOUSE_HOST: localhost
           ISOLATION_CLICKHOUSE_PORT: "9000"
+          ISOLATION_CLICKHOUSE_USER: default
+          ISOLATION_CLICKHOUSE_PASSWORD: ""
           BACKTEST_LAKE_LIVE_REQUIRED: "1"
         run: python -m pytest tests/isolation/test_backtest_lake_live.py -v --tb=short
 

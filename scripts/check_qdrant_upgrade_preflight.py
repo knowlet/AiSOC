@@ -5,6 +5,7 @@ Emits JSON on stdout describing whether attaching existing storage to the
 target Qdrant image is allowed. Legacy v1.7.x (and snapshots taken before a
 minor-version ladder) must not jump directly to v1.20.x.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,23 +74,13 @@ def main() -> int:
         if sm == 1 and tm == 1 and s_min is not None and t_min is not None:
             if t_min - s_min > 1:
                 allow_in_place = False
-                blocked_reasons.append(
-                    "Qdrant supports in-place storage only between consecutive minor versions."
-                )
-                required_steps.append(
-                    "Run scripts/qdrant_migration_evidence.sh ladder on disposable data."
-                )
+                blocked_reasons.append("Qdrant supports in-place storage only between consecutive minor versions.")
+                required_steps.append("Run scripts/qdrant_migration_evidence.sh ladder on disposable data.")
             if s_min is not None and s_min <= 7 and t_min is not None and t_min >= 20:
                 allow_in_place = False
-                blocked_reasons.append(
-                    "Legacy v1.7.x on-disk segment format cannot load on v1.20.x directly."
-                )
-                required_steps.append(
-                    "Take v1.7 collection snapshot for rollback, then step every minor to v1.20."
-                )
-                required_steps.append(
-                    "Post-ladder snapshots are for forward migrate/DR onto fresh v1.20 volumes only."
-                )
+                blocked_reasons.append("Legacy v1.7.x on-disk segment format cannot load on v1.20.x directly.")
+                required_steps.append("Take v1.7 collection snapshot for rollback, then step every minor to v1.20.")
+                required_steps.append("Post-ladder snapshots are for forward migrate/DR onto fresh v1.20 volumes only.")
 
     out = {
         "ok": allow_in_place and not blocked_reasons,
