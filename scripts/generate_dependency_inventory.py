@@ -19,7 +19,6 @@ import argparse
 import json
 import re
 import sys
-import tomllib
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -59,7 +58,7 @@ class Inventory:
     generated_from: str
     container_images: dict[str, list[str]] = field(default_factory=dict)
     datastore_pins: dict[str, str] = field(default_factory=dict)
-    runtimes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    runtimes: dict[str, list[str]] = field(default_factory=dict)
     package_managers: dict[str, str] = field(default_factory=dict)
     poetry_services: list[str] = field(default_factory=list)
     go_modules: list[str] = field(default_factory=list)
@@ -129,7 +128,7 @@ def _scan_files() -> dict[str, list[str]]:
     return dict(sorted(by_file.items()))
 
 
-def _runtimes() -> dict[str, dict[str, list[str]]]:
+def _runtimes() -> dict[str, list[str]]:
     python: set[str] = set()
     node: set[str] = set()
     go: set[str] = set()
@@ -148,9 +147,9 @@ def _runtimes() -> dict[str, dict[str, list[str]]]:
     for mod in ROOT.glob("**/go.mod"):
         if "plans" in mod.parts:
             continue
-        m = GO_VERSION.search(_read_text(mod))
-        if m:
-            go.add(m.group("v"))
+        go_match = GO_VERSION.search(_read_text(mod))
+        if go_match:
+            go.add(go_match.group("v"))
     return {
         "python_base_images": sorted(python),
         "node_base_images": sorted(node),
@@ -270,8 +269,8 @@ def _self_test() -> int:
     errors: list[str] = []
 
     inv = build_inventory()
-    if not inv.datastore_pins.get("clickhouse/clickhouse-server", "").startswith("24"):
-        errors.append("expected ClickHouse 24.x in compose canonical pins")
+    if not inv.datastore_pins.get("clickhouse/clickhouse-server", "").startswith("26"):
+        errors.append("expected ClickHouse 26.x in compose canonical pins")
     if not inv.poetry_services:
         errors.append("expected at least one poetry service")
 
@@ -281,8 +280,8 @@ def _self_test() -> int:
     def fake_check(tag: str) -> bool:
         return pins.get("qdrant/qdrant") == tag
 
-    if not fake_check("v1.12.5"):
-        errors.append("self-test expected qdrant v1.12.5 in this tree")
+    if not fake_check("v1.20.0"):
+        errors.append("self-test expected qdrant v1.20.0 in this tree")
 
     if errors:
         for e in errors:
