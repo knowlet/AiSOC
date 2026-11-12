@@ -363,10 +363,21 @@ chat-completions transport. Direct Anthropic requests omit unsupported
 validate the requested JSON response. A successful connection test proves that
 the selected route answered, not that every later workload will succeed.
 
-The UI has no native Bedrock provider. For an existing Bedrock deployment,
-inherit the bundled gateway. For a tenant-specific Bedrock route, use a
-LiteLLM-compatible gateway endpoint with its gateway-issued key and model
-alias; do not put an AWS bearer token into an OpenAI API-key field.
+The UI does not sign AWS requests or implement native Bedrock Converse/Invoke.
+For existing AWS credentials or Anthropic models on Bedrock, inherit the
+bundled gateway, or configure a tenant-specific LiteLLM-compatible gateway
+with its gateway-issued key and alias.
+
+For a model supporting Bedrock's OpenAI-compatible Chat Completions API,
+the existing custom option can instead use the explicit
+`https://bedrock-runtime.<region>.amazonaws.com/openai/v1` base, a supported
+model ID and its Bedrock API key. This uses bearer authentication; it does
+not discover local AWS credentials. Runtime `GET /models` is unavailable,
+so supply the model ID. Check the model's API/Region support and verify a real
+Explain or triage request in the target account. See the
+[gateway guide](../operations/llm-gateway) for the native and compatible API
+boundaries. A Bedrock key belongs only to the selected AWS endpoint, never
+to an unrelated OpenAI endpoint or a generic native gateway alias.
 
 ---
 
