@@ -2690,4 +2690,43 @@ jobs:
         run: |
           python3 -m pip install --quiet pytest pyyaml
           docker compose pull litellm
-          AISOC_TEST_LITELLM=1 python3 -m pytest tests/test_litellm_startup.py tests/test_litellm_auth_http.py -q
+          AISOC_TEST_LITELLM=1 python3 -m pytest tests/test_litellm_startup.py tests/test_litellm_auth_http.py tests/test_litellm_reload.py -q
+
+      - name: Gateway regression negative controls
+        run: |
+          fixture_backup=$(mktemp -d)
+          cp infra/litellm/config.yaml "$fixture_backup/config.yaml"
+          cp Makefile "$fixture_backup/Makefile"
+          trap 'cp "$fixture_backup/config.yaml" infra/litellm/config.yaml; cp "$fixture_backup/Makefile" Makefile; rm -rf "$fixture_backup"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+          path = Path("infra/litellm/config.yaml")
+          config = yaml.safe_load(path.read_text())
+          for alias in config["model_list"]:
+              alias["litellm_params"]["api_key"] = "os.environ/OPENAI_API_KEY"
+          path.write_text(yaml.safe_dump(config))
+          PY
+          if AISOC_TEST_LITELLM=1 python3 -m pytest tests/test_litellm_auth_http.py::GatewayHTTPTests::test_bedrock_bearer_with_empty_openai_key -q > "$fixture_backup/auth.log" 2>&1; then
+            cat "$fixture_backup/auth.log"
+            echo "FAIL: explicit empty generic key did not reproduce the credential failure"
+            exit 1
+          fi
+          cat "$fixture_backup/auth.log"
+          grep -E 'NoCredentialsError|Unable to locate credentials' "$fixture_backup/auth.log"
+          cp "$fixture_backup/config.yaml" infra/litellm/config.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("Makefile")
+          text = path.read_text()
+          before = "--no-deps --force-recreate litellm"
+          assert text.count(before) == 1
+          path.write_text(text.replace(before, "--no-deps litellm"))
+          PY
+          if AISOC_TEST_LITELLM=1 python3 -m pytest tests/test_litellm_reload.py -q > "$fixture_backup/reload.log" 2>&1; then
+            cat "$fixture_backup/reload.log"
+            echo "FAIL: removing recreation did not reproduce stale startup configuration"
+            exit 1
+          fi
+          cat "$fixture_backup/reload.log"
+          grep -F 'llm-reload kept the old startup model' "$fixture_backup/reload.log"
