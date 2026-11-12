@@ -1,0 +1,248 @@
+"""Pinned-image transport checks against protocol fixtures, never AWS/providers.
+
+AISOC_TEST_LITELLM=1 enables these Docker tests. The fixture server and real
+gateway run together inside a container with --network none; only loopback is
+available. These prove credential selection and wire shape, not model access.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+MASTER = "sk-fixture-gateway-only"
+MODELS = {
+    "ollama": "ollama_chat/llama3.2:3b-instruct-q4_K_M",
+    "openai": "openai/gpt-4o-mini",
+    "anthropic": "anthropic/claude-3-haiku-20240307",
+    "bedrock": "bedrock/converse/anthropic.claude-3-haiku-20240307-v1:0",
+}
+
+
+def _inside(case: str) -> None:
+    """Executed by the image's Python, with its actual LiteLLM dependencies."""
+    if case == "default-endpoint":
+        import runpy
+        from unittest.mock import patch
+
+        from litellm.llms.bedrock.base_aws_llm import BaseAWSLLM
+        from litellm.secret_managers.main import get_secret
+
+        os.environ["AISOC_LLM_API_BASE"] = ""
+        with patch("os.execv"):
+            runpy.run_path("/etc/litellm/start.py", run_name="__main__")
+        base = get_secret("os.environ/AISOC_LLM_API_BASE")
+        assert base is None
+        endpoints = BaseAWSLLM().get_runtime_endpoint(base, None, "us-east-1")
+        assert endpoints == ("https://bedrock-runtime.us-east-1.amazonaws.com",) * 2
+        return
+
+    provider = case.split("-", 1)[0]
+    requests: list[tuple[str, dict, dict]] = []
+
+    class Backend(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, dict(self.headers.items()), body))
+            if self.path.endswith("/chat/completions"):
+                result = {
+                    "id": "fixture",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "gpt-4o-mini",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "fixture-ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            elif self.path.endswith("/messages"):
+                result = {
+                    "id": "fixture",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-3-haiku-20240307",
+                    "content": [{"type": "text", "text": "fixture-ok"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            elif self.path.endswith("/converse"):
+                result = {
+                    "output": {"message": {"role": "assistant", "content": [{"text": "fixture-ok"}]}},
+                    "stopReason": "end_turn",
+                    "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+                    "metrics": {"latencyMs": 1},
+                }
+            elif self.path.endswith("/api/chat"):
+                result = {
+                    "model": "llama3.2:3b-instruct-q4_K_M",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "message": {"role": "assistant", "content": "fixture-ok"},
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 1,
+                    "eval_count": 1,
+                }
+            elif provider == "ollama" and self.path.endswith("/api/show"):
+                result = {"model_info": {}, "capabilities": ["completion"]}
+            else:
+                self.send_error(400, "Unexpected fixture path")
+                return
+            data = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+    thread = threading.Thread(target=backend.serve_forever, daemon=True)
+    thread.start()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = {
+        **os.environ,
+        "LITELLM_MASTER_KEY": MASTER,
+        "AISOC_LLM_MODEL_FAST": MODELS[provider],
+        "AISOC_LLM_MODEL_DEEP": MODELS[provider],
+        "AISOC_LLM_API_BASE": f"http://127.0.0.1:{backend.server_port}" + ("/v1" if provider == "openai" else ""),
+        "AISOC_LITELLM_REQUEST_TIMEOUT": "5",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_REGION": "us-east-1",
+        "AWS_PROFILE_NAME": "",
+        "AWS_PROFILE": "",
+        "AWS_BEARER_TOKEN_BEDROCK": "fixture-bedrock" if "bearer" in case else "",
+        "AWS_ACCESS_KEY_ID": "fixture-access" if case == "bedrock-sigv4" else "",
+        "AWS_SECRET_ACCESS_KEY": "fixture-secret" if case == "bedrock-sigv4" else "",
+        "AWS_SESSION_TOKEN": "fixture-session" if case == "bedrock-sigv4" else "",
+        "OPENAI_API_KEY": "fixture-openai" if case in {"openai", "anthropic", "bedrock-bearer-conflict"} else "",
+        "ANTHROPIC_API_KEY": "fixture-anthropic" if provider == "anthropic" else "",
+    }
+    try:
+        with tempfile.TemporaryFile(mode="w+") as logs:
+            process = subprocess.Popen(
+                [sys.executable, "/etc/litellm/start.py", "--config", "/etc/litellm/config.yaml", "--port", str(port)],
+                env=env,
+                stdout=logs,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                deadline = time.monotonic() + 75
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise AssertionError(f"Gateway exited {process.returncode}")
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health/liveliness", timeout=1) as response:
+                            if response.status == 200:
+                                break
+                    except (OSError, urllib.error.URLError):
+                        time.sleep(0.25)
+                else:
+                    raise AssertionError("Gateway readiness timed out")
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/v1/chat/completions",
+                    data=json.dumps(
+                        {"model": "aisoc-triage", "messages": [{"role": "user", "content": "fixture"}], "max_tokens": 8, "stream": False}
+                    ).encode(),
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {MASTER}"},
+                )
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    assert json.load(response)["choices"][0]["message"]["content"] == "fixture-ok"
+                assert requests, "No provider request reached the fixture"
+                path, headers, _body = requests[-1]
+                headers = {name.lower(): value for name, value in headers.items()}
+                assert MASTER not in str(headers), "Gateway credential leaked upstream"
+                if provider == "openai":
+                    assert path == "/v1/chat/completions" and headers["authorization"] == "Bearer fixture-openai"
+                elif provider == "anthropic":
+                    assert path.endswith("/messages") and headers["x-api-key"] == "fixture-anthropic"
+                elif provider == "bedrock":
+                    assert path.endswith("/converse")
+                    if "bearer" in case:
+                        assert headers["authorization"] == "Bearer fixture-bedrock"
+                    else:
+                        assert headers["authorization"].startswith("AWS4-HMAC-SHA256 Credential=fixture-access/")
+                        assert "/us-east-1/bedrock/aws4_request" in headers["authorization"]
+                        assert headers["x-amz-security-token"] == "fixture-session"
+                else:
+                    assert path.endswith("/api/chat")
+            except Exception:
+                logs.seek(0)
+                print(logs.read()[-12000:])  # Only fixed fixture credentials exist in this isolated container.
+                raise
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+    finally:
+        backend.shutdown()
+        backend.server_close()
+        thread.join(timeout=5)
+
+
+@unittest.skipUnless(os.getenv("AISOC_TEST_LITELLM") == "1", "set AISOC_TEST_LITELLM=1 for pinned-image transport checks")
+class GatewayHTTPTests(unittest.TestCase):
+    def run_image(self, case: str) -> None:
+        import yaml
+
+        image = yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]["litellm"]["image"]
+        name = "aisoc-llm-fixture-" + uuid.uuid4().hex
+        command = ["docker", "run", "--rm", "--name", name, "--network", "none", "--entrypoint", "python"]
+        for source, target in (
+            (ROOT / "infra/litellm/start.py", "/etc/litellm/start.py"),
+            (ROOT / "infra/litellm/config.yaml", "/etc/litellm/config.yaml"),
+            (Path(__file__).resolve(), "/fixture/test.py"),
+        ):
+            command.extend(["--mount", f"type=bind,source={source},target={target},readonly"])
+        command += ["-e", "LITELLM_LOCAL_MODEL_COST_MAP=True", "-e", "DO_NOT_TRACK=True", "-e", "AWS_EC2_METADATA_DISABLED=true"]
+        try:
+            result = subprocess.run([*command, image, "/fixture/test.py", "--inside", case], capture_output=True, text=True, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        finally:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15, check=False)
+
+    def test_ollama_without_provider_key(self):
+        self.run_image("ollama")
+
+    def test_openai_native_key(self):
+        self.run_image("openai")
+
+    def test_anthropic_does_not_use_openai_key(self):
+        self.run_image("anthropic")
+
+    def test_bedrock_bearer_with_empty_openai_key(self):
+        self.run_image("bedrock-bearer")
+
+    def test_bedrock_bearer_with_conflicting_openai_key(self):
+        self.run_image("bedrock-bearer-conflict")
+
+    def test_bedrock_native_credentials(self):
+        self.run_image("bedrock-sigv4")
+
+    def test_blank_bedrock_endpoint_uses_native_default(self):
+        self.run_image("default-endpoint")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--inside":
+        _inside(sys.argv[2])
+    else:
+        unittest.main()

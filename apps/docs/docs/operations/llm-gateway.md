@@ -7,8 +7,8 @@ description: Route every live LLM call through a single LiteLLM gateway — assi
 
 AiSOC runs several distinct LLM workloads — triage, recon, investigation, the
 contextual copilot, summaries, reports, and natural-language generation. The
-**LiteLLM gateway** is the single entry point for every *live* LLM call these
-workloads make. AiSOC asks for a **logical task alias**; the gateway decides
+**LiteLLM gateway** is the default route for these live workloads. Tenant
+BYOK and explicit endpoint/model overrides can select a different route. AiSOC asks for a **logical task alias**; the gateway decides
 which real provider and model that alias resolves to.
 
 :::tip Choosing where the model runs
@@ -50,57 +50,183 @@ gateway is never on the critical path for a baseline triage.
 The shipped aliases mirror AiSOC's workloads. They live in
 `infra/litellm/config.yaml`:
 
-| Alias                 | Workload                                   | Shipped default   |
-| --------------------- | ------------------------------------------ | ----------------- |
-| `aisoc-triage`        | Auto-triage of fused alerts (high volume)  | `gpt-4o-mini`     |
-| `aisoc-recon`         | Recon / enrichment reasoning               | `gpt-4o-mini`     |
-| `aisoc-investigation` | Deep multi-step investigation              | `gpt-4o`          |
-| `aisoc-copilot`       | Contextual analyst copilot                 | `gpt-4o-mini`     |
-| `aisoc-summary`       | Alert / incident summaries                 | `gpt-4o-mini`     |
-| `aisoc-report`        | Analyst-facing report write-ups            | `gpt-4o`          |
-| `aisoc-nl`            | NL→query / NL→detection translation        | `gpt-4o-mini`     |
-| `aisoc-hunt`          | Hypothesis → structured hunt plan          | `gpt-4o-mini`     |
-| `aisoc-detection`     | Sigma rewrite from an analyst note         | `gpt-4o-mini`     |
+| Alias | Workload | Model variable |
+| --- | --- | --- |
+| `aisoc-triage` | Auto-triage | `AISOC_LLM_MODEL_FAST` |
+| `aisoc-recon` | Recon / enrichment | `AISOC_LLM_MODEL_FAST` |
+| `aisoc-investigation` | Deep investigation | `AISOC_LLM_MODEL_DEEP` |
+| `aisoc-copilot` | Contextual copilot | `AISOC_LLM_MODEL_FAST` |
+| `aisoc-summary` | Summaries | `AISOC_LLM_MODEL_FAST` |
+| `aisoc-report` | Reports | `AISOC_LLM_MODEL_DEEP` |
+| `aisoc-nl` | NL query / detection generation | `AISOC_LLM_MODEL_FAST` |
+| `aisoc-hunt` | Structured hunt plan | `AISOC_LLM_MODEL_FAST` |
+| `aisoc-detection` | Detection tuning | `AISOC_LLM_MODEL_FAST` |
 
-The "shipped default" is only the *example* mapping in the config — the whole
-point is that you change it. The alias names stay constant.
+Both variables default to `ollama_chat/llama3.2:3b-instruct-q4_K_M`.
+A normal `make up` starts the gateway and bundled Ollama without provider keys.
+Once the weights are available, the model can answer; if inference is
+unavailable, AiSOC uses its deterministic fallback. Gateway liveness alone
+is not proof that a model can answer.
 
-## Enable the gateway
+## Choose the configuration scope
 
-The `litellm` service is in the **CORE** profile, so `make up` and a plain
-`docker compose up -d` already start it and routing to it is already wired.
-Supplying a key is the only step:
+| Requirement | Configure | Credential used |
+| --- | --- | --- |
+| Local, no account or key | Default `make up` | None upstream |
+| Deployment-wide OpenAI / Anthropic / Bedrock | Host `.env`, then `make llm-reload` | Provider-native credential in LiteLLM |
+| One tenant's BYOK | Settings → Deployment & AI | That tenant's saved provider/endpoint/model/key |
+| One tenant using another LiteLLM gateway | UI's LiteLLM-compatible endpoint, alias, gateway key | Key issued by that gateway |
 
-```bash
-OPENAI_API_KEY=<your-real-provider-key>    # the gateway uses this to reach the upstream model
-LITELLM_MASTER_KEY=<a-strong-key>          # AiSOC authenticates to the gateway with this
+An enabled tenant BYOK configuration can override the deployment route.
+Leave it disabled when the tenant should inherit the bundled gateway's
+Bedrock configuration. The UI does **not** implement a native Bedrock
+provider: do not enter the Bedrock runtime URL or an AWS bearer token as an
+OpenAI-compatible endpoint/key. An external LiteLLM gateway can expose
+Bedrock through its OpenAI-compatible API using a gateway-issued key.
+
+The bundled clients authenticate to LiteLLM using `LITELLM_MASTER_KEY`.
+That key is separate from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
+`AWS_BEARER_TOKEN_BEDROCK`, which authenticate LiteLLM to upstream providers.
+Do not copy a provider credential into another provider's variable.
+
+### OpenAI or Anthropic deployment defaults
+
+Set both model variables and clear the local endpoint in `.env`, for example:
+
+```dotenv
+OPENAI_API_KEY=<your-provider-key>
+AISOC_LLM_MODEL_FAST=openai/gpt-4o-mini
+AISOC_LLM_MODEL_DEEP=openai/gpt-4o
+AISOC_LLM_API_BASE=
 ```
 
-```bash
-docker compose up -d        # or: make up
+For Anthropic, use `anthropic/<model-id>` and `ANTHROPIC_API_KEY` instead.
+The aliases omit `api_key` so LiteLLM selects the matching native credential.
+An empty `AISOC_LLM_API_BASE` is normalized to absent at gateway startup;
+the provider then selects its default endpoint. A nonempty value is preserved,
+including an existing OpenAI-compatible server or a private endpoint.
+The shared endpoint applies to both model tiers; mixed-provider deployments
+needing different endpoints should configure them per alias in the YAML.
+
+### Amazon Bedrock: instance role, existing profile, or bearer token
+
+Set the models and region for the account where the models are enabled:
+
+```dotenv
+AISOC_LLM_MODEL_FAST=bedrock/<model-or-inference-profile-id>
+AISOC_LLM_MODEL_DEEP=bedrock/<model-or-inference-profile-id>
+AISOC_LLM_API_BASE=
+AWS_REGION=us-east-1
 ```
 
-It was a `full`-profile service until 2026-09, which meant a CORE deployment
-could not do AI triage *even with a key* — every `aisoc-<role>` alias resolves
-here and nowhere else. See
-[ADR-0006](https://github.com/beenuar/AiSOC/blob/main/docs/decisions/0006-llm-gateway-in-core.md)
-for the trade-off, including the measured cost of the container.
+Replace the angle-bracket values with actual accessible model or inference
+profile IDs. For an explicit endpoint, use e.g.
+`AISOC_LLM_API_BASE=https://bedrock-runtime.us-east-1.amazonaws.com`.
+The region can instead come from `AWS_DEFAULT_REGION` or an existing AWS
+profile. The existing `.env.example` also sets `AWS_REGION=us-east-1` for
+AWS integrations. Remove or clear `AWS_REGION` and `AWS_REGION_NAME` when
+you want `AWS_DEFAULT_REGION` or the profile region to take precedence.
 
-**With no provider key**, the gateway still boots, serves its seven aliases
-and answers `/health/liveliness`; AiSOC makes no LLM call and every alert is
-triaged by the deterministic path. Nothing about the install is broken and
-nothing claims AI is running.
+| AWS authentication | Additional configuration |
+| --- | --- |
+| EC2 instance role | No API key. Keep `AWS_EC2_METADATA_DISABLED=false` (default), and make IMDS reachable from the gateway container. |
+| Existing environment credentials | Compose forwards `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN`. Temporary credentials require the session token. |
+| Existing host profile / SSO | Use the optional read-only profile overlay below; set `AWS_PROFILE` if needed and refresh SSO on the host before starting. |
+| Bedrock API key | Set `AWS_BEARER_TOKEN_BEDROCK`. `AWS_EC2_METADATA_DISABLED=true` is optional and disables only metadata lookup. |
 
-That is the whole configuration. `docker-compose.yml` sets `LLM_GATEWAY_URL` on
-the `api` and `agents` services, and both services' resolvers read it for any
-`aisoc-<role>` alias — an alias resolves nowhere else, so the gateway is the
-only correct destination for one. The bearer token is resolved with the route:
-when AiSOC picks the gateway itself it sends `LITELLM_MASTER_KEY`, never a
-provider key, which the gateway would reject as an invalid proxy token.
+With no bearer, LiteLLM uses the AWS SDK credential chain. With a bearer,
+it uses that token; an expired/denied token is an error, not an automatic
+fallback to an unrelated IAM identity. To switch back to IAM, remove the
+bearer and recreate the gateway. Blank optional AWS values are removed before
+LiteLLM starts so empty profile/credential placeholders cannot mask the chain.
 
-To send AiSOC somewhere else — a gateway on another host, or your own
-OpenAI-compatible endpoint — set `OPENAI_BASE_URL` (or `LLM_BASE_URL`) and it
-outranks `LLM_GATEWAY_URL` for every role.
+Docker does not automatically expose the host's `~/.aws`. To use those files:
+
+```bash
+make up COMPOSE="docker compose -f docker-compose.yml -f infra/compose/docker-compose.aws-profile.yml"
+```
+
+The overlay mounts the existing directory at `/root/.aws` read-only, only in
+LiteLLM. `AISOC_AWS_CONFIG_DIR` can select a different host directory. It fails
+if the directory does not exist instead of creating an empty credentials
+folder. If you set `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE`, use
+container paths (e.g. `/root/.aws/config` and `/root/.aws/credentials`), not
+host absolute paths. The read-only SSO cache cannot persist a refreshed token
+from inside the container; renew sessions on the host. For unattended EC2
+use, prefer the instance role. Keep the same `COMPOSE` value for `make upgrade` and `make llm-reload`
+(and include any port/GPU overlays you already use). Remove the host-Ollama
+overlay when switching to Bedrock or another hosted provider: it substitutes
+the host Ollama address for an empty endpoint. This mount is unnecessary on
+EC2 when the instance role is available. Profiles using `credential_process`
+need that executable inside the container; mounting its host path alone is
+not sufficient.
+
+`AWS_EC2_METADATA_DISABLED=true` does not disable environment or profile
+credentials. It **does** disable an EC2 role's metadata source, so do not set
+it on a deployment relying on that role. With bridged containers, verify
+IMDSv2 reachability and the instance metadata response hop limit; do not
+switch off IMDSv2 to work around a networking problem.
+
+A Marketplace/model-access denial is separate from credential discovery.
+Bedrock API keys still carry IAM permissions; switching credentials may
+change the principal or account. Have an administrator enable the selected
+models and grant the runtime principal the necessary invoke permissions.
+Marketplace subscription permissions can be needed for first enablement;
+the runtime principal need not retain them after that. A successful bearer
+request does not prove that the original instance role has the same access.
+
+### Apply and verify gateway changes
+
+```bash
+make llm-reload
+```
+
+This recreates only LiteLLM, including its environment and mounts.
+`make upgrade` also performs this step. A plain restart does not replace a
+container's environment, and `compose up` does not detect changed bytes in a
+bind-mounted YAML file. Expect active gateway requests to be interrupted
+briefly during recreation.
+
+Compare the actual mounted file with the host copy, without printing secrets:
+
+```bash
+python3 -c "import hashlib; print(hashlib.sha256(open('infra/litellm/config.yaml','rb').read()).hexdigest())"
+docker compose exec -T litellm python -c "import hashlib; print(hashlib.sha256(open('/etc/litellm/config.yaml','rb').read()).hexdigest())"
+```
+
+Then test a real completion through the gateway. This incurs one model call
+when a paid provider is selected; run it for both FAST and DEEP aliases.
+For example, substitute `aisoc-investigation` for `aisoc-triage` below.
+Verify that the returned model is the intended FAST or DEEP backend:
+`aisoc-investigation` can fall back to `aisoc-triage`, so HTTP success alone
+does not prove the DEEP model succeeded:
+
+```bash
+docker compose exec -T litellm python - <<'PY_GATEWAY'
+import json
+import os
+import urllib.request
+
+request = urllib.request.Request(
+    'http://127.0.0.1:4000/v1/chat/completions',
+    data=json.dumps({
+        'model': 'aisoc-triage',
+        'messages': [{'role': 'user', 'content': 'Reply with OK.'}],
+        'max_tokens': 16,
+    }).encode(),
+    headers={
+        'Authorization': 'Bearer ' + os.environ['LITELLM_MASTER_KEY'],
+        'Content-Type': 'application/json',
+    },
+)
+with urllib.request.urlopen(request, timeout=90) as response:
+    body = json.load(response)
+    print('Completion succeeded:', body['model'], 'choices:', len(body['choices']))
+PY_GATEWAY
+```
+
+The completion checks the active route/authentication; matching config hashes
+and a healthy `/health/liveliness` alone do not establish that.
 
 ### Calling a provider directly, with no gateway
 
@@ -173,4 +299,5 @@ local Ollama.
 
 - Host port `4000` is bound to `127.0.0.1` only, like the rest of the stack.
 - No provider key is ever written to `infra/litellm/config.yaml` — aliases
-  resolve credentials from the process environment (`os.environ/...`).
+  let LiteLLM resolve the selected provider's native credentials.
+

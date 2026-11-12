@@ -2683,3 +2683,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate compose file
         run: docker compose config --quiet
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Gateway native authentication through real HTTP (no network egress)
+        run: |
+          python3 -m pip install --quiet pytest pyyaml
+          docker compose pull litellm
+          AISOC_TEST_LITELLM=1 python3 -m pytest tests/test_litellm_startup.py tests/test_litellm_auth_http.py -q
