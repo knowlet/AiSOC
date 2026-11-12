@@ -23,7 +23,7 @@ Resolution rules (must match the agents resolver exactly)
     An environment credential is inherited only for the same API endpoint;
     a tenant-selected destination otherwise needs its own usable key.
 3.  Apply air-gap policy: when ``AISOC_AIRGAPPED`` is on, only allow
-    base URLs that point at a non-``api.openai.com`` host.
+    base URLs permitted by the private-host / explicit-allowlist policy.
 4.  Return an :class:`LlmConfig` describing whether a live call is
     permitted and the effective ``(base_url, model, api_key)`` triple.
 
@@ -44,9 +44,11 @@ from urllib.parse import urlparse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.airgap import is_host_allowed_for_airgap
+from app.core.config import settings
 from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
-from app.services.llm_tenant_routing import allows_unauthenticated, public_provider_host, tenant_route
+from app.services.llm_tenant_routing import allows_unauthenticated, tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
 
 logger = logging.getLogger(__name__)
@@ -121,36 +123,16 @@ def _env_baseline() -> tuple[str, str, str | None]:
 
 
 def _airgap_blocks(base_url: str) -> tuple[bool, str]:
-    """Return ``(blocked, reason)`` under the current air-gap policy.
-
-    Replicates the semantics of the agents-side ``_airgap_blocks``
-    helper. We deliberately do not import :func:`enforce_airgap_for_url`
-    from ``app.core.airgap`` because that helper is intended for the
-    actual outbound call and raises; here we want a non-raising
-    classification for the resolver's "would this be allowed?"
-    decision. The two paths must agree on the same hostname rule
-    (no ``api.openai.com``), and they do.
-    """
-    airgapped = os.getenv("AISOC_AIRGAPPED", "").lower() in ("1", "true", "yes")
-    if not airgapped:
+    """Use the same policy as status and the actual API egress boundary."""
+    if not settings.AISOC_AIRGAPPED:
         return False, ""
-
-    base = (base_url or "").strip()
-    if not base:
-        return (
-            True,
-            "AISOC_AIRGAPPED is on and no base_url is configured (would default to api.openai.com).",
-        )
     try:
-        hostname = (urlparse(base).hostname or "").lower()
-    except Exception:  # noqa: BLE001
+        hostname = (urlparse(base_url or "https://api.openai.com").hostname or "").lower()
+    except ValueError:
         hostname = ""
-    # Exact hostname or subdomain match — substring matching would
-    # let ``evil.com/api.openai.com`` slip through.
-    public_host = public_provider_host(hostname)
-    if public_host:
-        return True, f"AISOC_AIRGAPPED is on and base_url points at {public_host}."
-    return False, ""
+    if is_host_allowed_for_airgap(hostname, settings.AISOC_AIRGAP_ALLOWLIST):
+        return False, ""
+    return True, f"AISOC_AIRGAPPED is on and host '{hostname}' is not allowed by the egress policy."
 
 
 def _decrypt_vault_token(vault_token: str, tenant_id: uuid.UUID) -> str | None:

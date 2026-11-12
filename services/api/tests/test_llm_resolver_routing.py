@@ -10,6 +10,7 @@ import pytest
 from app.api.v1.endpoints import llm_status as status_module
 from app.core import airgap as airgap_module
 from app.services import llm_resolver
+from app.services.llm_tenant_routing import airgap_host_allowed
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +29,7 @@ def gateway_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
     monkeypatch.setenv("LITELLM_MASTER_KEY", "gateway-test-key")
     monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAPPED", False)
+    monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAP_ALLOWLIST", [])
 
 
 def database(row: SimpleNamespace | None) -> MagicMock:
@@ -136,3 +138,54 @@ async def test_hosted_defaults_remain_blocked_by_airgap(monkeypatch: pytest.Monk
     assert "AISOC_AIRGAPPED" in cfg.reason
     assert snap["effective_path"] == "fallback"
     assert snap["airgap_compliant"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_allowlisted_host_is_consistent_for_runtime_status_and_probe_policy(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    decrypt_as(monkeypatch, "tenant-test-key")
+    host = f"api.{provider}.com"
+    monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAPPED", True)
+    monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAP_ALLOWLIST", [host])
+    db = database(credential(provider=provider))
+    tenant_id = uuid.uuid4()
+    cfg = await llm_resolver.resolve_llm_config(db, tenant_id)
+    snap = await status_module.tenant_llm_status(db, tenant_id)
+    assert cfg.allowed and cfg.api_key == "tenant-test-key"
+    assert snap["effective_path"] == "live" and snap["airgap_compliant"] is True
+    # The probe's real policy entry point must admit the same route.
+    airgap_module.enforce_airgap_for_url(cfg.base_url)
+
+
+@pytest.mark.asyncio
+async def test_implicit_openai_default_obeys_the_same_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_GATEWAY_URL")
+    monkeypatch.setenv("OPENAI_API_KEY", "deployment-test-key")
+    monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAPPED", True)
+    monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAP_ALLOWLIST", ["api.openai.com"])
+    cfg = await llm_resolver.resolve_llm_config(database(None), uuid.uuid4())
+    assert cfg.allowed
+    assert status_module.llm_status()["effective_path"] == "live"
+    airgap_module.enforce_airgap_for_url(cfg.base_url)
+
+
+@pytest.mark.parametrize("allowlist", [[], ["api.anthropic.com", "MODEL.EXAMPLE:443"]])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "",
+        "ollama",
+        "localhost",
+        "127.0.0.1",
+        "10.0.0.1",
+        "::1",
+        "192.168.1.1",
+        "gateway.internal",
+        "api.anthropic.com",
+        "api.openai.com",
+        "sub.model.example",
+        "unlisted.example",
+    ],
+)
+def test_agents_host_policy_matches_canonical_api_egress(host: str, allowlist: list[str]) -> None:
+    assert airgap_host_allowed(host, allowlist) == airgap_module.is_host_allowed_for_airgap(host, allowlist)

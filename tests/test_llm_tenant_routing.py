@@ -78,13 +78,13 @@ class TenantRouteTests(unittest.TestCase):
             with self.subTest(other=other):
                 self.assertFalse(routing.same_endpoint("https://gateway.example/v1", other))
 
-    def test_public_provider_airgap_hosts_include_both_hosted_defaults(self) -> None:
-        for host in ("api.openai.com", "api.anthropic.com"):
-            for variant in (host, "sub." + host, host.upper(), host + "."):
-                with self.subTest(host=variant):
-                    self.assertEqual(routing.public_provider_host(variant), host)
-        for host in ("litellm", "api.anthropic.com.example", "internal.local"):
-            self.assertIsNone(routing.public_provider_host(host))
+    def test_airgap_host_policy_requires_private_or_explicitly_allowed_destinations(self) -> None:
+        for host in ("api.openai.com", "api.anthropic.com", "unlisted.example"):
+            self.assertFalse(routing.airgap_host_allowed(host, []))
+            self.assertTrue(routing.airgap_host_allowed(host, [host]))
+        for host in ("ollama", "192.168.1.1", "gateway.internal", "localhost", "::1"):
+            self.assertTrue(routing.airgap_host_allowed(host, []))
+        self.assertFalse(routing.airgap_host_allowed("", []))
 
     def test_trailing_slash_and_host_case_do_not_change_destination(self) -> None:
         self.assertTrue(routing.same_endpoint("https://GATEWAY.example/v1/", "https://gateway.example/v1"))

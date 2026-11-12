@@ -86,6 +86,7 @@ def _clear_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_MODEL",
         "AISOC_LLM_MODEL",
         "AISOC_AIRGAPPED",
+        "AISOC_AIRGAP_ALLOWLIST",
         "LLM_GATEWAY_URL",
         "LITELLM_MASTER_KEY",
     ):
@@ -175,7 +176,7 @@ class TestEnvBaseline:
 
 
 class TestAirgapBlocks:
-    """Air-gap policy must mirror the legacy ``_llm_allowed`` helper."""
+    """Air-gap policy must match API egress and the explicit host allowlist."""
 
     def test_airgap_off_never_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # AISOC_AIRGAPPED unset → never block, regardless of host.
@@ -190,7 +191,7 @@ class TestAirgapBlocks:
         resolver = _import_resolver()
         blocked, reason = resolver._airgap_blocks("")
         assert blocked is True
-        assert "would default to api.openai.com" in reason
+        assert reason == "AISOC_AIRGAPPED is on and host 'api.openai.com' is not allowed by the egress policy."
 
     def test_airgap_blocks_openai_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AISOC_AIRGAPPED", "true")
@@ -201,7 +202,7 @@ class TestAirgapBlocks:
         # bare hostname substring (avoids CodeQL's
         # ``py/incomplete-url-substring-sanitization`` heuristic, which fires on
         # any ``"api.openai.com" in <str>`` check even in test assertions).
-        assert reason == "AISOC_AIRGAPPED is on and base_url points at api.openai.com."
+        assert reason == "AISOC_AIRGAPPED is on and host 'api.openai.com' is not allowed by the egress policy."
 
     def test_airgap_allows_private_litellm_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AISOC_AIRGAPPED", "true")
@@ -375,7 +376,7 @@ class TestResolveNoTenant:
         # See note in ``test_airgap_blocks_openai_host``: assert against the full
         # literal reason to avoid CodeQL's
         # ``py/incomplete-url-substring-sanitization`` false positive.
-        assert cfg.reason == "AISOC_AIRGAPPED is on and base_url points at api.openai.com."
+        assert cfg.reason == "AISOC_AIRGAPPED is on and host 'api.openai.com' is not allowed by the egress policy."
 
     @pytest.mark.asyncio
     async def test_airgap_allows_private_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -737,7 +738,7 @@ class TestAirgapWithTenantOverride:
         # See note in ``test_airgap_blocks_openai_host``: assert against the full
         # literal reason to avoid CodeQL's
         # ``py/incomplete-url-substring-sanitization`` false positive.
-        assert cfg.reason == "AISOC_AIRGAPPED is on and base_url points at api.openai.com."
+        assert cfg.reason == "AISOC_AIRGAPPED is on and host 'api.openai.com' is not allowed by the egress policy."
 
 
 class TestGatewayTenantRouting:
@@ -799,4 +800,14 @@ def test_airgap_blocks_anthropic_default(monkeypatch: pytest.MonkeyPatch, hostna
     monkeypatch.setenv("AISOC_AIRGAPPED", "true")
     blocked, reason = _import_resolver()._airgap_blocks(f"https://{hostname}/v1")
     assert blocked is True
-    assert reason == "AISOC_AIRGAPPED is on and base_url points at api.anthropic.com."
+    assert reason == f"AISOC_AIRGAPPED is on and host '{hostname.lower()}' is not allowed by the egress policy."
+
+
+@pytest.mark.parametrize("allowlist", ["api.anthropic.com", '["api.anthropic.com"]'])
+def test_airgap_honors_an_explicit_host_allowlist(monkeypatch: pytest.MonkeyPatch, allowlist: str) -> None:
+    monkeypatch.setenv("AISOC_AIRGAPPED", "true")
+    monkeypatch.setenv("AISOC_AIRGAP_ALLOWLIST", allowlist)
+    resolver = _import_resolver()
+    assert resolver._airgap_blocks("https://api.anthropic.com/v1") == (False, "")
+    assert resolver._airgap_blocks("https://unlisted.example/v1")[0] is True
+    assert resolver._airgap_blocks("http://ollama:11434/v1") == (False, "")

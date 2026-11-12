@@ -53,11 +53,9 @@ can label the resolved config with a ``source`` of ``"tenant"``,
 ``"environment"``, or ``"mixed"`` — useful for log-based debugging
 of "wait, which key did this request actually use?".
 
-Air-gap policy is the *last* thing we check, after layering. This
-mirrors the semantics of the legacy ``_llm_allowed()`` helper so a
-tenant who BYOKs a private LiteLLM gateway gets ``allowed=True`` even
-when ``AISOC_AIRGAPPED=true``, which is exactly what the air-gap
-deployment story promises.
+Air-gap policy is the *last* thing we check, after layering. Private hosts
+and explicitly allowlisted destinations follow the API's egress policy,
+so status, connection tests and request-time routing agree.
 
 Failure modes
 -------------
@@ -75,6 +73,7 @@ no LLM is configured.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from dataclasses import dataclass
@@ -85,7 +84,7 @@ import asyncpg
 import structlog
 
 from app.llm.routing import gateway_url, is_gateway_alias, resolve_api_key
-from app.llm.tenant_routing import allows_unauthenticated, public_provider_host, tenant_route
+from app.llm.tenant_routing import airgap_host_allowed, allows_unauthenticated, tenant_route
 from app.security.credential_vault import CredentialVaultError, get_vault
 
 # NOTE: ``app.investigator.ledger`` is imported lazily inside
@@ -193,42 +192,23 @@ def _env_baseline() -> tuple[str, str, str | None]:
 
 
 def _airgap_blocks(base_url: str) -> tuple[bool, str]:
-    """Return ``(blocked, reason)`` under the current air-gap policy.
-
-    Replicates the semantics of the legacy ``_llm_allowed`` helper:
-
-    * ``AISOC_AIRGAPPED`` off  → never blocks.
-    * ``AISOC_AIRGAPPED`` on:
-        * empty ``base_url`` would default to ``api.openai.com`` → blocked.
-        * ``base_url`` containing ``api.openai.com`` → blocked.
-        * any other host (private LiteLLM/Ollama/vLLM proxy) → allowed.
-
-    Note that we deliberately do *not* call into ``services/api/app/core/airgap``
-    here — that helper performs IP/CIDR allowlist checks that the
-    agents service does not need (the request is already in-process,
-    and the LLM host shape is enough to gate egress for explain).
-    """
-    airgapped = os.getenv("AISOC_AIRGAPPED", "").lower() in ("1", "true", "yes")
-    if not airgapped:
+    """Match the API's private-host and explicit-allowlist egress policy."""
+    if os.getenv("AISOC_AIRGAPPED", "").strip().lower() not in {"1", "true", "yes", "on"}:
         return False, ""
-
-    base = (base_url or "").strip()
-    if not base:
-        return (
-            True,
-            "AISOC_AIRGAPPED is on and no base_url is configured (would default to api.openai.com).",
-        )
     try:
-        parsed = urlparse(base)
-        hostname = (parsed.hostname or "").lower()
-    except Exception:  # noqa: BLE001
+        hostname = (urlparse(base_url or "https://api.openai.com").hostname or "").lower()
+    except ValueError:
         hostname = ""
-    # Check hostname exactly or as a subdomain to avoid substring-match bypass
-    # (e.g. evil.com/api.openai.com or api.openai.com.evil.com).
-    public_host = public_provider_host(hostname)
-    if public_host:
-        return True, f"AISOC_AIRGAPPED is on and base_url points at {public_host}."
-    return False, ""
+    raw_allowlist = os.getenv("AISOC_AIRGAP_ALLOWLIST", "")
+    # Settings accepts either a JSON list or comma-separated hostnames.
+    try:
+        parsed_allowlist = json.loads(raw_allowlist)
+    except ValueError:
+        parsed_allowlist = raw_allowlist.split(",")
+    allowlist = [str(host) for host in parsed_allowlist] if isinstance(parsed_allowlist, list) else []
+    if airgap_host_allowed(hostname, allowlist):
+        return False, ""
+    return True, f"AISOC_AIRGAPPED is on and host '{hostname}' is not allowed by the egress policy."
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,16 @@ class TestKeyHandling:
         snap = llm_status()
         assert snap["key_set"] is True
 
+    def test_url_credentials_are_redacted_without_changing_the_configured_route(self, monkeypatch: pytest.MonkeyPatch):
+        endpoint = "https://username:url-secret@proxy.example/v1?api_key=query-secret#fragment-secret"
+        monkeypatch.setenv("OPENAI_BASE_URL", endpoint)
+        monkeypatch.setenv("OPENAI_API_KEY", "key-secret")
+        snap = llm_status()
+        assert snap["base_url"] == "https://proxy.example/v1"
+        assert status_module._env_baseline()[0] == endpoint
+        for secret in ("username", "url-secret", "query-secret", "fragment-secret", "key-secret"):
+            assert secret not in str(snap)
+
 
 class TestProviderClassification:
     """``provider`` should match what the operator set, not OpenAI by default."""
@@ -273,6 +283,7 @@ class TestUnauthenticatedTenantStatus:
 
         assert snap["key_set"] is False
         assert snap["effective_path"] == "fallback"
+        assert "No usable credential" in str(snap["policy_note"])
 
     @pytest.mark.asyncio
     async def test_no_auth_endpoint_still_obeys_airgap(self, monkeypatch: pytest.MonkeyPatch):

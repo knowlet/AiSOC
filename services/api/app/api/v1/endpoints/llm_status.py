@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from fastapi import APIRouter
 from sqlalchemy import select
@@ -162,6 +162,15 @@ def _env_baseline() -> tuple[str, str, bool]:
     return base_url, model, key_set
 
 
+def _redact_base_url(base_url: str) -> str:
+    """Keep routing context without exposing URL-carried credentials."""
+    try:
+        parsed = urlsplit(base_url)
+        return parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment="").geturl()
+    except ValueError:
+        return ""
+
+
 def _compute_status(
     *,
     base_url: str,
@@ -201,12 +210,10 @@ def _compute_status(
         # No outbound call would happen anyway — fallback path is
         # always air-gap compliant.
         airgap_compliant = True
-    elif not host:
-        # base_url unset but key is set → would default to api.openai.com
-        # which is never compliant under air-gap.
-        airgap_compliant = False
     else:
-        airgap_compliant = is_host_allowed_for_airgap(host, settings.AISOC_AIRGAP_ALLOWLIST)
+        # An unset URL with a key uses the OpenAI default. It obeys the same
+        # explicit allowlist as a tenant-supplied provider URL.
+        airgap_compliant = is_host_allowed_for_airgap(host or "api.openai.com", settings.AISOC_AIRGAP_ALLOWLIST)
 
     is_local = _is_loopback_or_private_host(host)
 
@@ -238,7 +245,8 @@ def _compute_status(
     elif effective_path == "fallback":
         # key_set is False but base_url may be set — uncommon but possible.
         policy_note = (
-            "OPENAI_API_KEY (or LLM_API_KEY) is unset, so LLM calls are disabled and Explain falls back to deterministic summaries."
+            "No usable credential is configured for this endpoint. Re-enter the tenant key or use a matching deployment route; "
+            "Explain currently falls back to deterministic summaries."
         )
     elif is_local:
         policy_note = f"LLM calls are routed to a local provider ({provider}). No external network egress is required for the Explain path."
@@ -248,7 +256,7 @@ def _compute_status(
     return {
         "provider": provider,
         "model": model,
-        "base_url": base_url,
+        "base_url": _redact_base_url(base_url),
         "host": host,
         "key_set": key_set,
         "airgap_enabled": airgap_enabled,
@@ -288,10 +296,9 @@ def llm_status() -> dict[str, object]:
         }
 
     Notes:
-        * ``base_url`` is returned verbatim (no path-stripping) because
-          operators sometimes encode the model behind the path on
-          single-tenant LiteLLM gateways and stripping it confuses
-          troubleshooting.
+        * ``base_url`` retains the endpoint path, but removes userinfo,
+          query and fragment components that can carry credentials.
+          Runtime routing continues to use the full configured URL.
         * ``key_set`` is the *only* signal we expose for the API key.
           We never return the key itself, even partially redacted.
         * For tenant-resolved snapshots that layer

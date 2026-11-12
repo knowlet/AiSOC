@@ -6,6 +6,7 @@ Provider defaults are the same ones used by the BYOK connection probe.
 
 from __future__ import annotations
 
+import ipaddress
 from urllib.parse import urlsplit
 
 PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
@@ -48,13 +49,32 @@ def same_endpoint(left: str, right: str) -> bool:
         return False
 
 
-def public_provider_host(hostname: str) -> str | None:
-    """Return a known public provider host that air-gap mode must refuse."""
-    hostname = hostname.lower().rstrip(".")
-    for public_host in ("api.openai.com", "api.anthropic.com"):
-        if hostname == public_host or hostname.endswith("." + public_host):
-            return public_host
-    return None
+def airgap_host_allowed(hostname: str, allowlist: list[str]) -> bool:
+    """Mirror the API core air-gap classifier for the separate agents image.
+
+    The API service tests this against its canonical egress helper. Hostnames
+    are classified syntactically, without DNS or any network request.
+    """
+    host = hostname.lower().strip()
+    if not host:
+        return False
+    if "." not in host:
+        return True
+    for suffix in (".local", ".internal", ".lan", ".intranet", ".corp", ".home", ".localdomain", "localhost"):
+        if host == suffix.lstrip(".") or host.endswith(suffix):
+            return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified:
+            return True
+    for entry in allowlist:
+        entry_host = entry.strip().lower().split(":", 1)[0]
+        if entry_host and (host == entry_host or host.endswith("." + entry_host)):
+            return True
+    return False
 
 
 def tenant_route(

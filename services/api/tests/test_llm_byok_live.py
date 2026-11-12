@@ -195,6 +195,7 @@ async def _resolve(fixture):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("allowlisted", [False, True])
 @pytest.mark.parametrize(
     ("provider", "base_url", "model"),
     [
@@ -202,13 +203,19 @@ async def _resolve(fixture):
         ("anthropic", "https://api.anthropic.com/v1", "claude-haiku-4-5-20251001"),
     ],
 )
-async def test_hosted_key_only_row_drives_real_status_and_resolver(live_byok, provider, base_url, model):
+async def test_hosted_key_only_row_drives_real_status_and_resolver(live_byok, monkeypatch, provider, base_url, model, allowlisted):
+    if allowlisted:
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "AISOC_AIRGAPPED", True)
+        monkeypatch.setattr(settings, "AISOC_AIRGAP_ALLOWLIST", [f"api.{provider}.com"])
     await _save(live_byok, provider=provider, api_key="tenant-live-fixture-key")
     snap = await _status(live_byok)
     cfg = await _resolve(live_byok)
     assert (snap["base_url"], snap["model"], snap["source"], snap["key_set"]) == (base_url, model, "tenant", True)
     assert (cfg.base_url, cfg.model, cfg.api_key) == (base_url, model, "tenant-live-fixture-key")
     assert cfg.allowed
+    assert snap["effective_path"] == "live" and snap["airgap_compliant"] is True
     assert "tenant-live-fixture-key" not in json.dumps(snap)
     # A second authenticated tenant has no row and retains its own baseline.
     assert (await _status(live_byok, tenant=1))["base_url"] == live_byok["gateway"]
@@ -276,4 +283,41 @@ async def test_disabled_row_returns_to_gateway_without_cross_tenant_override(liv
     cfg = await _resolve(live_byok)
     assert (snap["base_url"], snap["model"], snap["source"]) == (live_byok["gateway"], "aisoc-summary", "environment")
     assert (cfg.base_url, cfg.model, cfg.api_key) == (live_byok["gateway"], "aisoc-summary", "gateway-live-fixture-key")
+    assert not live_byok["requests"]
+
+
+@pytest.mark.asyncio
+async def test_status_redacts_saved_url_secrets_for_a_key_without_settings_scope(live_byok):
+    from app.core.security import hash_api_key
+
+    endpoint = live_byok["endpoint"].replace("http://", "http://url-user:url-secret@") + "?api_key=query-secret#fragment-secret"
+    await _save(live_byok, provider="custom", base_url=endpoint, model="tenant-model", api_key="tenant-live-fixture-key")
+    key = "aisoc_" + secrets.token_hex(32)
+    async with live_byok["owner"].begin() as connection:
+        user_id = (
+            await connection.execute(text("SELECT id FROM users WHERE tenant_id = :tenant"), {"tenant": live_byok["tenants"][0]})
+        ).scalar_one()
+        await connection.execute(
+            text(
+                "INSERT INTO api_keys (id, tenant_id, user_id, name, key_prefix, hashed_key, scopes, is_active) "
+                "VALUES (:id, :tenant, :user_id, 'BYOK status reader', :prefix, :hashed, CAST(:scopes AS jsonb), TRUE)"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "tenant": live_byok["tenants"][0],
+                "user_id": user_id,
+                "prefix": key[:20],
+                "hashed": hash_api_key(key),
+                "scopes": json.dumps(["alerts:read"]),
+            },
+        )
+    headers = {"Authorization": "Bearer " + key}
+    credentials = await live_byok["client"].get("/api/v1/llm/credentials", headers=headers)
+    assert credentials.status_code == 403
+    response = await live_byok["client"].get("/api/v1/llm/status", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["base_url"] == live_byok["endpoint"]
+    for secret in ("url-user", "url-secret", "query-secret", "fragment-secret", "tenant-live-fixture-key"):
+        assert secret not in response.text
+    assert (await _resolve(live_byok)).base_url == endpoint
     assert not live_byok["requests"]
