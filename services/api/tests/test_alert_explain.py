@@ -1072,8 +1072,6 @@ class TestExplanationToPayload:
         # Realistic safety check: the endpoint returns the payload
         # straight to FastAPI which json-encodes it. Anything not
         # JSON-clean would 500 the request.
-        import json
-
         payload = _explanation_to_payload(_stub_explanation())
         round_tripped = json.loads(json.dumps(payload))
         assert round_tripped["alert_id"] == payload["alert_id"]

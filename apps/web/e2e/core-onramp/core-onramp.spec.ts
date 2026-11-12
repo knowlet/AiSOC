@@ -14,7 +14,7 @@ async function signIn(page: Page, destination: string) {
   await page.getByLabel('Email').fill('demo@example.com');
   await page.getByLabel('Password').fill('aisoc-demo');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`${destination.replace(/[?]/g, '\\?')}$`));
+  await expect(page).toHaveURL(new URL(destination, 'http://localhost:3000').href);
 }
 
 async function screenshot(page: Page, name: string) {
