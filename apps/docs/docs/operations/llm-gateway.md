@@ -1,15 +1,16 @@
 ---
 title: LLM gateway (LiteLLM)
-description: Route every live LLM call through a single LiteLLM gateway — assign local or hosted models per task by alias, and get centralized latency/token/cost/error metrics — without changing AiSOC code.
+description: Configure AiSOC's default LLM gateway — assign local or hosted models per task by alias, with centralized latency/token/cost/error metrics for gateway traffic.
 ---
 
 # LLM gateway (LiteLLM)
 
 AiSOC runs several distinct LLM workloads — triage, recon, investigation, the
 contextual copilot, summaries, reports, and natural-language generation. The
-**LiteLLM gateway** is the default route for these live workloads. Tenant
-BYOK and explicit endpoint/model overrides can select a different route. AiSOC asks for a **logical task alias**; the gateway decides
-which real provider and model that alias resolves to.
+**LiteLLM gateway** is the default route for these live workloads. AiSOC asks
+for a **logical task alias**; the gateway decides which real provider and model
+that alias resolves to. Explicit endpoint/model overrides and the tenant BYOK
+paths described below can select a different route.
 
 :::tip Choosing where the model runs
 
@@ -18,10 +19,11 @@ routed to. Where that model physically executes (CPU, an NVIDIA GPU, a host
 Ollama using Apple's Metal, or someone else's datacentre) is a separate
 decision with its own page: [Where the model runs](./where-the-model-runs).
 
-`GET /api/v1/llm/status` answers the first question and
-`GET /api/v1/llm/runtime` answers the second. They disagree more often than
-you would expect, because a GPU reservation is a request rather than a
-guarantee.
+`GET /api/v1/llm/status` reports the client's configured endpoint and model;
+it does not discover the upstream provider behind a gateway. It can report
+`local-litellm` while LiteLLM routes to Bedrock. `GET /api/v1/llm/runtime`
+probes the local Ollama runtime, including whether its loaded model uses GPU
+memory. Neither endpoint proves that a hosted model can complete a request.
 
 :::
 
@@ -38,12 +40,13 @@ This gives operators two things without any AiSOC code change:
    cost, errors, retries, and fallbacks on `/metrics`, scraped by the bundled
    Prometheus (job `aisoc-litellm`). This complements the
    [Investigation Ledger](../concepts/llmops.md), which records *what the agent
-   decided*; the gateway records *what each model call cost and how it behaved*.
+   decided*. Gateway metrics cover calls routed through LiteLLM; direct BYOK
+   calls do not pass through it.
 
-The gateway sits in front of the LLM tier of the
-[multi-model router](../concepts/model-router.md). When no live model is
-reachable, AiSOC still degrades to its **deterministic offline path** — the
-gateway is never on the critical path for a baseline triage.
+The automatic triage worker checks the cost governor, deterministic-mode
+switch and resolved LLM configuration before making a live call. An unavailable
+or failed LLM call falls back to **deterministic triage**. The gateway selects
+the backend for a requested alias; it does not decide which alerts need an LLM.
 
 ## Task aliases
 
@@ -73,16 +76,33 @@ is not proof that a model can answer.
 | Requirement | Configure | Credential used |
 | --- | --- | --- |
 | Local, no account or key | Default `make up` | None upstream |
-| Deployment-wide OpenAI / Anthropic / Bedrock | Host `.env`, then `make llm-reload` | Provider-native credential in LiteLLM |
-| One tenant's BYOK | Settings → Deployment & AI | That tenant's saved provider/endpoint/model/key |
-| One tenant using another LiteLLM gateway | UI's LiteLLM-compatible endpoint, alias, gateway key | Key issued by that gateway |
+| Deployment-wide OpenAI / Anthropic / Bedrock across the bundled aliases | Host `.env`, then `make llm-reload` | Provider-native credential in LiteLLM |
+| One tenant's Explain and automatic alert triage | Settings → Deployment & AI, with an explicit OpenAI-compatible URL, model and key | Key accepted by that endpoint |
+| Those tenant paths through another LiteLLM gateway | Select `local-litellm` or `custom`; supply its OpenAI-compatible URL, served model/alias and gateway key | Key issued by that gateway |
 
-An enabled tenant BYOK configuration can override the deployment route.
-Leave it disabled when the tenant should inherit the bundled gateway's
-Bedrock configuration. The UI does **not** implement a native Bedrock
-provider: do not enter the Bedrock runtime URL or an AWS bearer token as an
-OpenAI-compatible endpoint/key. An external LiteLLM gateway can expose
-Bedrock through its OpenAI-compatible API using a gateway-issued key.
+**Current BYOK scope:** the Explain paths and automatic alert triage read the
+tenant's saved configuration. Copilot and other callers continue to use their
+deployment routing; saving BYOK does not switch every AI feature. Leave BYOK
+disabled when the tenant should inherit the bundled gateway's Bedrock
+configuration. The gateway's FAST/DEEP settings apply to all bundled aliases
+that still route through it.
+
+When changing a tenant's destination, supply the complete URL, model and key
+tuple. The current request-time resolvers inherit deployment values for blank
+fields, despite the UI's provider-default hints. For example, entering only an
+OpenAI key can leave the request pointed at the bundled gateway, which expects
+its own gateway key. Use an explicit OpenAI-compatible URL ending in `/v1`, a
+model served by that endpoint, and its matching credential.
+
+The UI does **not** implement native Bedrock requests. Do not enter a Bedrock
+runtime URL, an AWS bearer token, or a native Anthropic endpoint as an
+OpenAI-compatible BYOK tuple. Configure native Bedrock/Anthropic credentials
+on LiteLLM, which can expose those providers through its OpenAI-compatible
+API. The UI's **Test connection** uses provider-specific defaults and can
+exercise a different transport from the actual Explain/triage request;
+success there alone does not verify that application path. After saving,
+verify a real Explain or automatic triage result. Unifying these BYOK
+resolution and probe paths is a separate change from gateway authentication.
 
 The bundled clients authenticate to LiteLLM using `LITELLM_MASTER_KEY`.
 That key is separate from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
@@ -274,8 +294,9 @@ that exclusion in both directions.
 
 ## Re-point a task to a local model
 
-Duplicate the alias in `infra/litellm/config.yaml` with a local backend. The
-alias name **must stay the same** so AiSOC is unaware of the swap:
+Replace the existing alias's backend in `infra/litellm/config.yaml` with a
+local backend. The alias name **must stay the same** so AiSOC is unaware of
+the swap:
 
 ```yaml
 - model_name: aisoc-triage
