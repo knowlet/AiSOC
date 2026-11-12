@@ -53,6 +53,7 @@ from app.api.v1.endpoints.alert_explain import (
     _acquire_or_429,
     _explanation_to_payload,
 )
+from app.models.alert import Alert
 from app.services.alert_explain import (
     AlertExplanation,
     ContributingEvent,
@@ -880,7 +881,7 @@ class TestGenerateAlertExplanation:
         )
         try:
             with patch("app.services.alert_explain.resolve_llm_config", new=AsyncMock(return_value=cfg)):
-                explanation = await generate_alert_explanation(db, alert=_alert())
+                explanation = await generate_alert_explanation(db, alert=Alert(**vars(_alert())))
         finally:
             server.shutdown()
             server.server_close()

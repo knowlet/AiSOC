@@ -217,6 +217,65 @@ jobs:
       - name: Published figures still match the tree
         run: python3 scripts/project_stats.py --check
 
+      - name: Set up pnpm for the real console
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Install the locked console and browser dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @aisoc/web exec playwright install --with-deps chromium
+
+      # The same API/Postgres/ingest/fusion stack remains running. Next's real
+      # same-origin proxy serves this browser journey; no UI-preview compose,
+      # route mocks, injected session, agents runtime, or paid model is used.
+      - name: Documented smoke, demo, ledger and BYOK console acceptance
+        env:
+          API_URL: http://localhost:8000
+          NEXT_PUBLIC_API_URL: ''
+          AISOC_ONRAMP_ARTIFACTS: ${{ github.workspace }}/artifacts/core-onramp
+          AISOC_TEST_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          pnpm --filter @aisoc/web dev > /tmp/core-onramp-web.log 2>&1 &
+          web_pid=$!
+          trap 'kill "$web_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 45); do
+            curl --fail --silent --max-time 5 http://localhost:3000/login >/dev/null && break
+            sleep 2
+          done
+          curl --fail --silent --max-time 30 http://localhost:3000/login >/dev/null
+          make smoke
+          make demo
+          mkdir -p "$AISOC_ONRAMP_ARTIFACTS"
+          # Observe the documented provenance flag where the seed actually
+          # persists it; a missing field is JSON null, not invented API data.
+          docker compose exec -T postgres psql -U aisoc -d aisoc -v ON_ERROR_STOP=1 -At \
+            > "$AISOC_ONRAMP_ARTIFACTS/synthetic-seed-database-observation.json" <<'SQL'
+          SELECT json_build_object(
+            'case_id', c.id, 'case_number', c.case_number,
+            'is_synthetic', to_jsonb(c)->'is_synthetic', 'tags', to_jsonb(c)->'tags',
+            'runs', (SELECT coalesce(json_agg(json_build_object('id', r.id, 'case_id', r.case_id)), '[]')
+              FROM investigation_runs r WHERE r.tenant_id = c.tenant_id
+                AND r.case_id IN (c.id::text, c.case_number)))
+          FROM aisoc_cases c WHERE c.tenant_id = '00000000-0000-0000-0000-0000000000de'
+            AND c.case_number = 'INC-RT-001';
+          SQL
+          pnpm --filter @aisoc/web exec playwright test --config=e2e/core-onramp/playwright.config.ts
+
+      - name: Retain real-stack synthetic screenshots and observations
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: core-onramp-synthetic-${{ github.run_id }}
+          path: artifacts/core-onramp/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -224,7 +283,9 @@ jobs:
           for s in kafka ingest-worker fusion api; do
             echo "── $s ──"; docker compose logs --tail=60 "$s" || true
           done
+          tail -100 /tmp/core-onramp-web.log 2>/dev/null || true
 
       - name: Tear down
         if: always()
         run: docker compose down -v || true
+

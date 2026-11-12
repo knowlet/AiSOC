@@ -760,7 +760,7 @@ class TestGatewayTenantRouting:
 
         vault = get_vault()
         assert vault is not None
-        row = {
+        row: dict[str, Any] = {
             "provider": provider,
             "base_url": None,
             "model": None,
@@ -781,7 +781,7 @@ class TestGatewayTenantRouting:
         gateway = "http://litellm:4000/v1"
         monkeypatch.setenv("LLM_GATEWAY_URL", gateway)
         monkeypatch.setenv("LITELLM_MASTER_KEY", "gateway-test-key")
-        row = {
+        row: dict[str, Any] = {
             "provider": "custom",
             "base_url": gateway + "/" if same_destination else "https://tenant.example/v1",
             "model": "aisoc-triage" if same_destination else "tenant-model",

@@ -193,7 +193,7 @@ def make_chat_model(
     override = _llm_override.get()
     model = (override or {}).get("model") or resolve_model_alias(role)
     base_url = (override or {}).get("base_url") or resolve_base_url(model)
-    direct_anthropic = bool(base_url) and (urlsplit(base_url).hostname or "").lower().rstrip(".") == "api.anthropic.com"
+    direct_anthropic = base_url is not None and (urlsplit(base_url).hostname or "").lower().rstrip(".") == "api.anthropic.com"
     # The direct compatibility API rejects json_object, and newer Claude
     # models reject non-default temperature. Gateway routes retain their
     # provider translation/drop_params behavior.
