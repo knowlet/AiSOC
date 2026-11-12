@@ -19,6 +19,7 @@ import unittest
 import urllib.error
 import urllib.request
 import uuid
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -52,10 +53,53 @@ def _inside(case: str) -> None:
 
     provider = case.split("-", 1)[0]
     requests: list[tuple[str, dict, dict]] = []
+    metadata_requests: list[tuple[str, str, dict]] = []
 
     class Backend(BaseHTTPRequestHandler):
         def log_message(self, *_args) -> None:
             pass
+
+        def reply(self, status: int, result: dict | str, extra_headers: dict | None = None) -> None:
+            data = json.dumps(result).encode() if isinstance(result, dict) else result.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json" if isinstance(result, dict) else "text/plain")
+            self.send_header("Content-Length", str(len(data)))
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_PUT(self) -> None:
+            metadata_requests.append(("PUT", self.path, dict(self.headers.items())))
+            if self.path != "/latest/api/token" or not self.headers.get("x-aws-ec2-metadata-token-ttl-seconds"):
+                self.send_error(400, "Unexpected metadata token request")
+                return
+            self.reply(200, "fixture-imds-token")
+
+        def do_GET(self) -> None:
+            metadata_requests.append(("GET", self.path, dict(self.headers.items())))
+            # Refuse IMDSv1: success must use the actual botocore IMDSv2 flow.
+            if self.headers.get("x-aws-ec2-metadata-token") != "fixture-imds-token":
+                self.send_error(401, "IMDSv2 token required")
+                return
+            if self.path == "/latest/meta-data/iam/security-credentials/":
+                self.reply(200, "fixture-role")
+            elif self.path == "/latest/meta-data/iam/security-credentials/fixture-role":
+                now = datetime.now(UTC)
+                self.reply(
+                    200,
+                    {
+                        "Code": "Success",
+                        "LastUpdated": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "Type": "AWS-HMAC",
+                        "AccessKeyId": "fixture-imds-access",
+                        "SecretAccessKey": "fixture-imds-secret",
+                        "Token": "fixture-imds-session",
+                        "Expiration": (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                )
+            else:
+                self.send_error(400, "Unexpected metadata request")
 
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -81,6 +125,9 @@ def _inside(case: str) -> None:
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 }
             elif self.path.endswith("/converse"):
+                if case == "bedrock-bearer-denied":
+                    self.reply(403, {"message": "fixture access denied"}, {"x-amzn-ErrorType": "AccessDeniedException"})
+                    return
                 result = {
                     "output": {"message": {"role": "assistant", "content": [{"text": "fixture-ok"}]}},
                     "stopReason": "end_turn",
@@ -102,12 +149,7 @@ def _inside(case: str) -> None:
             else:
                 self.send_error(400, "Unexpected fixture path")
                 return
-            data = json.dumps(result).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self.reply(200, result)
 
     backend = ThreadingHTTPServer(("127.0.0.1", 0), Backend)
     thread = threading.Thread(target=backend.serve_forever, daemon=True)
@@ -122,17 +164,28 @@ def _inside(case: str) -> None:
         "AISOC_LLM_MODEL_DEEP": MODELS[provider],
         "AISOC_LLM_API_BASE": f"http://127.0.0.1:{backend.server_port}" + ("/v1" if provider == "openai" else ""),
         "AISOC_LITELLM_REQUEST_TIMEOUT": "5",
-        "AWS_EC2_METADATA_DISABLED": "true",
-        "AWS_REGION": "us-east-1",
+        "AWS_EC2_METADATA_DISABLED": "false" if case in {"bedrock-imds", "bedrock-bearer-imds", "bedrock-bearer-denied"} else "true",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT": f"http://127.0.0.1:{backend.server_port}",
+        "AWS_EC2_METADATA_V1_DISABLED": "true",
+        "AWS_REGION": "" if case == "bedrock-profile" else "us-east-1",
+        "AWS_REGION_NAME": "",
+        "AWS_DEFAULT_REGION": "",
         "AWS_PROFILE_NAME": "",
-        "AWS_PROFILE": "",
+        "AWS_PROFILE": "aisoc-fixture" if case == "bedrock-profile" else "",
+        "AWS_CONFIG_FILE": "",
+        "AWS_SHARED_CREDENTIALS_FILE": "",
         "AWS_BEARER_TOKEN_BEDROCK": "fixture-bedrock" if "bearer" in case else "",
-        "AWS_ACCESS_KEY_ID": "fixture-access" if case == "bedrock-sigv4" else "",
-        "AWS_SECRET_ACCESS_KEY": "fixture-secret" if case == "bedrock-sigv4" else "",
-        "AWS_SESSION_TOKEN": "fixture-session" if case == "bedrock-sigv4" else "",
+        "AWS_ACCESS_KEY_ID": "fixture-access" if case in {"bedrock-sigv4", "bedrock-bearer-denied"} else "",
+        "AWS_SECRET_ACCESS_KEY": "fixture-secret" if case in {"bedrock-sigv4", "bedrock-bearer-denied"} else "",
+        "AWS_SESSION_TOKEN": "fixture-session" if case in {"bedrock-sigv4", "bedrock-bearer-denied"} else "",
         "OPENAI_API_KEY": "fixture-openai" if case in {"openai", "anthropic", "bedrock-bearer-conflict"} else "",
         "ANTHROPIC_API_KEY": "fixture-anthropic" if provider == "anthropic" else "",
     }
+    if case == "bedrock-bearer-empty-endpoint":
+        # Exercise config env resolution and actual HTTP, without reaching AWS.
+        # The separate default-endpoint case checks the SDK's regional URL.
+        env["AWS_BEDROCK_RUNTIME_ENDPOINT"] = env["AISOC_LLM_API_BASE"]
+        env["AISOC_LLM_API_BASE"] = ""
     try:
         with tempfile.TemporaryFile(mode="w+") as logs:
             process = subprocess.Popen(
@@ -161,6 +214,26 @@ def _inside(case: str) -> None:
                     ).encode(),
                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {MASTER}"},
                 )
+                if case in {"bedrock-imds-disabled", "bedrock-bearer-denied"}:
+                    try:
+                        with urllib.request.urlopen(request, timeout=30) as response:
+                            raise AssertionError(f"Expected authentication failure, got {response.status}")
+                    except urllib.error.HTTPError as error:
+                        detail = error.read().decode()
+                        assert error.code >= 400
+                        if case == "bedrock-imds-disabled":
+                            assert "credential" in detail.lower(), detail
+                            assert not requests, "A provider request was sent with no credentials"
+                        else:
+                            assert "fixture access denied" in detail, detail
+                            assert requests, "The denying provider was not contacted"
+                            for _path, sent_headers, _body in requests:
+                                sent_headers = {name.lower(): value for name, value in sent_headers.items()}
+                                assert sent_headers["authorization"] == "Bearer fixture-bedrock", (
+                                    "Denied bearer fell back to another identity"
+                                )
+                        assert not metadata_requests, "Authentication unexpectedly queried IMDS"
+                    return
                 with urllib.request.urlopen(request, timeout=30) as response:
                     assert json.load(response)["choices"][0]["message"]["content"] == "fixture-ok"
                 assert requests, "No provider request reached the fixture"
@@ -176,11 +249,23 @@ def _inside(case: str) -> None:
                     if "bearer" in case:
                         assert headers["authorization"] == "Bearer fixture-bedrock"
                     else:
-                        assert headers["authorization"].startswith("AWS4-HMAC-SHA256 Credential=fixture-access/")
-                        assert "/us-east-1/bedrock/aws4_request" in headers["authorization"]
-                        assert headers["x-amz-security-token"] == "fixture-session"
+                        identity = (
+                            "fixture-profile" if case == "bedrock-profile" else "fixture-imds" if case == "bedrock-imds" else "fixture"
+                        )
+                        region = "us-west-1" if case == "bedrock-profile" else "us-east-1"
+                        assert headers["authorization"].startswith(f"AWS4-HMAC-SHA256 Credential={identity}-access/")
+                        assert f"/{region}/bedrock/aws4_request" in headers["authorization"]
+                        assert headers["x-amz-security-token"] == f"{identity}-session"
                 else:
                     assert path.endswith("/api/chat")
+                if case == "bedrock-imds":
+                    assert [(method, path) for method, path, _headers in metadata_requests] == [
+                        ("PUT", "/latest/api/token"),
+                        ("GET", "/latest/meta-data/iam/security-credentials/"),
+                        ("GET", "/latest/meta-data/iam/security-credentials/fixture-role"),
+                    ]
+                else:
+                    assert not metadata_requests, "Available credentials unexpectedly queried IMDS"
             except Exception:
                 logs.seek(0)
                 print(logs.read()[-12000:])  # Only fixed fixture credentials exist in this isolated container.
@@ -213,11 +298,25 @@ class GatewayHTTPTests(unittest.TestCase):
         ):
             command.extend(["--mount", f"type=bind,source={source},target={target},readonly"])
         command += ["-e", "LITELLM_LOCAL_MODEL_COST_MAP=True", "-e", "DO_NOT_TRACK=True", "-e", "AWS_EC2_METADATA_DISABLED=true"]
-        try:
-            result = subprocess.run([*command, image, "/fixture/test.py", "--inside", case], capture_output=True, text=True, timeout=180)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        finally:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15, check=False)
+        with tempfile.TemporaryDirectory(prefix="aisoc-aws-fixture-") as profile_dir:
+            if case == "bedrock-profile":
+                # This is a real read-only host-directory mount, like the overlay.
+                # It contains only fixed fixture credentials, never the host's AWS files.
+                profile = Path(profile_dir)
+                (profile / "config").write_text("[profile aisoc-fixture]\nregion = us-west-1\n", encoding="utf-8")
+                (profile / "credentials").write_text(
+                    "[aisoc-fixture]\naws_access_key_id = fixture-profile-access\n"
+                    "aws_secret_access_key = fixture-profile-secret\naws_session_token = fixture-profile-session\n",
+                    encoding="utf-8",
+                )
+                command.extend(["--mount", f"type=bind,source={profile},target=/root/.aws,readonly"])
+            try:
+                result = subprocess.run(
+                    [*command, image, "/fixture/test.py", "--inside", case], capture_output=True, text=True, timeout=180
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            finally:
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15, check=False)
 
     def test_ollama_without_provider_key(self):
         self.run_image("ollama")
@@ -236,6 +335,24 @@ class GatewayHTTPTests(unittest.TestCase):
 
     def test_bedrock_native_credentials(self):
         self.run_image("bedrock-sigv4")
+
+    def test_bedrock_existing_host_profile_with_metadata_disabled(self):
+        self.run_image("bedrock-profile")
+
+    def test_bedrock_instance_role_uses_imdsv2_without_explicit_credentials(self):
+        self.run_image("bedrock-imds")
+
+    def test_bedrock_metadata_disabled_prevents_instance_role_lookup(self):
+        self.run_image("bedrock-imds-disabled")
+
+    def test_bedrock_bearer_skips_enabled_metadata(self):
+        self.run_image("bedrock-bearer-imds")
+
+    def test_denied_bedrock_bearer_does_not_fall_back_to_sigv4(self):
+        self.run_image("bedrock-bearer-denied")
+
+    def test_blank_endpoint_resolves_through_proxy_config(self):
+        self.run_image("bedrock-bearer-empty-endpoint")
 
     def test_blank_bedrock_endpoint_uses_native_default(self):
         self.run_image("default-endpoint")
