@@ -15,11 +15,11 @@ START = ROOT / "infra/litellm/start.py"
 CONFIG = ROOT / "infra/litellm/config.yaml"
 
 
-def launch(env: dict[str, str]) -> tuple[list, dict[str, str]]:
-    captured = {}
+def launch(env: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+    captured: list[tuple[str, list[str], dict[str, str]]] = []
 
-    def execv(path, args):
-        captured.update(path=path, args=args, env=dict(os.environ))
+    def execv(path: str, args: list[str]) -> None:
+        captured.append((path, args, dict(os.environ)))
 
     with (
         patch.dict(os.environ, env, clear=True),
@@ -27,8 +27,10 @@ def launch(env: dict[str, str]) -> tuple[list, dict[str, str]]:
         patch("os.execv", execv),
     ):
         runpy.run_path(str(START), run_name="__main__")
-    assert captured["path"] == "/app/docker/prod_entrypoint.sh"
-    return captured["args"], captured["env"]
+    assert len(captured) == 1
+    path, args, captured_env = captured[0]
+    assert path == "/app/docker/prod_entrypoint.sh"
+    return args, captured_env
 
 
 @pytest.mark.parametrize("blank", ["", " ", "\t\n"])
