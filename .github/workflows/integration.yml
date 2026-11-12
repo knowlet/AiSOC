@@ -857,7 +857,7 @@ jobs:
       - name: Seeded showcase linkage and provenance (live PostgreSQL)
         working-directory: services/api
         env:
-          # aisoc-db-role: owner — the demo seed is an administrative data writer
+          # The seed uses this migration job's administrative connection.
           AISOC_DEMO_ONRAMP_REQUIRED: '1'
         run: |
           set -euo pipefail
