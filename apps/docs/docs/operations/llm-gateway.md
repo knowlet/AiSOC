@@ -94,20 +94,35 @@ OpenAI key can leave the request pointed at the bundled gateway, which expects
 its own gateway key. Use an explicit OpenAI-compatible URL ending in `/v1`, a
 model served by that endpoint, and its matching credential.
 
-The UI does **not** implement native Bedrock requests. Do not enter a Bedrock
-runtime URL, an AWS bearer token, or a native Anthropic endpoint as an
-OpenAI-compatible BYOK tuple. Configure native Bedrock/Anthropic credentials
-on LiteLLM, which can expose those providers through its OpenAI-compatible
-API. The UI's **Test connection** uses provider-specific defaults and can
-exercise a different transport from the actual Explain/triage request;
-success there alone does not verify that application path. After saving,
-verify a real Explain or automatic triage result. Unifying these BYOK
-resolution and probe paths is a separate change from gateway authentication.
+The UI does **not** implement native Bedrock Converse/Invoke requests or AWS
+SigV4 signing. A raw regional Bedrock runtime URL or native Anthropic endpoint
+is not an OpenAI Chat Completions base. For Anthropic on Bedrock, configure
+native credentials on LiteLLM and use its OpenAI-compatible API.
+
+Bedrock also offers a separate [OpenAI-compatible Chat Completions API](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html).
+For a model that supports it, an explicit `custom` BYOK tuple can use
+`https://bedrock-runtime.<region>.amazonaws.com/openai/v1`, the model ID
+supported on that endpoint, and a Bedrock API key. The key is valid for that
+explicit AWS endpoint; it must not become a generic key on every native
+gateway alias. This path uses bearer authentication, not automatic IAM-role
+credentials. Check the [model/API compatibility table](https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html)
+and the model card: Anthropic models are not listed as Chat Completions
+compatible. Bedrock runtime also has no OpenAI-compatible `GET /models`;
+enter the model ID explicitly. This direct tuple is based on the documented
+protocol and still requires a real Explain/triage acceptance test in the
+target AWS account.
+
+The UI's **Test connection** uses provider-specific defaults and can exercise
+a different transport from the actual Explain/triage request; success there
+alone does not verify that application path. After saving, verify a real
+Explain or automatic triage result. Unifying these BYOK resolution and probe
+paths is a separate change from gateway authentication.
 
 The bundled clients authenticate to LiteLLM using `LITELLM_MASTER_KEY`.
 That key is separate from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
 `AWS_BEARER_TOKEN_BEDROCK`, which authenticate LiteLLM to upstream providers.
-Do not copy a provider credential into another provider's variable.
+For this native gateway configuration, keep each provider's credential in its
+own variable.
 
 ### OpenAI or Anthropic deployment defaults
 

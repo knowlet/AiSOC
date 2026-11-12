@@ -18,6 +18,7 @@ startup wrapper.
 | Option | Assessment |
 | --- | --- |
 | Existing LiteLLM native credentials | Chosen. Already supports provider keys, Bedrock bearer tokens and AWS SDK credentials; preserves the public aliases and local default. |
+| Bedrock OpenAI-compatible `custom` BYOK | Conditional alternative for models supporting Chat Completions on the chosen endpoint. Uses an explicit URL/model/Bedrock-key tuple; it does not add IAM signing or make Anthropic compatible. |
 | Native Bedrock provider in tenant BYOK | Separate feature. The current provider enum and probe do not implement Bedrock. A complete implementation would need coordinated schema, probe, discovery and runtime-dispatch changes. |
 | Replace or upgrade the gateway | Unnecessary for this correction. A newer upstream release fixes empty endpoints, but a version change adds unrelated compatibility risk. Normalize the existing configuration boundary instead. |
 
@@ -67,9 +68,19 @@ workload. To inherit deployment-wide Bedrock, leave that override disabled.
 For an independently configured gateway, use the existing LiteLLM-compatible
 URL, alias and gateway key as a complete tuple. Blank fields inherit deployment
 values in the request-time resolvers. The current custom-provider probe sends
-an OpenAI-compatible request; entering a Bedrock runtime URL and AWS token
-there does not add native Bedrock support. Probe success does not establish
-that the actual Explain or triage path uses the same configuration.
+an OpenAI Chat Completions request; entering the raw Bedrock runtime root does
+not add native Converse/Invoke support or SigV4 signing. Probe success does
+not establish that the actual Explain or triage path uses the same configuration.
+
+AWS separately documents [OpenAI-compatible Chat Completions][R12] on the
+runtime endpoint's `/openai/v1` base. For supported models, this makes an
+explicit custom URL/model/Bedrock-API-key tuple a protocol-compatible option
+without adding a native provider. This is an inference from the documented
+API and AiSOC's request construction, not live-account acceptance evidence.
+The [API compatibility table][R13] lists Anthropic models as unsupported for
+Chat Completions, so their selected native Bedrock route still needs the
+gateway. Check each model's endpoint/Region support; runtime model discovery
+through `GET /models` is unavailable, so the model ID must be supplied.
 
 ## Verification and limits
 
@@ -92,8 +103,7 @@ verification must be reported separately from these isolated checks.
 The inspected LiteLLM files are outside `enterprise/` and covered by the
 pinned [MIT license][R11]. This change uses the existing dependency and
 references its behavior; it does not vendor upstream implementation code.
-All external links below were retrieved successfully with HTTP 200 on the
-research date. Runtime test results belong in the verification record for the
+The external sources below were inspected on the research date. Runtime test results belong in the verification record for the
 actual tested commit.
 
 [R1]: https://github.com/BerriAI/litellm/blob/d09bbae1c6df463e425558f60d460437193635da/litellm/llms/bedrock/base_aws_llm.py
@@ -107,3 +117,5 @@ actual tested commit.
 [R9]: https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html
 [R10]: https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html
 [R11]: https://github.com/BerriAI/litellm/blob/d09bbae1c6df463e425558f60d460437193635da/LICENSE
+[R12]: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html
+[R13]: https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html
