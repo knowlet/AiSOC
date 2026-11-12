@@ -1724,6 +1724,10 @@ jobs:
           # Full history + tags so we can check out the released migration set.
           fetch-depth: 0
           fetch-tags: true
+      # Forks do not inherit the canonical repository's release tags.
+      - name: Fetch canonical release tags for fork checks
+        if: github.event.repository.fork
+        run: git fetch --no-tags https://github.com/beenuar/AiSOC.git 'refs/tags/v*:refs/tags/v*'
 
       - name: Start PostgreSQL with registry fallback
         uses: ./.github/actions/start-postgres
