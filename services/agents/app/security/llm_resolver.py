@@ -39,9 +39,10 @@ Resolution rules (must match :func:`tenant_llm_status` in services/api)
 
 For each of the three fields we resolve in this order:
 
-1. Tenant row (when present, ``enabled=true``, and successfully
-   decrypted in the ``api_key_vault`` case).
-2. Process env vars (``OPENAI_*`` / ``LLM_*``).
+1. Tenant row (when present and enabled), including the selected hosted
+   provider's default endpoint/model for blank fields.
+2. Process env vars (``OPENAI_*`` / ``LLM_*``). An environment API key
+   can be inherited only when it belongs to the same endpoint.
 3. Platform default — the bundled gateway and the ``summary`` alias when a
    gateway is configured, ``https://api.openai.com`` / ``gpt-4o-mini``
    otherwise — so the explain path always has a deterministic config to log
@@ -62,10 +63,10 @@ Failure modes
 -------------
 
 This module is on the explain hot path, so every failure is best-
-effort: a missing ``DATABASE_URL``, an unreachable database, an
-unconfigured ``AISOC_CREDENTIAL_KEY``, a corrupt ciphertext, or a
-tenant row with ``enabled=false`` all degrade gracefully to the env-
-only baseline. The reason for the degradation is logged once at
+effort: a missing ``DATABASE_URL``, an unreachable database, or a
+tenant row with ``enabled=false`` degrades to the environment baseline.
+A missing vault key or corrupt ciphertext can use an environment key only
+for the same endpoint; a different tenant endpoint is refused. The reason for the degradation is logged once at
 ``warning`` so an operator can spot misconfiguration, but the alert
 drawer never errors out — it just renders the deterministic
 fallback summary, exactly the same surface analysts already see when
@@ -82,8 +83,8 @@ from urllib.parse import urlparse
 
 import asyncpg
 import structlog
-
 from app.llm.routing import gateway_url, is_gateway_alias, resolve_api_key
+from app.llm.tenant_routing import public_provider_host, tenant_route
 from app.security.credential_vault import CredentialVaultError, get_vault
 
 # NOTE: ``app.investigator.ledger`` is imported lazily inside
@@ -223,8 +224,9 @@ def _airgap_blocks(base_url: str) -> tuple[bool, str]:
         hostname = ""
     # Check hostname exactly or as a subdomain to avoid substring-match bypass
     # (e.g. evil.com/api.openai.com or api.openai.com.evil.com).
-    if hostname == "api.openai.com" or hostname.endswith(".api.openai.com"):
-        return True, "AISOC_AIRGAPPED is on and base_url points at api.openai.com."
+    public_host = public_provider_host(hostname)
+    if public_host:
+        return True, f"AISOC_AIRGAPPED is on and base_url points at {public_host}."
     return False, ""
 
 
@@ -374,22 +376,26 @@ async def resolve_llm_config(tenant_ref: str | None) -> LlmConfig:
         if pool is not None:
             row = await _fetch_tenant_credential(pool, tenant_ref)
             if row is not None:
-                if row.get("base_url"):
-                    base_url = row["base_url"]
-                    tenant_contributed_base_url = True
-                if row.get("model"):
-                    model = row["model"]
-                    tenant_contributed_model = True
+                base_url, model, tenant_contributed_base_url, tenant_contributed_model, inherit_env_key = tenant_route(
+                    provider=row.get("provider", ""),
+                    base_url=row.get("base_url"),
+                    model=row.get("model"),
+                    env_base=env_base_url,
+                    env_model=env_model,
+                )
+                if not inherit_env_key:
+                    # Do not send the gateway master/provider environment key
+                    # to a destination selected by a tenant.
+                    api_key = None
+                    env_key = None
                 vault_token = row.get("api_key_vault")
                 if vault_token:
                     api_key = _decrypt_vault_token(vault_token, tenant_ref)
                     if api_key is not None:
                         tenant_contributed_key = True
                     else:
-                        # Decrypt failed (already logged) — fall back to
-                        # the env key so a corrupt tenant ciphertext
-                        # doesn't break a tenant that also has a working
-                        # env baseline.
+                        # Fall back only to an environment key belonging to
+                        # this endpoint; a different destination has no key.
                         api_key = env_key
 
     source = _classify_source(
@@ -411,7 +417,7 @@ async def resolve_llm_config(tenant_ref: str | None) -> LlmConfig:
             model=final_model,
             api_key=None,
             source=source if source != "none" else "none",
-            reason="no API key configured (neither tenant BYOK nor env)",
+            reason="no API key configured for this endpoint (neither tenant BYOK nor matching environment credentials)",
             model_from_tenant=tenant_contributed_model,
             base_url_from_tenant=tenant_contributed_base_url,
             api_key_from_tenant=tenant_contributed_key,

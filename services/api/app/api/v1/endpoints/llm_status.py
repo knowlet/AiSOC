@@ -57,10 +57,6 @@ import os
 import uuid
 from urllib.parse import urlparse
 
-from fastapi import APIRouter
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.api.v1.deps import AuthUser
 from app.core.airgap import is_host_allowed_for_airgap
 from app.core.config import settings
@@ -68,7 +64,11 @@ from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
 from app.services import llm_health
 from app.services.llm_runtime import probe as probe_runtime
+from app.services.llm_tenant_routing import tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
+from fastapi import APIRouter
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
@@ -146,8 +146,8 @@ def _env_baseline() -> tuple[str, str, bool]:
     a tuple rather than a dict so callers can immediately layer
     overrides on top by name.
     """
-    base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or ""
-    model = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("AISOC_LLM_MODEL") or ""
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or os.getenv("LLM_BASE_URL", "").strip()
+    model = os.getenv("OPENAI_MODEL", "").strip() or os.getenv("LLM_MODEL", "").strip() or os.getenv("AISOC_LLM_MODEL", "").strip()
     if not base_url and gateway_url() and is_gateway_alias(model or "aisoc-summary"):
         # The indicator has to describe the route the explain path will
         # actually take, and that path now adopts the compose-provided gateway
@@ -313,11 +313,11 @@ async def tenant_llm_status(
     Layers values from ``tenant_llm_credentials`` on top of the env
     baseline. Resolution rules per field:
 
-    * ``base_url``  → tenant value if set, else env baseline.
-    * ``model``     → tenant value if set, else env baseline.
-    * ``key_set``   → ``True`` when the tenant row carries a vault token
-      *or* the env baseline has one. The vault token is decrypted only
-      to validate it, never returned.
+    * ``base_url`` / ``model`` → tenant values, then the selected hosted
+      provider's defaults, then the environment baseline.
+    * ``key_set`` → a decryptable tenant key, or an environment key for
+      this same endpoint. A deployment credential never follows a tenant
+      override to a different destination. Plaintext is never returned.
 
     The returned ``source`` field reports the layering result:
 
@@ -349,21 +349,16 @@ async def tenant_llm_status(
     tenant_contributed = False
     env_contributed = False
 
-    if cred.base_url:
-        base_url = cred.base_url
-        tenant_contributed = True
-    else:
-        base_url = env_base_url
-        if env_base_url:
-            env_contributed = True
-
-    if cred.model:
-        model = cred.model
-        tenant_contributed = True
-    else:
-        model = env_model
-        if env_model:
-            env_contributed = True
+    base_url, model, tenant_base, tenant_model, inherit_env_key = tenant_route(
+        provider=cred.provider,
+        base_url=cred.base_url,
+        model=cred.model,
+        env_base=env_base_url,
+        env_model=env_model,
+    )
+    tenant_contributed = tenant_base or tenant_model
+    env_contributed = (not tenant_base and bool(env_base_url)) or (not tenant_model and bool(env_model))
+    env_key_set = env_key_set and inherit_env_key
 
     tenant_key_set = False
     if cred.api_key_vault:

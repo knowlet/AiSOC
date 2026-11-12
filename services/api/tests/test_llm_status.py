@@ -134,15 +134,15 @@ class TestProviderClassification:
         assert snap["provider"] == "local-vllm"
         assert snap["is_local"] is True
 
-    def test_lm_alias_takes_precedence_over_openai_alias(self, monkeypatch: pytest.MonkeyPatch):
-        # If both are set, LLM_BASE_URL wins to match the precedence in
-        # ``services/api/app/core/config.py``.
+    def test_status_matches_runtime_openai_alias_precedence(self, monkeypatch: pytest.MonkeyPatch):
+        # The resolver and role routing prefer OPENAI_BASE_URL when both
+        # aliases are set. The status must describe the route actually used.
         monkeypatch.setenv("LLM_BASE_URL", "http://ollama:11434/v1")
         monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         monkeypatch.setenv("LLM_API_KEY", "x")
         snap = llm_status()
-        assert snap["provider"] == "local-ollama"
-        assert snap["base_url"] == "http://ollama:11434/v1"
+        assert snap["provider"] == "openai"
+        assert snap["base_url"] == "https://api.openai.com/v1"
 
 
 class TestAirgapCompliance:

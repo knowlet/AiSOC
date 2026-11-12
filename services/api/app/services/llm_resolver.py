@@ -18,9 +18,10 @@ Resolution rules (must match the agents resolver exactly)
 ---------------------------------------------------------
 1.  Pull the env baseline (``OPENAI_BASE_URL`` / ``OPENAI_MODEL`` /
     ``OPENAI_API_KEY``, plus the modern ``LLM_*`` aliases).
-2.  Look up ``tenant_llm_credentials`` for this tenant. If a row
-    exists and ``enabled=true``, layer non-NULL fields over the env
-    baseline and decrypt the ciphertext via :class:`CredentialVault`.
+2.  Look up the enabled ``tenant_llm_credentials`` row. Hosted providers
+    use their own default endpoint/model when the tenant leaves them blank.
+    An environment credential is inherited only for the same API endpoint;
+    a tenant-selected destination otherwise needs its own usable key.
 3.  Apply air-gap policy: when ``AISOC_AIRGAPPED`` is on, only allow
     base URLs that point at a non-``api.openai.com`` host.
 4.  Return an :class:`LlmConfig` describing whether a live call is
@@ -40,12 +41,12 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
+from app.services.llm_tenant_routing import public_provider_host, tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -145,8 +146,9 @@ def _airgap_blocks(base_url: str) -> tuple[bool, str]:
         hostname = ""
     # Exact hostname or subdomain match — substring matching would
     # let ``evil.com/api.openai.com`` slip through.
-    if hostname == "api.openai.com" or hostname.endswith(".api.openai.com"):
-        return True, "AISOC_AIRGAPPED is on and base_url points at api.openai.com."
+    public_host = public_provider_host(hostname)
+    if public_host:
+        return True, f"AISOC_AIRGAPPED is on and base_url points at {public_host}."
     return False, ""
 
 
@@ -241,20 +243,26 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
         logger.warning("explain.llm_resolve_db_failed tenant=%s error=%s", tenant_id, exc)
         cred = None
 
-    if cred is not None:
-        if cred.base_url:
-            base_url = cred.base_url
-            tenant_contributed_base_url = True
-        if cred.model:
-            model = cred.model
-            tenant_contributed_model = True
+    if cred is not None and cred.enabled:
+        base_url, model, tenant_contributed_base_url, tenant_contributed_model, inherit_env_key = tenant_route(
+            provider=cred.provider,
+            base_url=cred.base_url,
+            model=cred.model,
+            env_base=env_base_url,
+            env_model=env_model,
+        )
+        if not inherit_env_key:
+            # A tenant-controlled destination must never receive the bundled
+            # gateway master key or a different provider's environment key.
+            api_key = None
+            env_key = None
         if cred.api_key_vault:
             decrypted = _decrypt_vault_token(cred.api_key_vault, tenant_id)
             if decrypted is not None:
                 api_key = decrypted
                 tenant_contributed_key = True
-            # else: fall through to env_key — corrupt tenant ciphertext
-            # should not break a tenant that has a working env baseline.
+            # A failed decrypt may use an environment key only when it
+            # belongs to this same endpoint. Otherwise the call is refused.
 
     source = _classify_source(
         env_base_url=env_base_url,
@@ -275,7 +283,7 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
             model=final_model,
             api_key=None,
             source=source,
-            reason="no API key configured (neither tenant BYOK nor env)",
+            reason="no API key configured for this endpoint (neither tenant BYOK nor matching environment credentials)",
             model_from_tenant=tenant_contributed_model,
             base_url_from_tenant=tenant_contributed_base_url,
             api_key_from_tenant=tenant_contributed_key,
