@@ -10,8 +10,16 @@ from urllib.parse import urlsplit
 
 PROVIDER_DEFAULTS: dict[str, tuple[str, str]] = {
     "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
-    "anthropic": ("https://api.anthropic.com/v1", "claude-3-5-haiku-20241022"),
+    "anthropic": ("https://api.anthropic.com/v1", "claude-haiku-4-5-20251001"),
 }
+
+
+def allows_unauthenticated(provider: str, base_url: str | None, has_stored_key: bool) -> bool:
+    """Local/custom endpoints can deliberately run without authentication.
+
+    An unreadable configured key is not an instruction to disable auth.
+    """
+    return bool(base_url) and not has_stored_key and provider in {"local-ollama", "local-vllm", "local-litellm", "custom"}
 
 
 def same_endpoint(left: str, right: str) -> bool:

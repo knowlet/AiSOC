@@ -41,12 +41,13 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from app.models.llm_credential import TenantLlmCredential
-from app.security.credential_vault import CredentialVaultError, get_vault
-from app.services.llm_tenant_routing import public_provider_host, tenant_route
-from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.llm_credential import TenantLlmCredential
+from app.security.credential_vault import CredentialVaultError, get_vault
+from app.services.llm_tenant_routing import allows_unauthenticated, public_provider_host, tenant_route
+from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
     tenant_contributed_base_url = False
     tenant_contributed_model = False
     tenant_contributed_key = False
+    allows_no_auth = False
 
     try:
         result = await db.execute(
@@ -256,6 +258,7 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
             # gateway master key or a different provider's environment key.
             api_key = None
             env_key = None
+        allows_no_auth = allows_unauthenticated(cred.provider, cred.base_url, bool(cred.api_key_vault))
         if cred.api_key_vault:
             decrypted = _decrypt_vault_token(cred.api_key_vault, tenant_id)
             if decrypted is not None:
@@ -276,7 +279,7 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
     final_base = base_url or _DEFAULT_OPENAI_BASE
     final_model = model or _DEFAULT_OPENAI_MODEL
 
-    if not api_key:
+    if not api_key and not allows_no_auth:
         return LlmConfig(
             allowed=False,
             base_url=final_base,

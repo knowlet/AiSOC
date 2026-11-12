@@ -746,7 +746,7 @@ class TestGatewayTenantRouting:
         ("provider", "expected_base", "expected_model"),
         [
             ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
-            ("anthropic", "https://api.anthropic.com/v1", "claude-3-5-haiku-20241022"),
+            ("anthropic", "https://api.anthropic.com/v1", "claude-haiku-4-5-20251001"),
         ],
     )
     async def test_key_only_hosted_byok_replaces_gateway_route(
@@ -790,7 +790,7 @@ class TestGatewayTenantRouting:
         }
         _stub_ledger(monkeypatch, _make_pool_with_row(row))
         cfg = await _import_resolver().resolve_llm_config("tenant-a")
-        assert cfg.allowed is same_destination
+        assert cfg.allowed is True  # explicit no-key custom endpoints are supported
         assert cfg.api_key == ("gateway-test-key" if same_destination else None)
 
 

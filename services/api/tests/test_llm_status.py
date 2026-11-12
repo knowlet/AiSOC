@@ -15,7 +15,12 @@ Pins the contract the Settings → Deployment & AI panel relies on:
 
 from __future__ import annotations
 
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
+from app.api.v1.endpoints import llm_status as status_module
 from app.api.v1.endpoints.llm_status import llm_status
 from app.core import airgap as airgap_module
 
@@ -218,5 +223,73 @@ class TestEffectivePath:
         monkeypatch.setenv("OPENAI_API_KEY", "x")
         # No base_url + airgap on → would default to api.openai.com → blocked.
         snap = llm_status()
+        assert snap["effective_path"] == "fallback"
+        assert snap["airgap_compliant"] is False
+
+
+class TestUnauthenticatedTenantStatus:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["local-ollama", "local-vllm", "local-litellm", "custom"])
+    async def test_explicit_endpoint_without_key_is_live(self, monkeypatch: pytest.MonkeyPatch, provider: str):
+        monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+        monkeypatch.setenv("LITELLM_MASTER_KEY", "gateway-test-key")
+        cred = SimpleNamespace(
+            provider=provider,
+            base_url="http://tenant-model.internal:11434/v1",
+            model="tenant-model",
+            api_key_vault=None,
+            enabled=True,
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = cred
+        db = MagicMock(execute=AsyncMock(return_value=result))
+
+        snap = await status_module.tenant_llm_status(db, uuid.uuid4())
+
+        assert snap["key_set"] is False
+        assert snap["effective_path"] == "live"
+        assert snap["base_url"] == cred.base_url
+        assert snap["source"] == "tenant"
+        assert "gateway-test-key" not in str(snap)
+        assert "disabled" not in str(snap["policy_note"])
+
+    @pytest.mark.asyncio
+    async def test_corrupt_stored_key_is_not_treated_as_no_auth(self, monkeypatch: pytest.MonkeyPatch):
+        cred = SimpleNamespace(
+            provider="custom",
+            base_url="http://tenant-model.internal:11434/v1",
+            model="tenant-model",
+            api_key_vault="vault-test-token",
+            enabled=True,
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = cred
+        db = MagicMock(execute=AsyncMock(return_value=result))
+        vault = MagicMock()
+        vault.decrypt.side_effect = status_module.CredentialVaultError("cannot decrypt")
+        monkeypatch.setattr(status_module, "get_vault", lambda: vault)
+
+        snap = await status_module.tenant_llm_status(db, uuid.uuid4())
+
+        assert snap["key_set"] is False
+        assert snap["effective_path"] == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_no_auth_endpoint_still_obeys_airgap(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(airgap_module.settings, "AISOC_AIRGAPPED", True)
+        cred = SimpleNamespace(
+            provider="custom",
+            base_url="https://external-model.example/v1",
+            model="tenant-model",
+            api_key_vault=None,
+            enabled=True,
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = cred
+        db = MagicMock(execute=AsyncMock(return_value=result))
+
+        snap = await status_module.tenant_llm_status(db, uuid.uuid4())
+
+        assert snap["key_set"] is False
         assert snap["effective_path"] == "fallback"
         assert snap["airgap_compliant"] is False

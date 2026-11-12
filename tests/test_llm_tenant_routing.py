@@ -16,13 +16,22 @@ spec.loader.exec_module(routing)
 
 
 class TenantRouteTests(unittest.TestCase):
+    def test_no_auth_requires_an_explicit_local_or_custom_endpoint_and_no_stored_key(self) -> None:
+        for provider in ("local-ollama", "local-vllm", "local-litellm", "custom"):
+            with self.subTest(provider=provider):
+                self.assertTrue(routing.allows_unauthenticated(provider, "http://local.example/v1", False))
+                self.assertFalse(routing.allows_unauthenticated(provider, "http://local.example/v1", True))
+                self.assertFalse(routing.allows_unauthenticated(provider, None, False))
+        for provider in ("openai", "anthropic", "azure-openai"):
+            self.assertFalse(routing.allows_unauthenticated(provider, "https://provider.example/v1", False))
+
     def test_services_use_identical_rules(self) -> None:
         self.assertEqual(AGENTS.read_bytes(), API.read_bytes())
 
     def test_hosted_key_only_selects_provider_instead_of_gateway(self) -> None:
         for provider, expected in {
             "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),
-            "anthropic": ("https://api.anthropic.com/v1", "claude-3-5-haiku-20241022"),
+            "anthropic": ("https://api.anthropic.com/v1", "claude-haiku-4-5-20251001"),
         }.items():
             with self.subTest(provider=provider):
                 route = routing.tenant_route(

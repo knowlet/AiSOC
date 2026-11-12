@@ -26,11 +26,11 @@ Two views: env-only vs tenant-resolved
 --------------------------------------
 
 * :func:`llm_status` returns the *environment-only* baseline — what the
-  pod would do if no tenant context were involved. This is what the
-  unauthenticated ``GET /api/v1/llm/status`` endpoint serves and what
-  legacy callers like ``cost_dashboard`` consume.
+  pod would do if no tenant context were involved. Legacy callers like
+  ``cost_dashboard`` consume this baseline.
 * :func:`tenant_llm_status` layers per-tenant BYOK overrides from
-  ``tenant_llm_credentials`` on top of the env baseline. Used by callers
+  ``tenant_llm_credentials`` on top of the env baseline. The authenticated
+  ``GET /api/v1/llm/status`` endpoint uses this path, as do callers
   that already have an authenticated tenant context. The ``source``
   field on the returned snapshot says where each value came from
   (``"environment"`` / ``"tenant"`` / ``"mixed"``) so the UI can surface
@@ -57,18 +57,20 @@ import os
 import uuid
 from urllib.parse import urlparse
 
+from fastapi import APIRouter
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.api.v1.deps import AuthUser
 from app.core.airgap import is_host_allowed_for_airgap
 from app.core.config import settings
+from app.db.rls import TenantDBSession
 from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
 from app.services import llm_health
 from app.services.llm_runtime import probe as probe_runtime
-from app.services.llm_tenant_routing import tenant_route
+from app.services.llm_tenant_routing import allows_unauthenticated, tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
-from fastapi import APIRouter
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
@@ -166,6 +168,7 @@ def _compute_status(
     model: str,
     key_set: bool,
     source: str,
+    allows_no_auth: bool = False,
 ) -> dict[str, object]:
     """Compute the redacted status snapshot for a resolved config triple.
 
@@ -211,7 +214,7 @@ def _compute_status(
     # would actually take right now. Mirrors ``_llm_allowed`` in
     # ``services/agents/app/api/explain.py`` semantics so the indicator
     # cannot drift from runtime behaviour.
-    if not key_set:
+    if not key_set and not allows_no_auth:
         effective_path = "fallback"
     elif airgap_enabled and not airgap_compliant:
         effective_path = "fallback"
@@ -318,6 +321,8 @@ async def tenant_llm_status(
     * ``key_set`` → a decryptable tenant key, or an environment key for
       this same endpoint. A deployment credential never follows a tenant
       override to a different destination. Plaintext is never returned.
+      Local/custom endpoints with no stored key may run without authentication;
+      they remain ``key_set=False`` while their effective path is live.
 
     The returned ``source`` field reports the layering result:
 
@@ -392,28 +397,19 @@ async def tenant_llm_status(
         model=model,
         key_set=key_set,
         source=source,
+        allows_no_auth=allows_unauthenticated(cred.provider, cred.base_url, bool(cred.api_key_vault)),
     )
 
 
 @router.get("/status", summary="Current LLM provider configuration")
-async def get_llm_status(user: AuthUser) -> dict[str, object]:
-    """Return the env-only LLM provider snapshot for this pod.
+async def get_llm_status(user: AuthUser, db: TenantDBSession) -> dict[str, object]:
+    """Return the authenticated tenant's effective route, without secrets.
 
-    **Authenticated** -- the signature binds ``AuthUser`` and has for as long
-    as this route has existed. The docstring used to say "intentionally
-    unauthenticated", which was prose disagreeing with the code beneath it.
-
-    **Env-only**: the response carries no secrets (only ``key_set: bool``).
-
-    Tenant-aware callers (the web UI's "Deployment & AI" Settings
-    panel, the agents service's explain path) layer per-tenant BYOK
-    overrides on top of this baseline by either:
-
-    * calling :func:`tenant_llm_status` with their own DB session, or
-    * pairing this response with ``GET /api/v1/llm/credentials`` to
-      perform the merge client-side.
+    Settings consumes this response directly. Returning the environment-only
+    baseline hid an enabled BYOK override behind the deployment's gateway.
+    The database dependency also applies the authenticated tenant's RLS scope.
     """
-    return llm_status()
+    return await tenant_llm_status(db, user.tenant_id)
 
 
 @router.get("/runtime", summary="Where the local model is actually running")

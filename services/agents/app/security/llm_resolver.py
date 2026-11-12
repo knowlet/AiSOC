@@ -83,8 +83,9 @@ from urllib.parse import urlparse
 
 import asyncpg
 import structlog
+
 from app.llm.routing import gateway_url, is_gateway_alias, resolve_api_key
-from app.llm.tenant_routing import public_provider_host, tenant_route
+from app.llm.tenant_routing import allows_unauthenticated, public_provider_host, tenant_route
 from app.security.credential_vault import CredentialVaultError, get_vault
 
 # NOTE: ``app.investigator.ledger`` is imported lazily inside
@@ -350,6 +351,7 @@ async def resolve_llm_config(tenant_ref: str | None) -> LlmConfig:
     tenant_contributed_base_url = False
     tenant_contributed_model = False
     tenant_contributed_key = False
+    allows_no_auth = False
 
     skip_db_lookup = tenant_ref is None or not tenant_ref.strip() or tenant_ref == "default"
     if not skip_db_lookup:
@@ -389,6 +391,7 @@ async def resolve_llm_config(tenant_ref: str | None) -> LlmConfig:
                     api_key = None
                     env_key = None
                 vault_token = row.get("api_key_vault")
+                allows_no_auth = allows_unauthenticated(row.get("provider", ""), row.get("base_url"), bool(vault_token))
                 if vault_token:
                     api_key = _decrypt_vault_token(vault_token, tenant_ref)
                     if api_key is not None:
@@ -410,7 +413,7 @@ async def resolve_llm_config(tenant_ref: str | None) -> LlmConfig:
     final_base = base_url or _DEFAULT_OPENAI_BASE
     final_model = model or _DEFAULT_OPENAI_MODEL
 
-    if not api_key:
+    if not api_key and not allows_no_auth:
         return LlmConfig(
             allowed=False,
             base_url=final_base,

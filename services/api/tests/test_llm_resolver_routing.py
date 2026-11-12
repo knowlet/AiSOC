@@ -64,7 +64,7 @@ def decrypt_as(monkeypatch: pytest.MonkeyPatch, key: str | None) -> None:
     ("provider", "expected_base", "expected_model"),
     [
         ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
-        ("anthropic", "https://api.anthropic.com/v1", "claude-3-5-haiku-20241022"),
+        ("anthropic", "https://api.anthropic.com/v1", "claude-haiku-4-5-20251001"),
     ],
 )
 async def test_hosted_key_only_uses_provider_defaults(
@@ -92,8 +92,9 @@ async def test_foreign_endpoint_never_inherits_gateway_key(monkeypatch: pytest.M
     tenant_id = uuid.uuid4()
     cfg = await llm_resolver.resolve_llm_config(db, tenant_id)
     snap = await status_module.tenant_llm_status(db, tenant_id)
-    assert cfg.allowed is False and cfg.api_key is None
-    assert snap["key_set"] is False and snap["effective_path"] == "fallback"
+    assert cfg.allowed is (vault_token is None) and cfg.api_key is None
+    assert snap["key_set"] is False
+    assert snap["effective_path"] == ("live" if vault_token is None else "fallback")
     assert "gateway-test-key" not in str(snap)
 
 
