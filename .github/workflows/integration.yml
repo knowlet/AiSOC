@@ -1725,6 +1725,10 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Fetch canonical release tags for fork checks
+        if: github.event.repository.fork
+        run: git fetch --no-tags https://github.com/beenuar/AiSOC.git 'refs/tags/v*:refs/tags/v*'
+
       - name: Start PostgreSQL with registry fallback
         uses: ./.github/actions/start-postgres
         with:
@@ -1813,3 +1817,4 @@ jobs:
             echo "| probe rows after upgrade | ${PROBE_ROWS:-?} |"
             echo "| HEAD migrations applied | ${HEAD_MIGRATION_COUNT:-?} |"
           } >> "$GITHUB_STEP_SUMMARY"
+
