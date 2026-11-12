@@ -119,7 +119,7 @@ jobs:
           # *else* in the surviving list changed. This is the union of all
           # three lists; the next lane extends it rather than re-assigning.
           migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py tests/isolation/test_alert_occurrences_live.py tests/isolation/test_alert_recurrence_after_closure_live.py services/fusion/app/services/alert_sink.py services/fusion/app/services/alert_status.py services/fusion/tests/test_alert_reduction_real.py tests/isolation/test_root_cause_findings_live.py .github/workflows/integration.yml'
-          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py services/api/tests/test_identity_privilege_live.py services/api/app/services/identity_privilege.py services/api/app/services/identity_privilege_store.py services/api/app/services/alert_priority.py services/api/tests/test_access_review_live.py services/api/app/services/access_review.py services/api/app/services/access_review_store.py services/api/tests/test_identity_resolution_live.py services/api/app/services/identity_resolution.py services/api/app/services/identity_resolution_store.py services/api/app/services/change_timeline.py tests/isolation/test_alert_occurrences_live.py tests/isolation/test_alert_recurrence_after_closure_live.py services/fusion/app/services/alert_sink.py services/fusion/app/services/alert_status.py services/fusion/tests/test_alert_reduction_real.py services/connectors/app/vuln_promotion_sql.py services/connectors/app/scheduler.py services/connectors/tests/test_vuln_promotion_live.py services/api/app/api/v1/endpoints/triage_questions.py services/agents/app/context/triage_questions_store.py services/agents/app/hunt/source_report_store.py services/agents/app/api/router.py services/agents/tests/integration/ services/api/app/api/v1/endpoints/alerts.py services/api/tests/test_copilot_alert_filters_live.py services/api/tests/test_llm_byok_live.py services/api/app/services/llm_ services/api/app/api/v1/endpoints/llm_ services/agents/app/security/llm_resolver.py services/agents/app/llm/ .github/workflows/integration.yml'
+          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py services/api/tests/test_identity_privilege_live.py services/api/app/services/identity_privilege.py services/api/app/services/identity_privilege_store.py services/api/app/services/alert_priority.py services/api/tests/test_access_review_live.py services/api/app/services/access_review.py services/api/app/services/access_review_store.py services/api/tests/test_identity_resolution_live.py services/api/app/services/identity_resolution.py services/api/app/services/identity_resolution_store.py services/api/app/services/change_timeline.py tests/isolation/test_alert_occurrences_live.py tests/isolation/test_alert_recurrence_after_closure_live.py services/fusion/app/services/alert_sink.py services/fusion/app/services/alert_status.py services/fusion/tests/test_alert_reduction_real.py services/connectors/app/vuln_promotion_sql.py services/connectors/app/scheduler.py services/connectors/tests/test_vuln_promotion_live.py services/api/app/api/v1/endpoints/triage_questions.py services/agents/app/context/triage_questions_store.py services/agents/app/hunt/source_report_store.py services/agents/app/api/router.py services/agents/tests/integration/ services/api/app/api/v1/endpoints/alerts.py services/api/tests/test_copilot_alert_filters_live.py services/api/tests/test_llm_byok_live.py services/api/tests/test_seed_demo_onramp_live.py services/api/app/scripts/seed_demo.py services/api/app/services/llm_ services/api/app/api/v1/endpoints/llm_ services/agents/app/security/llm_resolver.py services/agents/app/llm/ .github/workflows/integration.yml'
           # backup_crypt.py was missing from the old filter, and it is where
           # every byte of the AES-256-GCM implementation lives — so a change
           # to the encryption itself did not run the gate that proves the
@@ -853,6 +853,53 @@ jobs:
             exit 1
           fi
           echo 'confirmed: the actual provider request detects a gateway credential mismatch'
+
+      - name: Seeded showcase linkage and provenance (live PostgreSQL)
+        working-directory: services/api
+        env:
+          # aisoc-db-role: owner — the demo seed is an administrative data writer
+          AISOC_DEMO_ONRAMP_REQUIRED: '1'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/.venv-api-byok/bin/python" -m pytest tests/test_seed_demo_onramp_live.py \
+            -q -p no:cacheprovider -rs 2>&1 | tee /tmp/showcase-live.log
+          if grep -Eq '[0-9]+ skipped' /tmp/showcase-live.log || ! grep -Eq '[1-9][0-9]* passed' /tmp/showcase-live.log; then
+            echo '::error::showcase seed tests must execute against the migrated PostgreSQL schema'
+            exit 1
+          fi
+
+      - name: Showcase gate rejects the former case-number linkage
+        working-directory: services/api
+        env:
+          AISOC_DEMO_ONRAMP_REQUIRED: '1'
+        run: |
+          set -euo pipefail
+          source_file=app/scripts/seed_demo.py
+          backup="$RUNNER_TEMP/showcase-seed.py"
+          cp "$source_file" "$backup"
+          trap 'cp "$backup" "$source_file"' EXIT
+          "$RUNNER_TEMP/.venv-api-byok/bin/python" - <<'PY'
+          from pathlib import Path
+          path = Path("app/scripts/seed_demo.py")
+          source = path.read_text()
+          fixed = '        tenant_id=tenant.id,\n        case_id=case_id,\n        alert_summary=incident["title"],'
+          old = fixed.replace("case_id=case_id", 'case_id=incident["key"]')
+          assert source.count(fixed) == 1, "showcase run construction changed; update the negative control"
+          path.write_text(source.replace(fixed, old))
+          PY
+          set +e
+          "$RUNNER_TEMP/.venv-api-byok/bin/python" -m pytest \
+            tests/test_seed_demo_onramp_live.py::test_showcase_seed_uses_console_case_uuid \
+            -q -p no:cacheprovider --tb=short 2>&1 | tee /tmp/showcase-negative.log
+          result=${PIPESTATUS[0]}
+          set -e
+          if [ "$result" -ne 1 ] \
+            || ! grep -Fq 'FAILED tests/test_seed_demo_onramp_live.py::test_showcase_seed_uses_console_case_uuid' /tmp/showcase-negative.log \
+            || ! grep -Fq "showcase seed must be retrievable by the console's canonical case UUID" /tmp/showcase-negative.log; then
+            echo '::error::negative control must fail at the canonical case UUID assertion'
+            exit 1
+          fi
+          echo 'confirmed: the showcase gate detects the former case-number linkage'
 
       # The patch-window promotion sweep is the only path from
       # `asset_vulnerabilities` back into the alert queue, and its upsert

@@ -37,7 +37,7 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from app.api.v1.dev_auth import (
     DEMO_TENANT_ID,
@@ -1902,7 +1902,7 @@ def _make_realistic_case(
         mitre_tactics=tactics,
         mitre_techniques=techniques,
         alert_ids=[str(a) for a in alert_ids],
-        tags=["realistic", incident["severity"], *incident["tags"]],
+        tags=["synthetic", "realistic", incident["severity"], *incident["tags"]],
         summary=(
             f"Realistic-incident showcase {incident['key']}. "
             f"host={incident['host']} user={incident['user']} src_ip={incident['src_ip']} "
@@ -1978,8 +1978,27 @@ async def _seed_realistic_incidents(session, tenant: Tenant) -> tuple[int, int, 
     Returns ``(alerts, cases, playbook_runs)``. Idempotent: short-circuits if
     any case with an ``INC-RT-`` prefix is already present.
     """
-    existing = await session.execute(select(Case).where(Case.tenant_id == tenant.id).where(Case.case_number.like("INC-RT-%")).limit(1))
-    if existing.scalar_one_or_none() is not None:
+    existing = await session.execute(select(Case).where(Case.tenant_id == tenant.id).where(Case.case_number.like("INC-RT-%")))
+    existing_cases = existing.scalars().all()
+    if existing_cases:
+        # Re-seeding repairs provenance on this catalogue, not on arbitrary
+        # cases an operator may have added to the same tenant. The ORM and
+        # console now share aisoc_cases; preserve non-label tag metadata too.
+        catalogue = {incident["key"]: incident["title"] for incident in _REALISTIC_INCIDENTS}
+        for case in existing_cases:
+            tags = _tags_to_object(case.tags)
+            labels = tags.get("labels", [])
+            if (
+                case.title == catalogue.get(case.case_number)
+                and isinstance(labels, list)
+                and "realistic" in labels
+                and "synthetic" not in labels
+            ):
+                await session.execute(
+                    update(Case)
+                    .where(Case.tenant_id == tenant.id, Case.id == case.id)
+                    .values(tags={**tags, "labels": [*labels, "synthetic"]})
+                )
         return 0, 0, 0
 
     now = datetime.now(UTC)
@@ -2078,7 +2097,7 @@ async def _seed_in_flight_investigation(session, tenant: Tenant) -> int:
 
     Mirrors the LangGraph investigator state machine: a Recon → Forensic →
     Responder progression with one terminal evidence-citation event.
-    Idempotent: short-circuits if a run already exists for this case_id.
+    Idempotent: reuses existing runs and repairs the legacy case-number key.
     """
     incident = next(
         (i for i in _REALISTIC_INCIDENTS if i.get("in_flight_investigation")),
@@ -2087,11 +2106,35 @@ async def _seed_in_flight_investigation(session, tenant: Tenant) -> int:
     if incident is None:
         return 0
 
+    case = (
+        await session.execute(select(Case).where(Case.tenant_id == tenant.id, Case.case_number == incident["key"]))
+    ).scalar_one_or_none()
+    if case is None:
+        raise RuntimeError(f"Cannot seed investigation: case {incident['key']} is missing from tenant {tenant.id}")
+    labels = _tags_to_object(case.tags).get("labels", [])
+    if case.title != incident["title"] or not isinstance(labels, list) or "realistic" not in labels:
+        raise RuntimeError(f"Cannot seed investigation: case {incident['key']} is not the seeded showcase in tenant {tenant.id}")
+    case_id = str(case.id)
     existing = await session.execute(
-        select(InvestigationRun).where(InvestigationRun.tenant_id == tenant.id).where(InvestigationRun.case_id == incident["key"]).limit(1)
+        select(InvestigationRun)
+        .where(
+            InvestigationRun.tenant_id == tenant.id,
+            InvestigationRun.case_id.in_([case_id, incident["key"]]),
+            InvestigationRun.model_used == "aisoc-investigator-v1",
+            InvestigationRun.alert_summary == incident["title"],
+            InvestigationRun.raw_alert["incident_key"].astext == incident["key"],
+        )
+        .order_by(InvestigationRun.started_at, InvestigationRun.id)
     )
-    existing_run = existing.scalar_one_or_none()
-    if existing_run is not None:
+    existing_runs = existing.scalars().all()
+    if existing_runs:
+        # Only recognizable seed runs may be repaired or published. The case
+        # can also have operator investigations whose events must stay private.
+        # Repair old seeds in place so their immutable events keep their IDs.
+        for existing_run in existing_runs:
+            existing_run.case_id = case_id
+        await session.flush()
+        existing_run = existing_runs[0]
         # Cases/runs may already exist from a prior seed while published_replays
         # was never created (table missing during an earlier Postgres outage).
         # Still ensure the canonical /r/demo-lockbit row lands.
@@ -2111,7 +2154,7 @@ async def _seed_in_flight_investigation(session, tenant: Tenant) -> int:
 
     run = InvestigationRun(
         tenant_id=tenant.id,
-        case_id=incident["key"],
+        case_id=case_id,
         alert_summary=incident["title"],
         raw_alert={
             "incident_key": incident["key"],
