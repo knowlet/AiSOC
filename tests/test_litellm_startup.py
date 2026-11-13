@@ -34,10 +34,22 @@ def launch(env: dict[str, str]) -> tuple[list[str], dict[str, str]]:
 
 
 @pytest.mark.parametrize("blank", ["", " ", "\t\n"])
-def test_empty_endpoint_and_aws_options_are_absent_at_proxy_start(blank):
+def test_blank_optional_settings_are_absent_at_proxy_start(blank):
     names = runpy.run_path(str(START))["OPTIONAL_ENV"]
     _, env = launch(dict.fromkeys(names, blank))
     assert not (set(names) & env.keys())
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\t\n"])
+def test_blank_provider_keys_preserve_explicit_empty_auth(blank):
+    _, env = launch({"OPENAI_API_KEY": blank, "ANTHROPIC_API_KEY": blank})
+    assert env == {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}
+
+
+def test_absent_provider_keys_are_not_created():
+    _, env = launch({})
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 def test_cli_and_nonempty_settings_survive_unchanged():

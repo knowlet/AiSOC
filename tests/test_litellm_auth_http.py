@@ -181,6 +181,9 @@ def _inside(case: str) -> None:
         "OPENAI_API_KEY": "fixture-openai" if case in {"openai", "anthropic", "bedrock-bearer-conflict"} else "",
         "ANTHROPIC_API_KEY": "fixture-anthropic" if provider == "anthropic" else "",
     }
+    keyless = case.endswith(("-empty-key", "-whitespace-key"))
+    if keyless:
+        env[f"{provider.upper()}_API_KEY"] = " \t\n" if case.endswith("-whitespace-key") else ""
     if case == "bedrock-bearer-empty-endpoint":
         # Exercise config env resolution and actual HTTP, without reaching AWS.
         # The separate default-endpoint case checks the SDK's regional URL.
@@ -241,9 +244,18 @@ def _inside(case: str) -> None:
                 headers = {name.lower(): value for name, value in headers.items()}
                 assert MASTER not in str(headers), "Gateway credential leaked upstream"
                 if provider == "openai":
-                    assert path == "/v1/chat/completions" and headers["authorization"] == "Bearer fixture-openai"
+                    assert path == "/v1/chat/completions"
+                    if keyless:
+                        assert not headers.get("authorization"), "Keyless endpoint received an authorization header"
+                    else:
+                        assert headers["authorization"] == "Bearer fixture-openai"
                 elif provider == "anthropic":
-                    assert path.endswith("/messages") and headers["x-api-key"] == "fixture-anthropic"
+                    assert path.endswith("/messages")
+                    if keyless:
+                        assert not headers.get("x-api-key"), "Keyless endpoint received a provider key"
+                        assert not headers.get("authorization"), "Keyless endpoint received an authorization header"
+                    else:
+                        assert headers["x-api-key"] == "fixture-anthropic"
                 elif provider == "bedrock":
                     assert path.endswith("/converse")
                     if "bearer" in case:
@@ -324,8 +336,20 @@ class GatewayHTTPTests(unittest.TestCase):
     def test_openai_native_key(self):
         self.run_image("openai")
 
+    def test_openai_compatible_endpoint_with_empty_key(self):
+        self.run_image("openai-empty-key")
+
+    def test_openai_compatible_endpoint_with_whitespace_key(self):
+        self.run_image("openai-whitespace-key")
+
     def test_anthropic_does_not_use_openai_key(self):
         self.run_image("anthropic")
+
+    def test_anthropic_compatible_endpoint_with_empty_key(self):
+        self.run_image("anthropic-empty-key")
+
+    def test_anthropic_compatible_endpoint_with_whitespace_key(self):
+        self.run_image("anthropic-whitespace-key")
 
     def test_bedrock_bearer_with_empty_openai_key(self):
         self.run_image("bedrock-bearer")

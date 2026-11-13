@@ -883,9 +883,8 @@ services:
   # alias (aisoc-triage, aisoc-investigation, …); the mapping alias → real model
   # lives entirely in infra/litellm/config.yaml, so operators swap local/hosted
   # models without touching AiSOC. Per-task latency/tokens/cost/errors are
-  # exported on /metrics (scraped as job `aisoc-litellm`). Lightweight and inert
-  # unless a service is pointed at it via OPENAI_BASE_URL — see the note on the
-  # `agents` service above.
+  # exported on /metrics (scraped as job `aisoc-litellm`). The api and agents
+  # services use LLM_GATEWAY_URL to route task aliases here by default.
   ollama:
     # CORE — the model behind the gateway.
     #

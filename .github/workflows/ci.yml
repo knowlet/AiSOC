@@ -2696,8 +2696,9 @@ jobs:
         run: |
           fixture_backup=$(mktemp -d)
           cp infra/litellm/config.yaml "$fixture_backup/config.yaml"
+          cp infra/litellm/start.py "$fixture_backup/start.py"
           cp Makefile "$fixture_backup/Makefile"
-          trap 'cp "$fixture_backup/config.yaml" infra/litellm/config.yaml; cp "$fixture_backup/Makefile" Makefile; rm -rf "$fixture_backup"' EXIT
+          trap 'cp "$fixture_backup/config.yaml" infra/litellm/config.yaml; cp "$fixture_backup/start.py" infra/litellm/start.py; cp "$fixture_backup/Makefile" Makefile; rm -rf "$fixture_backup"' EXIT
           python3 - <<'PY'
           from pathlib import Path
           import yaml
@@ -2715,6 +2716,22 @@ jobs:
           cat "$fixture_backup/auth.log"
           grep -E 'NoCredentialsError|Unable to locate credentials' "$fixture_backup/auth.log"
           cp "$fixture_backup/config.yaml" infra/litellm/config.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("infra/litellm/start.py")
+          text = path.read_text()
+          before = 'os.environ[name] = ""'
+          assert text.count(before) == 1
+          path.write_text(text.replace(before, "del os.environ[name]"))
+          PY
+          if AISOC_TEST_LITELLM=1 python3 -m pytest tests/test_litellm_auth_http.py::GatewayHTTPTests::test_openai_compatible_endpoint_with_empty_key -q > "$fixture_backup/keyless.log" 2>&1; then
+            cat "$fixture_backup/keyless.log"
+            echo "FAIL: unsetting an empty provider key did not break keyless compatibility"
+            exit 1
+          fi
+          cat "$fixture_backup/keyless.log"
+          grep -F 'The api_key client option must be set' "$fixture_backup/keyless.log"
+          cp "$fixture_backup/start.py" infra/litellm/start.py
           python3 - <<'PY'
           from pathlib import Path
           path = Path("Makefile")
