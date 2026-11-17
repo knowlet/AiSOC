@@ -158,6 +158,54 @@ analysts can replay agent decisions directly from Claude / Cursor / Continue
 
 ## Ambient Copilot
 
+### Finding cases and pending approvals
+
+Copilot can discover work before you know its UUID. For example:
+
+- "Find high-severity cases about workstation-42."
+- "Find INC-042 and summarize the case evidence."
+- "Which high-risk approvals are assigned to me?"
+
+`copilot_cases` searches case titles, descriptions and case numbers using a
+case-insensitive **literal substring**; `%`, `_` and backslashes have no wildcard
+meaning. The query is trimmed, must contain a non-whitespace character, and is
+limited to 200 characters. Optional status and severity filters combine with
+the query. Statuses use the six case states above; `resolved` remains separate
+from `closed`. Returned `case:<uuid>` references can be used with
+`copilot_record` for a follow-up read. The underlying
+`GET /api/v1/cases?query=...` retains its existing list response and requires
+`cases:read`.
+
+`copilot_pending_approvals` reads the authenticated tenant's existing approval
+queue with `status=pending`. `mine=true` means **explicitly assigned to the
+current user**, not every unassigned approval that the user might be able to
+review. It can also filter by `low`, `medium`, `high` or `critical` risk. The
+returned `approval:<uuid>` references identify queue records; an analyst still
+reviews and decides them in the responder approval queue. Copilot receives
+summary metadata, linked case/alert identifiers and expiry times, never the
+action execution payload. A pending record may already be past its expiry;
+the returned status alone is not proof that it can still be approved.
+
+Both reads forward the current caller's credentials and tenant context to the
+core API. They cannot choose another tenant, replace the caller with a service
+credential, approve a request or execute an action. A denied or failed read is
+reported as `could_not_check`, not as an empty queue.
+
+Results use server pages of at most 20 records and stop at page 10. Case reads
+use one additional row to determine `has_more`; they do not invent a total
+count. Approval reads retain the API's filtered total. Records are ordered by
+creation time descending with UUID as the tie-breaker. Per-response and
+cumulative evidence limits may retain fewer records than a server page;
+`truncated` identifies that loss and only retained records become citation
+sources. An oversized first record retains a bounded metadata summary when
+space permits; omitted descriptions and raw evidence do not support citations.
+Narrow the query for omitted rows, or open the record in the console for omitted
+fields. An empty page, the final
+permitted page, or a cited answer is not evidence that every case or upstream
+security event was searched.
+
+### Contextual suggestions
+
 The case workspace is **copilot-aware**: the Ambient Copilot panel proposes
 the next concrete action based on the current state of the case (e.g.
 "contain host", "open jira ticket", "add indicator to threat intel feed").

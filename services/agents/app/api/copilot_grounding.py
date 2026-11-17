@@ -64,7 +64,7 @@ class EvidenceSource:
     immutable ledger row or a mutable alert.
     """
 
-    #: `ledger:<run_id>#<seq>`, `alert:<uuid>`, or `case:<uuid>`.
+    #: `ledger:<run_id>#<seq>`, `alert:<uuid>`, `case:<uuid>`, or `approval:<uuid>`.
     ref: str
     kind: str
     #: Everything the source said, flattened. Indicators are matched

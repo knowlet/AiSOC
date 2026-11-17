@@ -156,13 +156,15 @@ def test_evidence_budget_is_cumulative_and_citations_use_only_retained_fields():
     result = reads._records(
         "copilot_alerts",
         "alert",
-        [{"id": str(uuid.uuid4()), "title": "x" * 2000, "description": "y" * 2000, "not_projected": "203.0.113.99"} for _ in range(20)],
+        [{"id": str(uuid.uuid4()), "title": "x" * 400, "description": "y" * 400, "not_projected": "203.0.113.99"} for _ in range(20)],
     )
     assert result["truncated"] is True
     assert reads._evidence_bytes <= MAX_EVIDENCE_BYTES
     assert all("203.0.113.99" not in source.text for source in reads.sources)
     before = reads._evidence_bytes
-    reads._records("copilot_alerts", "alert", [{"id": RECORD, "title": "x" * 2000}])
+    assert before > 0
+    for _ in range(30):
+        reads._records("copilot_alerts", "alert", [{"id": RECORD, "title": "x" * 2000}])
     assert before <= reads._evidence_bytes <= MAX_EVIDENCE_BYTES
 
 

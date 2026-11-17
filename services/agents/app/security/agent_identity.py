@@ -92,6 +92,8 @@ KNOWN_TOOLS: frozenset[str] = frozenset(
     {
         # Interactive console: only caller-authorized reads.
         "copilot_alerts",
+        "copilot_cases",
+        "copilot_pending_approvals",
         "copilot_record",
         "copilot_entity_risk",
         # default_registry
@@ -148,7 +150,7 @@ KNOWN_TOOLS: frozenset[str] = frozenset(
 #: A tool in `KNOWN_TOOLS` and in no scope here is reachable by nobody,
 #: which is the correct default for a tool nobody has thought about.
 AGENT_TOOL_SCOPES: dict[str, frozenset[str]] = {
-    "copilot": frozenset({"copilot_alerts", "copilot_record", "copilot_entity_risk"}),
+    "copilot": frozenset({"copilot_alerts", "copilot_cases", "copilot_pending_approvals", "copilot_record", "copilot_entity_risk"}),
     # Reads alert context, extracts indicators, looks up techniques. Holds
     # no pivot that reaches customer telemetry, because this is the agent
     # an injected alert talks to first.

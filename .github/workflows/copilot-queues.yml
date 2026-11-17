@@ -1,0 +1,82 @@
+name: Copilot queue integration
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'services/api/app/**'
+      - 'services/api/migrations/**'
+      - 'services/api/poetry.lock'
+      - 'services/api/pyproject.toml'
+      - 'services/api/tests/test_copilot_queue_reads_live.py'
+      - 'services/agents/app/**'
+      - 'services/agents/poetry.lock'
+      - 'services/agents/pyproject.toml'
+      - 'services/agents/tests/test_copilot_queues.py'
+      - 'tests/e2e/copilot_queues/**'
+      - 'scripts/service_requirements.py'
+      - '.github/actions/start-postgres/**'
+      - '.github/workflows/copilot-queues.yml'
+  push:
+    branches: [main, develop]
+    paths:
+      - 'services/api/**'
+      - 'services/agents/**'
+      - 'tests/e2e/copilot_queues/**'
+      - 'scripts/service_requirements.py'
+      - '.github/actions/start-postgres/**'
+      - '.github/workflows/copilot-queues.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: copilot-queues-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  queues:
+    name: Caller-scoped Copilot queues (HTTP and PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql+asyncpg://aisoc_app:aisoc_app_ci_secret@127.0.0.1:5432/aisoc
+      DATABASE_MIGRATION_URL: postgresql+asyncpg://aisoc:aisoc_ci_secret@127.0.0.1:5432/aisoc
+      AISOC_APP_DB_PASSWORD: aisoc_app_ci_secret
+      SECRET_KEY: ci-only-copilot-queue-secret-at-least-32-bytes
+      ENVIRONMENT: test
+      AISOC_MIGRATIONS_STRICT: '1'
+      MSSP_ISOLATION_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Start PostgreSQL
+        uses: ./.github/actions/start-postgres
+        with:
+          password: aisoc_ci_secret
+          tag: '16'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            services/api/poetry.lock
+            services/agents/poetry.lock
+      - name: Install separate locked service environments
+        run: |
+          python scripts/service_requirements.py api --locked > /tmp/copilot-api-requirements.txt
+          python scripts/service_requirements.py agents --locked > /tmp/copilot-agents-requirements.txt
+          python -m venv .venv-copilot-api
+          python -m venv .venv-copilot-agents
+          .venv-copilot-api/bin/pip install --quiet --no-deps -r /tmp/copilot-api-requirements.txt
+          .venv-copilot-agents/bin/pip install --quiet --no-deps -r /tmp/copilot-agents-requirements.txt
+      - name: Apply full migration chain
+        working-directory: services/api
+        run: ../../.venv-copilot-api/bin/python -m app.scripts.run_migrations
+      - name: Case query and approval queue contracts
+        working-directory: services/api
+        run: ../../.venv-copilot-api/bin/python -m pytest tests/test_copilot_queue_reads_live.py -v --tb=short
+      - name: Copilot chat to API to database
+        run: >-
+          .venv-copilot-api/bin/python tests/e2e/copilot_queues/run_copilot_queues.py
+          --agents-python .venv-copilot-agents/bin/python
+          --disposable-database

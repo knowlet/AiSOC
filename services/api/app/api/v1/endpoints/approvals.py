@@ -303,7 +303,7 @@ async def list_approvals(
     stmt = (
         select(AgentApproval)
         .where(and_(*filters))
-        .order_by(AgentApproval.created_at.desc())
+        .order_by(AgentApproval.created_at.desc(), AgentApproval.id.asc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )

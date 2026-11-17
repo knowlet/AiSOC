@@ -20,7 +20,7 @@ The ``_resolve_case_id`` helper is also tenant-scoped — looking up
 
 Endpoints
 ---------
-* ``GET  /cases``                  List cases (filterable by status/severity/assignee).
+* ``GET  /cases``                  List cases (filterable by query/status/severity/assignee).
 * ``POST /cases``                  Create a new case.
 * ``GET  /cases/{id}``             Retrieve a case.
 * ``PATCH /cases/{id}``            Update case fields (status, severity, assignee, …).
@@ -538,6 +538,10 @@ async def list_cases(
     assignee: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    query: Annotated[
+        str | None,
+        Query(min_length=1, max_length=200, description="Case-insensitive literal substring of title, description or case number"),
+    ] = None,
 ) -> list[CaseResponse]:
     # Tenant scoping is non-optional. The aisoc_cases table has carried a
     # tenant_id column since migration 012; until P2-W1 the API simply
@@ -559,11 +563,21 @@ async def list_cases(
     if assignee:
         where_clauses.append("assignee = :assignee")
         params["assignee"] = assignee
+    if query is not None:
+        query = query.strip()
+        if not query:
+            raise HTTPException(status_code=422, detail="query must contain a non-whitespace character")
+        where_clauses.append(
+            "(strpos(lower(title), lower(:query)) > 0 "
+            "OR strpos(lower(coalesce(description, '')), lower(:query)) > 0 "
+            "OR strpos(lower(coalesce(case_number, '')), lower(:query)) > 0)"
+        )
+        params["query"] = query
 
     q = f"""
         SELECT * FROM aisoc_cases
         WHERE {" AND ".join(where_clauses)}
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id ASC
         LIMIT :limit OFFSET :offset
     """
     try:

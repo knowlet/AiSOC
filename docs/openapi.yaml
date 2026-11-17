@@ -1389,6 +1389,20 @@ paths:
           minimum: 0
           default: 0
           title: Offset
+      - name: query
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            minLength: 1
+            maxLength: 200
+          - type: 'null'
+          description: Case-insensitive literal substring of title, description or
+            case number
+          title: Query
+        description: Case-insensitive literal substring of title, description or case
+          number
       responses:
         '200':
           description: Successful Response

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Copilot case and pending-approval discovery.** The analyst can find cases
+  by title, description or case number and narrow them by status or severity,
+  then inspect the returned case UUID. Pending approvals can be filtered by
+  risk or explicit assignment to the caller. Both tools use the caller's
+  credentials, retain bounded evidence references, and distinguish failed
+  reads from empty queues. They do not approve or execute actions.
+
 - **Certificate authentication for Microsoft Entra ID and Microsoft 365 audit.**
   Both connectors accept an Entra app certificate instead of a client secret:
   new optional `certificate_pem` (secret, PEM private key, optionally with the
