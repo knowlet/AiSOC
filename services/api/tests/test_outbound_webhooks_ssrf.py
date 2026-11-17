@@ -18,8 +18,10 @@ on-prem receiver — the same posture ``destinations.py`` already takes.
 
 from __future__ import annotations
 
+import socket
 import uuid
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from app.api.v1.endpoints.outbound_webhooks import WebhookCreate, WebhookUpdate
@@ -35,6 +37,31 @@ INTERNAL = [
     "http://2130706433/",
     "http://10.0.0.5/",
 ]
+
+
+@pytest.fixture
+def webhook_dns(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> list[str]:
+    """Control DNS answers without bypassing either request model's SSRF guard."""
+    addresses: tuple[str, ...] | None = getattr(request, "param", ("93.184.216.34", "2606:4700:4700::1111"))
+    resolved: list[str] = []
+
+    def resolve(host: str, port: int | None, *, type: int) -> list[tuple[Any, ...]]:
+        assert host == "example.com", f"unexpected test DNS host: {host!r}"
+        assert port is None and type == socket.SOCK_STREAM
+        resolved.append(host)
+        if addresses is None:
+            raise socket.gaierror(socket.EAI_NONAME, "fixture hostname has no DNS records")
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0, 0, 0))
+            if ":" in address
+            else (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0))
+            for address in addresses
+        ]
+
+    monkeypatch.delenv("AISOC_SSRF_ALLOW_PRIVATE", raising=False)
+    monkeypatch.delenv("AISOC_SSRF_ALLOW_HOSTS", raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return resolved
 
 
 @pytest.mark.parametrize("url", INTERNAL)
@@ -53,10 +80,33 @@ def test_update_without_a_url_is_fine() -> None:
     assert WebhookUpdate(name="renamed").url is None
 
 
-def test_a_public_destination_is_still_accepted() -> None:
+@pytest.mark.parametrize("model", [WebhookCreate, WebhookUpdate], ids=["create", "update"])
+def test_a_public_destination_is_still_accepted(webhook_dns: list[str], model: type[WebhookCreate] | type[WebhookUpdate]) -> None:
     """The guard must not refuse the legitimate case, or the feature is dead."""
-    created = WebhookCreate(name="partner", url="https://example.com/hook", event_types=["alert.created"])
+    created = model(name="partner", url="https://example.com/hook", event_types=["alert.created"])
     assert created.url == "https://example.com/hook"
+    assert webhook_dns == ["example.com"]
+
+
+@pytest.mark.parametrize("model", [WebhookCreate, WebhookUpdate], ids=["create", "update"])
+@pytest.mark.parametrize(
+    ("webhook_dns", "reason"),
+    [
+        pytest.param(("10.0.0.5",), "blocked address", id="private-ipv4"),
+        pytest.param(("93.184.216.34", "10.0.0.5"), "blocked address", id="mixed-ipv4"),
+        pytest.param(("fd00::1",), "blocked address", id="private-ipv6"),
+        pytest.param(("93.184.216.34", "fd00::1"), "blocked address", id="mixed-ipv6"),
+        pytest.param((), "no usable addresses", id="no-addresses"),
+        pytest.param(None, "could not resolve hostname", id="unresolvable"),
+    ],
+    indirect=["webhook_dns"],
+)
+def test_dns_answers_still_pass_through_the_guard(
+    webhook_dns: list[str], reason: str, model: type[WebhookCreate] | type[WebhookUpdate]
+) -> None:
+    with pytest.raises(ValidationError, match=reason):
+        model(name="partner", url="https://example.com/hook", event_types=["alert.created"])
+    assert webhook_dns == ["example.com"]
 
 
 @pytest.mark.asyncio

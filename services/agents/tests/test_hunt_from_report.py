@@ -26,6 +26,8 @@ otherwise:
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 from app.hunt.from_report import (
     INDICATOR_FIELDS,
@@ -52,6 +54,40 @@ Related sample: notepad.exe
 
 
 # ── Fetching ────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def report_dns(monkeypatch):
+    """Fix DNS inputs while retaining the production URL/IP validator.
+
+    MockTransport handles HTTP, but the SSRF guard resolves the hostname
+    before HTTP starts. These transport tests must not depend on public DNS.
+    """
+    answers: dict[str, tuple[str, ...] | OSError] = {"example.com": ("8.8.8.8",)}
+    lookups: list[str] = []
+
+    def resolve(host, port, **kwargs):
+        assert host in answers, f"Unexpected DNS lookup: {host}"
+        assert port is None and kwargs == {"type": socket.SOCK_STREAM}
+        lookups.append(host)
+        result = answers[host]
+        if isinstance(result, OSError):
+            raise result
+        return [
+            (
+                socket.AF_INET6 if ":" in address else socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (address, 0, 0, 0) if ":" in address else (address, 0),
+            )
+            for address in result
+        ]
+
+    for name in ("AISOC_SSRF_ALLOW_HOSTS", "AISOC_SSRF_ALLOW_PRIVATE", "AISOC_SSRF_ALLOWED_SCHEMES", "AISOC_SSRF_EXTRA_BLOCKED_HOSTS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("app.playbook.ssrf_guard.socket.getaddrinfo", resolve)
+    return answers, lookups
 
 
 @pytest.mark.asyncio
@@ -97,7 +133,7 @@ async def test_a_private_address_is_refused_by_the_existing_guard():
 
 
 @pytest.mark.asyncio
-async def test_the_body_is_bounded_even_when_the_server_keeps_sending(monkeypatch):
+async def test_the_body_is_bounded_even_when_the_server_keeps_sending(report_dns):
     """The guard does not bound a response, so this module must.
 
     The server here declares nothing and simply streams; a `Content-Length`
@@ -108,6 +144,7 @@ async def test_the_body_is_bounded_even_when_the_server_keeps_sending(monkeypatc
     sent = 1024 * 32
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://example.com/report"
         return httpx.Response(200, content=b"A" * sent * 10)
 
     transport = httpx.MockTransport(handler)
@@ -115,10 +152,11 @@ async def test_the_body_is_bounded_even_when_the_server_keeps_sending(monkeypatc
         text, truncated = await fetch_report("https://example.com/report", enabled=True, max_bytes=sent, client=client)
     assert truncated is True
     assert len(text) == sent
+    assert report_dns[1] == ["example.com"]
 
 
 @pytest.mark.asyncio
-async def test_a_small_report_is_not_reported_as_truncated(monkeypatch):
+async def test_a_small_report_is_not_reported_as_truncated(report_dns):
     import httpx
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -128,10 +166,11 @@ async def test_a_small_report_is_not_reported_as_truncated(monkeypatch):
         text, truncated = await fetch_report("https://example.com/r", enabled=True, client=client)
     assert truncated is False
     assert "ACME Loader" in text
+    assert report_dns[1] == ["example.com"]
 
 
 @pytest.mark.asyncio
-async def test_an_error_status_is_surfaced_rather_than_parsed():
+async def test_an_error_status_is_surfaced_rather_than_parsed(report_dns):
     import httpx
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -140,6 +179,58 @@ async def test_an_error_status_is_surfaced_rather_than_parsed():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ReportFetchError, match="404"):
             await fetch_report("https://example.com/r", enabled=True, client=client)
+    assert report_dns[1] == ["example.com"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "addresses",
+    [
+        ("10.0.0.8",),
+        ("8.8.8.8", "10.0.0.8"),
+        ("2001:4860:4860::8888", "::1"),
+        ("::ffff:127.0.0.1",),
+    ],
+    ids=["private", "mixed-public-private", "mixed-public-loopback-v6", "mapped-loopback"],
+)
+async def test_unsafe_dns_answers_are_refused_before_http(report_dns, addresses):
+    import httpx
+
+    report_dns[0]["example.com"] = addresses
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=REPORT.encode())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ReportFetchError, match="refusing to fetch.*blocked address"):
+            await fetch_report("https://example.com/r", enabled=True, client=client)
+    assert report_dns[1] == ["example.com"]
+    assert requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [(socket.gaierror(socket.EAI_NONAME, "fixture NXDOMAIN"), "could not resolve hostname"), ((), "no usable addresses")],
+    ids=["dns-failure", "empty-answer"],
+)
+async def test_unresolved_reports_are_refused_before_http(report_dns, answer, reason):
+    import httpx
+
+    report_dns[0]["example.com"] = answer
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=REPORT.encode())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ReportFetchError, match=f"refusing to fetch.*{reason}"):
+            await fetch_report("https://example.com/r", enabled=True, client=client)
+    assert report_dns[1] == ["example.com"]
+    assert requests == []
 
 
 def test_the_default_size_bound_is_set_and_small_enough_to_matter():

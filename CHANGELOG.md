@@ -180,6 +180,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Offline outbound HTTP tests exercise the intended request path.** Report
+  fetching, webhook registration, and sandbox provider tests now supply
+  host-scoped DNS answers while retaining the production URL and IP checks.
+  A mocked HTTP transport no longer leaves those tests dependent on public
+  DNS, and the sandbox connection-error test verifies that its HTTP handler
+  actually ran instead of passing on an earlier resolver failure. Private,
+  mixed-address, and unresolved destinations remain covered by refusal tests.
+
 - **Case comments save again, and the Resolution panel actually persists**
   (#1932). `casesApi.addComment` sent `{"comment": ...}` while the API's
   `AddCommentRequest` read only `body`, so every post from the console

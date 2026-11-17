@@ -1,15 +1,17 @@
 """Each adapter maps its own payload onto the interface, and says so honestly.
 
 Driven against recorded and synthetic vendor payloads through
-``httpx.MockTransport``. Nothing here makes a network call, and nothing here
-uploads a file: the recorded fixture was obtained by a GET on the EICAR test
-file's hash. See ``tests/fixtures/sandbox/README.md`` for which payloads are
-captures and which are hand-written.
+``httpx.MockTransport`` and explicit DNS answers checked by the real outbound
+guard. Nothing here makes a network call, and nothing here uploads a file:
+the recorded fixture was obtained by a GET on the EICAR test file's hash.
+See ``tests/fixtures/sandbox/README.md`` for which payloads are captures and
+which are hand-written.
 """
 
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,26 @@ def transport(routes: dict[str, tuple[int, Any]]) -> httpx.MockTransport:
 
 def client_for(routes: dict[str, tuple[int, Any]]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport(routes))
+
+
+@pytest.fixture
+def malwareanalyzer_dns(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Only the expected vendor hostname resolves; its answers remain guarded."""
+    addresses: tuple[str, ...] | None = getattr(request, "param", ("93.184.216.34", "2606:4700:4700::1111"))
+
+    def resolve(host: str, port: int | None, *, type: int) -> list[tuple[Any, ...]]:
+        assert host == "malwareanalyzer.com", f"unexpected test DNS host: {host!r}"
+        assert port is None and type == socket.SOCK_STREAM
+        if addresses is None:
+            raise socket.gaierror(socket.EAI_NONAME, "fixture hostname has no DNS records")
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0, 0, 0))
+            if ":" in address
+            else (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0))
+            for address in addresses
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +138,7 @@ class TestMalwareAnalyzerMapping:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("malwareanalyzer_dns")
 class TestMalwareAnalyzerTransport:
     async def test_hash_hit_returns_a_report(self) -> None:
         provider = MalwareAnalyzerProvider(client=client_for({"/v1/reports/": (200, load("malwareanalyzer_report_eicar.json"))}))
@@ -158,19 +181,53 @@ class TestMalwareAnalyzerTransport:
         assert receipt.state is AnalysisState.PENDING
 
     async def test_an_unreachable_service_raises_rather_than_returning_a_report(self) -> None:
+        sent: list[httpx.Request] = []
+        failure = httpx.ConnectError("connection refused")
+
         def boom(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("connection refused")
+            sent.append(request)
+            raise failure
 
         provider = MalwareAnalyzerProvider(client=httpx.AsyncClient(transport=httpx.MockTransport(boom)))
         with pytest.raises(SandboxUnavailable) as caught:
             await provider.lookup_hash("a" * 64)
+        assert len(sent) == 1
+        assert str(sent[0].url) == "https://malwareanalyzer.com/v1/reports/" + "a" * 64
         assert caught.value.kind == "network"
+        assert "connection refused" in str(caught.value)
+        assert caught.value.__cause__ is failure
 
     async def test_a_401_is_reported_as_auth_not_as_a_miss(self) -> None:
         provider = MalwareAnalyzerProvider(client=client_for({"/v1/reports/": (401, {"error": {"code": "unauthorized"}})}))
         with pytest.raises(SandboxUnavailable) as caught:
             await provider.lookup_hash("a" * 64)
         assert caught.value.kind == "auth"
+
+    @pytest.mark.parametrize(
+        ("malwareanalyzer_dns", "reason"),
+        [
+            pytest.param(("10.0.0.5",), "private address", id="private-ipv4"),
+            pytest.param(("93.184.216.34", "10.0.0.5"), "private address", id="mixed-ipv4"),
+            pytest.param(("fd00::1",), "private address", id="private-ipv6"),
+            pytest.param(("93.184.216.34", "fd00::1"), "private address", id="mixed-ipv6"),
+            pytest.param((), "no usable address", id="no-addresses"),
+            pytest.param(None, "could not resolve", id="unresolvable"),
+        ],
+        indirect=["malwareanalyzer_dns"],
+    )
+    async def test_unsafe_dns_is_a_failure_before_http_not_a_hash_miss(self, reason: str) -> None:
+        sent: list[httpx.Request] = []
+
+        def miss(request: httpx.Request) -> httpx.Response:
+            sent.append(request)
+            return httpx.Response(404, json=load("malwareanalyzer_error_not_found.json"))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(miss)) as client:
+            provider = MalwareAnalyzerProvider(client=client)
+            with pytest.raises(SandboxUnavailable, match=reason) as caught:
+                await provider.lookup_hash("a" * 64)
+        assert caught.value.kind == "network"
+        assert sent == [], "a refused hostname reached the HTTP transport"
 
 
 class TestMalwareAnalyzerAuthentication:
