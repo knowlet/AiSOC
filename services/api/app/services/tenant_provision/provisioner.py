@@ -555,11 +555,17 @@ async def _result_for_existing(
 
 
 async def _default_demo_seeder(db: AsyncSession, tenant: Tenant) -> None:
-    """Real-world seed callback.
+    """Seed starter SOC data without creating a login identity.
 
     Imported lazily so the unit tests that swap in a stub can avoid
     pulling the heavy seed module (and its ~3000 lines of incident
     catalogue) into the test process.
+
+    Provisioning creates the tenant's inactive, invite-pending administrator
+    before this callback runs.  The standalone demo script also creates a
+    deterministic demo administrator with a published password, so its
+    identity helper must never be reused here.  Starter connectors, alerts,
+    and cases do not depend on that demo identity.
     """
     # We *deliberately* don't reuse ``_run_full_seed`` from
     # ``app.scripts.seed_demo`` — that script opens its own session via
@@ -569,12 +575,10 @@ async def _default_demo_seeder(db: AsyncSession, tenant: Tenant) -> None:
     # ish (single-underscore prefix is "implementation detail" rather
     # than truly private) so we can reuse them safely.
     from app.scripts.seed_demo import (  # noqa: PLC0415
-        _ensure_user,
         _seed_alerts_and_cases,
         _seed_connectors,
     )
 
-    await _ensure_user(db, tenant)
     await _seed_connectors(db, tenant)
     # ``_seed_alerts_and_cases`` returns a tuple; we discard the count.
     await _seed_alerts_and_cases(db, tenant, alert_count=30)
