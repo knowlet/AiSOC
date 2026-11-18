@@ -15,10 +15,12 @@ on:
     branches: [main]
     paths:
       - 'infra/helm/**'
+      - 'tests/test_fusion_gateway_helm.py'
       - '.github/workflows/helm.yml'
   pull_request:
     paths:
       - 'infra/helm/**'
+      - 'tests/test_fusion_gateway_helm.py'
       - '.github/workflows/helm.yml'
 
 concurrency:
@@ -59,6 +61,9 @@ jobs:
 
       - name: Render with defaults
         run: helm template aisoc infra/helm/aisoc > /tmp/default.yaml
+
+      - name: Verify fusion gateway wiring and operator overrides
+        run: python3 tests/test_fusion_gateway_helm.py
 
       # The Helm chart could not install at all on main before v8.1: the
       # deployment template read .Values.ueba.replicaCount and values.yaml had

@@ -1,3 +1,4 @@
+{{- $apiFusionDefaults := include (print $.Template.BasePath "/api-fusion-defaults-configmap.yaml") . | trim }}
 {{- range $name, $svc := .Values.services }}
 ---
 apiVersion: apps/v1
@@ -40,6 +41,9 @@ spec:
         app.kubernetes.io/component: {{ $name }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        {{- if and (eq $name "api") $apiFusionDefaults }}
+        checksum/fusion-defaults: {{ $apiFusionDefaults | sha256sum }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "aisoc.serviceAccountName" $ }}
       securityContext:
@@ -166,6 +170,10 @@ spec:
               value: {{ $v | quote }}
             {{- end }}
           envFrom:
+            {{- if and (eq $name "api") $apiFusionDefaults }}
+            - configMapRef:
+                name: {{ include "aisoc.fullname" $ }}-api-fusion-defaults
+            {{- end }}
             - secretRef:
                 name: {{ include "aisoc.fullname" $ }}-secrets
                 optional: true

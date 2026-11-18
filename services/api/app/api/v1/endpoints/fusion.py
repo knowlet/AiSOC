@@ -2,14 +2,12 @@
 Fusion gateway / fallback for /api/v1/fusion/*.
 
 The fusion microservice (services/fusion) owns Risk-Based Alerting (RBA) —
-entity rollups, decayed risk scoring, and ML-assisted ranking. In a full
-deployment the web tier proxies /api/v1/fusion/* directly to that service
-(see apps/web/next.config.js → FUSION_HOST). When the fusion service is
-not deployed (e.g. the demo Fly.io stack), the web rewrite still hits the
-core API service via the catch-all, so we expose a thin gateway here that:
+entity rollups, decayed risk scoring, and ML-assisted ranking. The console
+routes /api/v1/fusion/* through this gateway so its response adapters and
+authenticated tenant forwarding apply on every deployment. This gateway:
 
-  1. Forwards to the upstream fusion service if FUSION_URL is set in the
-     api environment, preserving full functionality.
+  1. Forwards to fusion when FUSION_SERVICE_URL or FUSION_URL is set in the
+     API environment, adapting entity-risk responses to the console contract.
   2. Returns 503 for unavailable risk data rather than fabricating an empty
      queue, zero counts, or an absent entity. Health probes retain their stub status.
 
@@ -43,8 +41,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/fusion", tags=["fusion"])
 
 # When set, requests are forwarded to the live fusion service. When unset,
-# the gateway returns deterministic, empty fallbacks so the UI degrades
-# gracefully instead of bubbling 5xx into the analyst console.
+# entity-risk reads return 503 so unavailable data is never an empty queue.
 _FUSION_URL = (os.getenv("FUSION_SERVICE_URL") or os.getenv("FUSION_URL") or "").rstrip("/")
 
 # Header the upstream fusion service reads to learn which tenant a trusted

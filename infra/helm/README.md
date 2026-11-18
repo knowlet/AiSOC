@@ -98,6 +98,19 @@ environment variables — note in particular that `KAFKA_BOOTSTRAP_SERVERS` is
 the canonical broker variable; `KAFKA_BROKERS` is honored as a backward-compat
 alias.
 
+The API gateway receives a fallback `FUSION_URL` for the chart's `alert-fusion`
+Service automatically, using its rendered name and Service port. Its dedicated
+ConfigMap is loaded only by the API, before the existing Secret and shared
+ConfigMap, so either `FUSION_SERVICE_URL` or `FUSION_URL` supplied by an operator
+can override the fallback. The existing Secret, shared config, and explicit API
+environment precedence is preserved. Set an external URL under
+`services.api.env`, `global.extraConfig`, or the release's external Secret.
+An explicit URL setting in `services.api.env` or `global.extraConfig`, including
+an empty string, suppresses the generated fallback. Removing
+`services.alert-fusion` with `null` also leaves the gateway unconfigured unless
+an external URL is supplied. Unconfigured entity-risk reads return 503, so the
+console does not mistake unavailable data for an empty queue.
+
 ## Releasing a new chart version
 
 1. Bump `Chart.yaml::version` (chart version) and `Chart.yaml::appVersion`

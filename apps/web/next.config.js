@@ -40,15 +40,6 @@ try {
 const REALTIME_HOST = process.env.REALTIME_URL || 'http://localhost:8086';
 const API_HOST = process.env.API_URL || 'http://localhost:8000';
 const AGENTS_HOST = process.env.AGENTS_URL || 'http://localhost:8001';
-// Fusion service exposes /entity-risk/*, /ml/*, /metrics, /health at root.
-// We surface those to the browser under the same-origin namespace
-// /api/v1/fusion/* so the bundle stays host-agnostic.
-//
-// When FUSION_URL is unset (e.g. the demo Fly.io stack with no fusion
-// deployment), the rewrite is omitted entirely so /api/v1/fusion/* falls
-// through to the core API catch-all, which exposes a graceful fusion
-// gateway (services/api/app/api/v1/endpoints/fusion.py).
-const FUSION_HOST = process.env.FUSION_URL || '';
 // ENRICHMENT_URL is no longer read: the enrichment rewrites were removed
 // (GHSA-qf6m-hgwv-65f9) — see the note in rewrites() below.
 const OSQUERY_TLS_HOST = process.env.OSQUERY_TLS_URL || 'http://localhost:8090';
@@ -299,23 +290,17 @@ const nextConfig = {
       // account. The service authenticates now, but a door nothing uses
       // stays closed: a future console feature should reach enrichment with
       // the session bearer token, which the service verifies.
-      // Fusion service exposes the Risk-Based Alerting (entity rollup) queue
-      // and ML scoring endpoints at its own root (no /api/v1 prefix on the
-      // service side). Proxy /api/v1/fusion/:path* → fusion's /:path* so the
-      // browser only ever sees same-origin URLs.
+      // The API gateway adapts fusion's entity-risk records to the console
+      // contract and forwards the authenticated tenant. Direct fusion
+      // rewrites bypass that adapter, even when the upstream is healthy.
       //
-      // Only emit the fusion-specific rewrite when FUSION_URL is configured.
-      // Without it, /api/v1/fusion/* falls through to the core API, which
-      // now hosts a fusion gateway that returns graceful empty payloads
-      // when no upstream fusion is reachable.
-      ...(FUSION_HOST
-        ? [
-            {
-              source: '/api/v1/fusion/:path*',
-              destination: `${FUSION_HOST}/:path*`,
-            },
-          ]
-        : []),
+      // Keep this source explicit so the runtime resolver also re-points
+      // manifests built with the old direct route. FUSION_SERVICE_URL (or
+      // FUSION_URL) configures the upstream on the API service, not here.
+      {
+        source: '/api/v1/fusion/:path*',
+        destination: `${API_HOST}/api/v1/fusion/:path*`,
+      },
       // Catch-all for the core API.
       {
         source: '/api/v1/:path*',

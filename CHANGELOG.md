@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Entity-risk gateway wiring outside stock Compose.** Helm now configures
+  the API to reach the release's enabled `alert-fusion` Service, using its
+  configured name and port while preserving fusion URL overrides in API
+  environment variables, shared configuration, or the release's Secret.
+  Previously the service could be healthy while the API returned 503 because
+  it had no upstream configured. The console also sends fusion requests
+  through the API gateway even when a web deployment carries `FUSION_URL`.
+  The updated web configuration also repairs retained build manifests at
+  startup; an unchanged older web image must be upgraded. Direct routing
+  bypassed the gateway's response adapters and exposed the same field mismatch
+  fixed for Compose in #1937. An unavailable engine still returns 503; it is
+  never reported as an empty queue.
 
 ## [23.5.0] - 2026-11-18
 

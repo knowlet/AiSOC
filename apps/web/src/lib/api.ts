@@ -2382,8 +2382,8 @@ export const queueApi = {
 // Once an entity crosses ``rba_promotion_threshold`` it becomes the primary
 // unit of triage in the UI — so the analyst opens "the user fox.beach" with
 // 47 contributing alerts attached, not 47 separate alert rows. The endpoints
-// live on the fusion service (port 8082) and are proxied same-origin via
-// next.config.js → ``/api/v1/fusion/*``.
+// are served through the core API's fusion gateway, which adapts the
+// upstream records to these console types under ``/api/v1/fusion/*``.
 
 export type EntityType = "user" | "host" | "ip" | "domain";
 
@@ -2471,9 +2471,8 @@ export interface EntityRiskStats {
 }
 
 /**
- * Path namespace served by the fusion service. Goes through Next.js
- * rewrites (`/api/v1/fusion/*` → ``${FUSION_HOST}/*``) so the bundle
- * stays same-origin.
+ * Path namespace served by the core API's fusion gateway. The same-origin
+ * Next.js rewrite preserves this prefix so response adaptation always runs.
  */
 const FUSION_PATH = "/api/v1/fusion";
 

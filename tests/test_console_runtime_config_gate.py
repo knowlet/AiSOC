@@ -168,6 +168,102 @@ def test_resolver_refuses_to_start_when_a_chosen_address_cannot_be_applied(
     assert "API_URL" in result.stderr, f"the failure has to name the variable it could not apply; stderr was {result.stderr!r}"
 
 
+@pytest.mark.parametrize("fusion_url", ["", "http://fusion.internal:8003"])
+def test_fusion_console_routes_use_the_api_gateway(fusion_url: str) -> None:
+    """The gateway adapts fusion's wire shape to the console's contract.
+
+    A direct fusion rewrite bypasses that adapter, so a successful queue
+    response still crashes the console on its missing severity histogram.
+    Exercise the real build-time config, including the legacy override.
+    """
+    node = shutil.which("node") or ""
+    if not node:
+        pytest.fail("node is required to evaluate the console's fusion routes.")
+
+    result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        [
+            node,
+            "-e",
+            "require(process.argv[1]).rewrites().then(r => process.stdout.write(JSON.stringify(r)))",
+            str(WEB / "next.config.js"),
+        ],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "API_URL": OPERATOR_API, "FUSION_URL": fusion_url},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    routes = json.loads(result.stdout)
+    # Either a specific rewrite or the catch-all can serve these paths;
+    # whichever matches first must retain the gateway's /api/v1/fusion prefix.
+    for route in routes:
+        if route["source"] == "/api/v1/fusion/:path*":
+            destination = route["destination"].replace(":path*", "entity-risk/queue")
+            break
+        if route["source"] == "/api/v1/:path*":
+            destination = route["destination"].replace(":path*", "fusion/entity-risk/queue")
+            break
+    else:
+        pytest.fail("the console has no rewrite for the entity-risk queue")
+
+    assert destination == f"{OPERATOR_API}/api/v1/fusion/entity-risk/queue", (
+        f"the console bypasses the fusion gateway at {destination!r}; raw fusion records do not satisfy the console's response contract"
+    )
+
+
+@pytest.mark.parametrize("fusion_url", ["", "http://fusion.internal:8003"])
+@pytest.mark.parametrize("bucket", [None, "beforeFiles", "afterFiles", "fallback"])
+def test_runtime_resolver_repoints_legacy_direct_fusion_routes(tmp_path: pathlib.Path, fusion_url: str, bucket: str | None) -> None:
+    """An old baked direct route must not survive a build-time-only fix.
+
+    The operator may have removed FUSION_URL since the image was built; the
+    stale manifest still contains the route until the real resolver repairs
+    it. Preserve the compiled matcher and the rest of the entry verbatim.
+    """
+    node = shutil.which("node") or ""
+    if not node:
+        pytest.fail("node is required to exercise the runtime fusion route.")
+
+    app = tmp_path / "apps" / "web"
+    (app / "scripts").mkdir(parents=True)
+    (app / ".next").mkdir()
+    shutil.copy(WEB / "next.config.js", app / "next.config.js")
+    shutil.copy(RESOLVER, app / "scripts" / RESOLVER.name)
+    (tmp_path / "VERSION").write_text((REPO / "VERSION").read_text())
+
+    direct_route = {
+        "source": "/api/v1/fusion/:path*",
+        "destination": "http://baked-fusion:8003/:path*",
+        "regex": "^/api/v1/fusion(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$",
+    }
+    catch_all = {
+        "source": "/api/v1/:path*",
+        "destination": "http://api:8000/api/v1/:path*",
+        "regex": "^/api/v1(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$",
+    }
+    entries = [direct_route, catch_all]
+    rewrites = (
+        entries if bucket is None else {name: entries if name == bucket else [] for name in ("beforeFiles", "afterFiles", "fallback")}
+    )
+    manifest = app / ".next" / "routes-manifest.json"
+    manifest.write_text(json.dumps({"version": 3, "rewrites": rewrites}))
+
+    result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        [node, str(app / "scripts" / RESOLVER.name)],
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "API_URL": OPERATOR_API, "FUSION_URL": fusion_url},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    written = json.loads(manifest.read_text())["rewrites"]
+    updated = written if bucket is None else written[bucket]
+    assert updated[0] == {**direct_route, "destination": f"{OPERATOR_API}/api/v1/fusion/:path*"}, (
+        "the runtime manifest still bypasses the API gateway, or the compiled matcher changed"
+    )
+    assert updated[1] == {**catch_all, "destination": f"{OPERATOR_API}/api/v1/:path*"}
+
+
 def test_web_image_resolves_upstreams_before_the_server_starts() -> None:
     """The resolver only helps if the image actually runs it."""
     assert ENTRYPOINT.is_file(), (

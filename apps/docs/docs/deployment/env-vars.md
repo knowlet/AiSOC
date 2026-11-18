@@ -167,6 +167,27 @@ Source: [`services/api/app/auth/saml.py`](https://github.com/beenuar/AiSOC/blob/
 | `SAML_IDP_CERT` | — | PEM-encoded IdP certificate |
 | `SAML_DEBUG` | `false` | Verbose SAML logging — disable in production |
 
+### Fusion entity-risk gateway
+
+Configure the fusion upstream on the **API service**. The console's
+`/api/v1/fusion/*` requests pass through that API, which authenticates the
+caller, forwards the tenant assertion, and translates fusion's entity-risk
+responses to the console contract.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FUSION_SERVICE_URL` | unset in the API process; `http://fusion:8003` in Compose | Fusion base URL, preferred over `FUSION_URL` when nonempty. |
+| `FUSION_URL` | unset in the API process; the release's enabled `alert-fusion` Service URL in Helm | API-side fallback when `FUSION_SERVICE_URL` is empty. The chart's fallback uses the rendered Service name and configured Service port. Setting it on the updated web service does not route the console directly to fusion. |
+| `AISOC_FUSION_SERVICE_TOKEN` | falls back to `AISOC_SERVICE_TOKEN` | Credential the API presents to fusion with the authenticated caller's tenant assertion. |
+
+For an external fusion service on Helm, set either URL in `services.api.env`,
+`global.extraConfig`, or the release's Secret. The API loads the chart's
+fallback before shared configuration and the Secret; explicit container
+environment values take precedence. If fusion is disabled and no external URL
+is configured, entity-risk reads return 503 and the console reports the queue
+as unavailable.
+Apply URL changes by recreating the API container or rolling out its Deployment.
+
 ### Database, cache, queue
 
 **Two Postgres roles, and the distinction is a security control.** `DATABASE_URL`
@@ -556,6 +577,14 @@ which is why there is no CORS to configure.
 | `AISOC_MARKETING_HOME` | `false` | When `true`, `/` serves the project's marketing landing page. Default is the console: `/` redirects to `/login`, which routes onward (first run → setup wizard, signed in → dashboard) |
 | `AISOC_CONSOLE_BIND_ADDR` | `127.0.0.1` | Interface the console's host port publishes on |
 | `AISOC_BIND_ADDR` | `127.0.0.1` | Interface **every** host port publishes on, datastores included |
+
+Fusion requests use this same core API route so its entity-risk response
+adapters are always applied. Set `FUSION_SERVICE_URL` on the API service to
+choose the fusion upstream. With the updated web image/configuration, a legacy
+`FUSION_URL` on the web service no longer selects a separate direct route;
+the runtime resolver also repairs that route in retained build manifests.
+An unchanged older web image still contains its old routing configuration and
+must be rebuilt or upgraded to receive this fix.
 
 ### Fixed when the image is built
 

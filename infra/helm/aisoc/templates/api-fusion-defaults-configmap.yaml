@@ -1,0 +1,20 @@
+{{- $api := get .Values.services "api" | default dict }}
+{{- $apiEnv := $api.env | default dict }}
+{{- $globalEnv := .Values.global.extraConfig | default dict }}
+{{- $fusionConfigured := or (hasKey $apiEnv "FUSION_SERVICE_URL") (hasKey $apiEnv "FUSION_URL") (hasKey $globalEnv "FUSION_SERVICE_URL") (hasKey $globalEnv "FUSION_URL") }}
+{{- if and (hasKey .Values.services "api") (hasKey .Values.services "alert-fusion") (not $fusionConfigured) }}
+{{- $fusionSvc := get .Values.services "alert-fusion" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aisoc.fullname" . }}-api-fusion-defaults
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aisoc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+data:
+  # A low-priority fallback: either URL from the operator's Secret or API
+  # configuration must win. Only the API imports this ConfigMap, because
+  # older web images interpret FUSION_URL as a direct proxy to raw fusion.
+  FUSION_URL: "http://{{ include "aisoc.fullname" . }}-alert-fusion:{{ $fusionSvc.service.port | default 80 }}"
+{{- end }}

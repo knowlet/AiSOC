@@ -58,7 +58,8 @@ const UPSTREAM_VARS = [
   'API_URL',
   'AGENTS_URL',
   'REALTIME_URL',
-  'FUSION_URL',
+  // Fusion requests follow API_URL: the API owns the response adapter and
+  // its FUSION_SERVICE_URL/FUSION_URL setting chooses the actual upstream.
   // ENRICHMENT_URL is gone: the enrichment rewrites were removed from
   // next.config.js (GHSA-qf6m-hgwv-65f9), so the variable configures
   // nothing and keeping it here would treat setting it as operator intent
