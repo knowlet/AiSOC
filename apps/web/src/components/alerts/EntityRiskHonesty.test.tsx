@@ -186,6 +186,19 @@ describe('EntityRiskQueue — the disclosure covers the KPI cards', () => {
     expect(screen.getByText(/unknown rather than as an empty queue/i)).toBeTruthy();
     expect(screen.queryByText(/No entities are currently being tracked/i)).toBeNull();
   });
+
+  it('reports a gateway 503 without attributing it to fusion or showing counts', () => {
+    swrErrors.set(QUEUE_KEY, new ApiError('API 503', 503, ''));
+    swrErrors.set(STATS_KEY, new ApiError('API 503', 503, ''));
+
+    render(<EntityRiskQueue />);
+
+    expect(screen.getByRole('status').textContent).toContain('The entity-risk API returned 503.');
+    expect(screen.getByRole('status').textContent).not.toMatch(/fusion service returned/i);
+    expect(screen.getAllByText('Not measured').length).toBe(4);
+    expect(screen.queryByText(/No entities are currently being tracked/i)).toBeNull();
+    expectNothingFabricated();
+  });
 });
 
 describe('accessibility (WCAG 2.1 AA)', () => {
@@ -220,8 +233,12 @@ describe('describeQueueFailure — names the subsystem that actually failed', ()
     expect(message).not.toMatch(/unreachable/i);
   });
 
-  it('blames fusion only when fusion actually returned an error', () => {
-    expect(describeQueueFailure(new ApiError('API 503', 503, ''))).toMatch(/fusion service returned 503/i);
+  it.each([500, 502, 503, 504])('attributes HTTP %i to the API without guessing which upstream failed', (status) => {
+    const message = describeQueueFailure(new ApiError(`API ${status}`, status, ''));
+
+    expect(message).toContain(`The entity-risk API returned ${status}.`);
+    expect(message).not.toMatch(/fusion/i);
+    expect(message).toContain('The entity queue is unknown, not empty.');
   });
 
   it('reports a transport failure as unreachable, which is what status 0 means', () => {

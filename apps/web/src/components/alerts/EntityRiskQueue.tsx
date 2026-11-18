@@ -141,7 +141,7 @@ export function describeQueueFailure(error: unknown): string {
       return 'This deployment does not expose the entity-risk queue. Risk-Based Alerting needs the fusion service.';
     }
     if (error.status >= 500) {
-      return `The fusion service returned ${error.status}. The entity queue is unknown, not empty.`;
+      return `The entity-risk API returned ${error.status}. The entity queue is unknown, not empty.`;
     }
     return `The entity-risk queue request failed with HTTP ${error.status}. The queue is unknown, not empty.`;
   }

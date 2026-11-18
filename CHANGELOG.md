@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup; an unchanged older web image must be upgraded. Direct routing
   bypassed the gateway's response adapters and exposed the same field mismatch
   fixed for Compose in #1937. An unavailable engine still returns 503; it is
-  never reported as an empty queue.
+  never reported as an empty queue. The console attributes this status to the
+  entity-risk API because the gateway can return 503 without contacting fusion.
 
 ## [23.5.0] - 2026-11-18
 
