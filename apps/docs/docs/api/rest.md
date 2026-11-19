@@ -403,6 +403,15 @@ deployment options these routes report on.
 All four take `period` — `1h`, `24h`, `7d` or `30d`, defaulting to `24h` —
 and it is the same window the console's global selector sets.
 
+The `/dashboard` **Alert Volume** chart reads `/metrics/dashboard`, which
+also serves the dashboard's alert, case, and MTTR summary tiles. Its
+**Auto-refresh** selector controls how often that shared request is repeated:
+Off, 15s, 30s, 1m (the default), or 5m. The choice is stored in the browser
+and restored on subsequent visits. **Refresh now** fetches the latest metrics
+even when timed polling is Off. This controls how often the console reads the
+API; it does not alter the selected `period`, alert ingestion frequency, or
+the independently polled funnel, pipeline, and SOC performance panels.
+
 **`alerts.total` is open work, not everything ever received.** It counts
 `new`, `triaging` and `in_progress`; the severity counts beside it are scoped
 the same way, because the console labels them *Active Alerts* and *Critical —
