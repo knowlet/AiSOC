@@ -395,7 +395,7 @@ deployment options these routes report on.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/metrics/dashboard` | Alert, case and MTTR tiles |
+| `GET` | `/metrics/dashboard` | Dashboard summary tiles, alert volume, severity, ATT&CK tactics and connected sources |
 | `GET` | `/metrics/soc` | SOC KPIs, ATT&CK heatmap, calibration curve |
 | `GET` | `/metrics/funnel` | events → correlations → alerts, with deltas |
 | `GET` | `/metrics/alerts/trend` | Alert volume over time |
@@ -404,7 +404,8 @@ All four take `period` — `1h`, `24h`, `7d` or `30d`, defaulting to `24h` —
 and it is the same window the console's global selector sets.
 
 The `/dashboard` **Alert Volume** chart reads `/metrics/dashboard`, which
-also serves the dashboard's alert, case, and MTTR summary tiles. Its
+also serves the dashboard's summary tiles and the **Severity Breakdown**,
+**Top MITRE ATT&CK Tactics**, and **Connected Sources** panels. Its
 **Auto-refresh** selector controls how often that shared request is repeated:
 Off, 15s, 30s, 1m (the default), or 5m. The choice is stored in the browser
 and restored on subsequent visits. **Refresh now** fetches the latest metrics

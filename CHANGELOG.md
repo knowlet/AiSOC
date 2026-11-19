@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Configurable dashboard auto-refresh.** The Alert Volume control offers
+  Off, 15s, 30s, 1m (the default), and 5m, remembers the choice in the browser,
+  and provides **Refresh now** even when timed polling is off. The interval
+  applies to the shared dashboard metrics request used by Alert Volume,
+  the summary tiles, Severity Breakdown, Top MITRE ATT&CK Tactics, and
+  Connected Sources.
 
 ## [23.5.2] - 2026-11-19
 

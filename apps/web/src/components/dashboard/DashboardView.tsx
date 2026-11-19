@@ -14,7 +14,7 @@
  * Author: Beenu <beenu@cyble.com>
  */
 
-import React, { Component, Suspense, type ErrorInfo, type ReactNode, useState, useEffect, useRef, useCallback } from 'react';
+import React, { Component, Suspense, type ErrorInfo, type ReactNode, useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react';
 import useSWR from 'swr';
 import { metricsApi, type DashboardMetrics } from '@/lib/api';
 import { useTimeWindow } from '@/components/layout/TimeWindowProvider';
@@ -507,7 +507,9 @@ const DASHBOARD_REFRESH_OPTIONS = [
 type DashboardRefreshInterval = (typeof DASHBOARD_REFRESH_OPTIONS)[number]['value'];
 const DEFAULT_DASHBOARD_REFRESH_INTERVAL: DashboardRefreshInterval = 60_000;
 
-function loadDashboardRefreshInterval(): DashboardRefreshInterval {
+function loadDashboardRefreshInterval(
+  fallback: DashboardRefreshInterval = DEFAULT_DASHBOARD_REFRESH_INTERVAL,
+): DashboardRefreshInterval {
   if (typeof window === 'undefined') return DEFAULT_DASHBOARD_REFRESH_INTERVAL;
   try {
     const saved = window.localStorage.getItem(DASHBOARD_REFRESH_INTERVAL_KEY);
@@ -515,8 +517,58 @@ function loadDashboardRefreshInterval(): DashboardRefreshInterval {
       ?? DEFAULT_DASHBOARD_REFRESH_INTERVAL;
   } catch {
     // Storage may be disabled. The dashboard must still be usable.
-    return DEFAULT_DASHBOARD_REFRESH_INTERVAL;
+    return fallback;
   }
+}
+
+function getServerRefreshInterval(): DashboardRefreshInterval {
+  return DEFAULT_DASHBOARD_REFRESH_INTERVAL;
+}
+
+function createDashboardRefreshIntervalStore() {
+  let interval = loadDashboardRefreshInterval();
+  let hasUnpersistedChange = false;
+  const listeners = new Set<() => void>();
+  const notify = () => { listeners.forEach((listener) => listener()); };
+
+  return {
+    getSnapshot: () => interval,
+    subscribe: (listener: () => void) => {
+      const handleStorage = (event: StorageEvent) => {
+        if (event.key !== null && event.key !== DASHBOARD_REFRESH_INTERVAL_KEY) return;
+        try {
+          if (event.storageArea !== window.localStorage) return;
+        } catch {
+          return;
+        }
+        hasUnpersistedChange = false;
+        interval = loadDashboardRefreshInterval(interval);
+        notify();
+      };
+
+      window.addEventListener('storage', handleStorage);
+      // Catch writes between render and subscription without discarding a
+      // local choice that storage could not persist.
+      if (!hasUnpersistedChange) interval = loadDashboardRefreshInterval(interval);
+      listeners.add(listener);
+      return () => {
+        window.removeEventListener('storage', handleStorage);
+        listeners.delete(listener);
+      };
+    },
+    setInterval: (value: DashboardRefreshInterval) => {
+      interval = value;
+      try {
+        window.localStorage.setItem(DASHBOARD_REFRESH_INTERVAL_KEY, String(value));
+        hasUnpersistedChange = false;
+      } catch {
+        // Keep the selected interval even if an older stored value is readable.
+        hasUnpersistedChange = true;
+      }
+      // The writing document does not receive a native storage event.
+      notify();
+    },
+  };
 }
 
 export function DashboardView() {
@@ -524,23 +576,18 @@ export function DashboardView() {
   // changing the window actually changes what is shown -- it used to drive
   // nothing at all.
   const { window: timeWindow } = useTimeWindow();
-  const [refreshInterval, setRefreshInterval] = useState<DashboardRefreshInterval>(
-    DEFAULT_DASHBOARD_REFRESH_INTERVAL,
+  const [refreshIntervalStore] = useState(createDashboardRefreshIntervalStore);
+  const refreshInterval = useSyncExternalStore(
+    refreshIntervalStore.subscribe,
+    refreshIntervalStore.getSnapshot,
+    getServerRefreshInterval,
   );
-
-  // Restore the last selection after mount so server and client render alike.
-  useEffect(() => { setRefreshInterval(loadDashboardRefreshInterval()); }, []);
 
   const handleRefreshIntervalChange = useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
     const option = DASHBOARD_REFRESH_OPTIONS.find(({ value }) => String(value) === event.target.value);
     if (!option) return;
-    setRefreshInterval(option.value);
-    try {
-      window.localStorage.setItem(DASHBOARD_REFRESH_INTERVAL_KEY, String(option.value));
-    } catch {
-      // Keep the in-memory choice when storage is unavailable.
-    }
-  }, []);
+    refreshIntervalStore.setInterval(option.value);
+  }, [refreshIntervalStore]);
 
   const {
     data: rawMetrics,
@@ -767,7 +814,8 @@ export function DashboardView() {
                 Refresh now
               </button>
               <span id="dashboard-refresh-description" className="sr-only">
-                Refreshes the alert volume chart and dashboard summary metrics. Does not change the time window or ingest rate.
+                Refreshes Alert Volume, the dashboard summary metrics, Severity Breakdown,
+                Top MITRE ATT&amp;CK Tactics, and Connected Sources. Does not change the time window or ingest rate.
               </span>
             </div>
           </div>
