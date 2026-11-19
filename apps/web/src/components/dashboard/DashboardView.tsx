@@ -495,11 +495,52 @@ export function describeConnectedSources(
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
+const DASHBOARD_REFRESH_INTERVAL_KEY = 'aisoc:dashboard:refresh-interval';
+const DASHBOARD_REFRESH_OPTIONS = [
+  { value: 0, label: 'Off' },
+  { value: 15_000, label: '15s' },
+  { value: 30_000, label: '30s' },
+  { value: 60_000, label: '1m' },
+  { value: 300_000, label: '5m' },
+] as const;
+
+type DashboardRefreshInterval = (typeof DASHBOARD_REFRESH_OPTIONS)[number]['value'];
+const DEFAULT_DASHBOARD_REFRESH_INTERVAL: DashboardRefreshInterval = 60_000;
+
+function loadDashboardRefreshInterval(): DashboardRefreshInterval {
+  if (typeof window === 'undefined') return DEFAULT_DASHBOARD_REFRESH_INTERVAL;
+  try {
+    const saved = window.localStorage.getItem(DASHBOARD_REFRESH_INTERVAL_KEY);
+    return DASHBOARD_REFRESH_OPTIONS.find((option) => String(option.value) === saved)?.value
+      ?? DEFAULT_DASHBOARD_REFRESH_INTERVAL;
+  } catch {
+    // Storage may be disabled. The dashboard must still be usable.
+    return DEFAULT_DASHBOARD_REFRESH_INTERVAL;
+  }
+}
+
 export function DashboardView() {
   // The global selector in the header. Every fetch below binds to it, so
   // changing the window actually changes what is shown -- it used to drive
   // nothing at all.
   const { window: timeWindow } = useTimeWindow();
+  const [refreshInterval, setRefreshInterval] = useState<DashboardRefreshInterval>(
+    DEFAULT_DASHBOARD_REFRESH_INTERVAL,
+  );
+
+  // Restore the last selection after mount so server and client render alike.
+  useEffect(() => { setRefreshInterval(loadDashboardRefreshInterval()); }, []);
+
+  const handleRefreshIntervalChange = useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
+    const option = DASHBOARD_REFRESH_OPTIONS.find(({ value }) => String(value) === event.target.value);
+    if (!option) return;
+    setRefreshInterval(option.value);
+    try {
+      window.localStorage.setItem(DASHBOARD_REFRESH_INTERVAL_KEY, String(option.value));
+    } catch {
+      // Keep the in-memory choice when storage is unavailable.
+    }
+  }, []);
 
   const {
     data: rawMetrics,
@@ -516,9 +557,10 @@ export function DashboardView() {
     () => metricsApi.getDashboard(timeWindow),
     {
       fallbackData: demoFallback(MOCK_METRICS),
-      refreshInterval: 60000,
+      refreshInterval,
       revalidateOnMount: true,
       revalidateOnFocus: false,
+      revalidateOnReconnect: refreshInterval !== 0,
       shouldRetryOnError: true,
       errorRetryCount: 3,
       errorRetryInterval: 4000,
@@ -699,9 +741,35 @@ export function DashboardView() {
     'charts-row': (
       <div className="grid grid-cols-3 gap-4">
         <div className="col-span-2 bg-gray-900/60 border border-gray-800/60 rounded-xl p-5">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
             <h3 className="text-sm font-medium text-gray-300">Alert Volume ({periodLabel})</h3>
-            <span className="text-xs text-gray-500">Last {periodLabel}</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">Last {periodLabel}</span>
+              <label htmlFor="dashboard-refresh-interval" className="text-xs text-gray-400">
+                Auto-refresh
+              </label>
+              <select
+                id="dashboard-refresh-interval"
+                aria-describedby="dashboard-refresh-description"
+                value={refreshInterval}
+                onChange={handleRefreshIntervalChange}
+                className="rounded-md border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {DASHBOARD_REFRESH_OPTIONS.map(({ value, label }) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={retryMetrics}
+                className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:border-gray-500 hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                Refresh now
+              </button>
+              <span id="dashboard-refresh-description" className="sr-only">
+                Refreshes the alert volume chart and dashboard summary metrics. Does not change the time window or ingest rate.
+              </span>
+            </div>
           </div>
           {trendData.length > 0 ? (
             <RechartsArea data={trendData} />
