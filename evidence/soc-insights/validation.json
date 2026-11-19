@@ -1,0 +1,65 @@
+{
+  "database": "PostgreSQL16.2; all160 unchanged API migrations; aisoc_app runtime role",
+  "live_tests": {
+    "fixed": {
+      "passed": 8,
+      "failed": 0
+    },
+    "baseline_7fcfa5d7": {
+      "passed": 2,
+      "failed": 6
+    },
+    "restored_baseline_negative_control": {
+      "passed": 2,
+      "failed": 6
+    },
+    "materialization_only_negative_control": {
+      "passed": 7,
+      "failed": 1,
+      "reason": "generic-plan2sstatementbudget expires and expected measured cost0.3/2000runs degrades to0/0"
+    }
+  },
+  "existing_denominator_tests": {
+    "passed": 11,
+    "failed": 0
+  },
+  "http_benchmark": {
+    "status": "passed",
+    "transport": "real HTTP sockets; original app.main app and enabled lifespan; original JWT/DB dependencies; fixed clock only",
+    "database": "PostgreSQL16.2; all160 unchanged migrations; aisoc_app runtime role; real Redis",
+    "fixture": {
+      "target_tenant_current_alerts": 10000,
+      "target_tenant_previous_alerts": 10000,
+      "target_tenant_current_cases": 3000,
+      "target_tenant_previous_cases": 3000,
+      "target_tenant_current_runs": 2000,
+      "target_tenant_previous_runs": 2000,
+      "cost_rows_per_run": 2,
+      "other_tenant_each_window_alerts_cases_runs": 100,
+      "window": "30d"
+    },
+    "results": [
+      {
+        "variant": "fixed",
+        "requests": 5,
+        "median_ms": 226.28,
+        "max_ms": 484.61,
+        "data_selects_per_request": [
+          3
+        ],
+        "returned_data_rows_per_request": [
+          75
+        ],
+        "cold_request_ms": 336.98
+      }
+    ],
+    "limitations": [
+      "Local loopback synthetic fixture benchmark; does not estimate production latency",
+      "Unrelated Kafka,ClickHouse,Neo4j are unavailable; optional workers disabled",
+      "No full Compose pipeline or browser workload"
+    ],
+    "existing_denominator_suite_exit_code": 0
+  },
+  "lint": "ruff0.16.10 check+format passed test_insights_live.py",
+  "test_path": "services/api/tests/test_insights_live.py"
+}
