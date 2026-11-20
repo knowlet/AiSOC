@@ -280,6 +280,10 @@ jobs:
           # depth-1 checkout has neither and the gate refuses rather than
           # reporting a clean verdict about a history it could not see.
           fetch-depth: 0
+      # origin on a fork does not have the upstream release tags. The
+      # checkout above asks for them; this step gets them from the parent
+      # when that ask comes back empty.
+      - uses: ./.github/actions/fetch-release-tags
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'

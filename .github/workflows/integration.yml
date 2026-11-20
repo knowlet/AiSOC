@@ -1355,6 +1355,12 @@ jobs:
           KAFKA_PROCESS_ROLES: broker,controller
           KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
           KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:19092
+          # Two listeners (PLAINTEXT and CONTROLLER). 7.5 defaulted the
+          # inter-broker listener to PLAINTEXT; 7.8 does not, and metadata
+          # then hands the client the controller address, which is not
+          # published on the runner. The connect to that address does not
+          # reset, so aiokafka waits until the job cap cancels the run.
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
           KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
           KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
           KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
@@ -1718,6 +1724,12 @@ jobs:
           # Full history + tags so we can check out the released migration set.
           fetch-depth: 0
           fetch-tags: true
+
+      # The tag ref is not on a fork even when the commit is an ancestor of
+      # HEAD. fetch-tags only reads origin.
+      - uses: ./.github/actions/fetch-release-tags
+        with:
+          tag: ${{ matrix.from_ref }}
 
       - name: Start PostgreSQL with registry fallback
         uses: ./.github/actions/start-postgres

@@ -86,6 +86,15 @@ from app.workers.triage_persistence import (
 
 logger = structlog.get_logger()
 
+#: Leave-group against a broker that is not answering must not pin shutdown.
+#: ``AIOKafkaConsumer.stop`` waits on the in-flight coordination request. A
+#: broker that has stopped completing that request — Kafka 7.8 keeps the
+#: socket where 7.5 reset it when the path in front of it closes — holds the
+#: waiter until the process is killed. The readiness job's ten-minute cap is
+#: that kill. Five seconds is long enough for a broker that is actually there
+#: to accept LeaveGroup.
+_KAFKA_STOP_TIMEOUT_S = 5.0
+
 #: How long the commit window may stay open when the topic is quieter
 #: than the concurrency bound. A policy choice: five seconds of replay
 #: after a crash is cheap, and leaving finished work uncommitted
@@ -535,10 +544,11 @@ class FusedAlertTriageWorker:
                 except Exception as commit_exc:  # noqa: BLE001 — reprocess on restart
                     logger.warning("auto_triage_worker.commit_failed", error=str(commit_exc))
         finally:
-            # Cleared before the teardown await, which can itself raise on a
-            # broker that has gone away.
+            # Cleared before the teardown await. The await itself is bounded:
+            # a broker that has gone away must not keep this task, and the
+            # test that cancels it, until the job timeout.
             self._attached = False
-            await self._consumer.stop()
+            await self._stop_client(self._consumer)
 
     async def _process_with_retry(self, message: Any) -> bool:
         """Triage one alert with bounded retries; dead-letter on exhaustion.
@@ -667,16 +677,23 @@ class FusedAlertTriageWorker:
         await consumer.topics()
         return True
 
+    async def _stop_client(self, client: Any) -> None:
+        if client is None:
+            return
+        try:
+            await asyncio.wait_for(client.stop(), _KAFKA_STOP_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning("auto_triage_worker.kafka_stop_timed_out", timeout_s=_KAFKA_STOP_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — shutdown must not raise over a dead broker
+            logger.warning("auto_triage_worker.kafka_stop_failed", error=str(exc))
+
     async def stop(self) -> None:
         self._running = False
         self._attached = False
-        if self._consumer is not None:
-            await self._consumer.stop()
-            self._consumer = None
-        if self._producer is not None:
-            with contextlib.suppress(Exception):
-                await self._producer.stop()
-            self._producer = None
+        await self._stop_client(self._consumer)
+        self._consumer = None
+        await self._stop_client(self._producer)
+        self._producer = None
         logger.info("auto_triage_worker.stopped", metrics=dict(_METRICS))
 
     async def triage(self, message: dict[str, Any]) -> dict[str, Any] | None:

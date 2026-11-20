@@ -9,6 +9,8 @@ behavior hold.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 
 import pytest
@@ -68,6 +70,20 @@ def _no_ledger_db(monkeypatch):
 
 def _worker() -> FusedAlertTriageWorker:
     return FusedAlertTriageWorker(bootstrap_servers="unused")
+
+
+class _NeverStops:
+    async def stop(self) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_stop_returns_when_the_client_never_answers() -> None:
+    worker = _worker()
+    worker._consumer = _NeverStops()
+    started = time.monotonic()
+    await worker.stop()
+    elapsed = time.monotonic() - started
+    assert elapsed < worker_mod._KAFKA_STOP_TIMEOUT_S + 1
 
 
 # ── state mapping ─────────────────────────────────────────────────────────────

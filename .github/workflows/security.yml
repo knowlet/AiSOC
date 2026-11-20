@@ -177,7 +177,10 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install semgrep
-        run: pip install --quiet semgrep==1.86.0
+        # semgrep 1.86 imports pkg_resources through opentelemetry.
+        # Python 3.13's pip does not install setuptools, and setuptools 82
+        # removed pkg_resources. 81 is the last release that still ships it.
+        run: pip install --quiet "semgrep==1.86.0" "setuptools>=81,<82"
       # Fails on a vendored pack that disagrees with its manifest — a
       # hand-edit, a truncated fetch, a pack on disk the manifest never
       # recorded. Network-free on purpose: comparing against the live

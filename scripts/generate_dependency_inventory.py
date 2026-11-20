@@ -37,6 +37,11 @@ COMPOSE_CANONICAL = ROOT / "docker-compose.yml"
 IMAGE_LINE = re.compile(r"^\s*image:\s*(?P<ref>.+?)\s*$", re.MULTILINE)
 IMAGE_INLINE = re.compile(r'image:\s*["\']?(?P<ref>[^"\'\s${}]+:[^"\'\s${}]+)["\']?')
 FROM_LINE = re.compile(r"^FROM\s+(?P<ref>\S+)", re.MULTILINE)
+
+# Registries this gate does not compare to the compose datastore pins.
+# Matched on the parsed registry host, not as a substring of the reference:
+# a name that merely contains the text is a different registry.
+_UNMANAGED_REGISTRIES = frozenset({"ghcr.io", "mcr.microsoft.com"})
 GO_VERSION = re.compile(r"^go\s+(?P<v>\d+\.\d+(?:\.\d+)?)", re.MULTILINE)
 CHECKOUT_SHA = re.compile(
     r"uses:\s*actions/checkout@(?P<sha>[0-9a-f]{40})\s+#\s*(?P<label>\S+)",
@@ -70,6 +75,44 @@ class Inventory:
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def image_registry_host(ref: str) -> str | None:
+    """Registry host of a Docker image reference, or None for Docker Hub.
+
+    The host is the first path component when that component contains a dot
+    or a port, or is ``localhost``. A reference with no registry
+    (``library/redis:7``, ``redis:7``) is Docker Hub.
+    """
+    text = ref.strip().strip("\"'")
+    if not text or "${" in text:
+        return None
+    name = text.split("@", 1)[0]
+    slash = name.rfind("/")
+    colon = name.rfind(":")
+    if colon > slash:
+        name = name[:colon]
+    first, sep, _rest = name.partition("/")
+    if not sep:
+        return None
+    if "." in first or ":" in first or first == "localhost":
+        return first.lower()
+    return None
+
+
+def _host_is_registry(host: str, registry: str) -> bool:
+    """True when ``host`` is ``registry`` or a subdomain of it."""
+    if host == registry:
+        return True
+    suffix = "." + registry
+    return len(host) > len(suffix) and host.endswith(suffix)
+
+
+def _unmanaged_registry(ref: str) -> bool:
+    host = image_registry_host(ref)
+    if host is None:
+        return False
+    return any(_host_is_registry(host, registry) for registry in _UNMANAGED_REGISTRIES)
 
 
 def _collect_images(text: str) -> list[str]:
@@ -231,7 +274,7 @@ def _check_datastore_consistency() -> list[str]:
     workflow_dir = ROOT / ".github" / "workflows"
     for wf in workflow_dir.glob("*.yml"):
         for ref in _collect_images(_read_text(wf)):
-            if "ghcr.io/" in ref or "mcr.microsoft.com" in ref:
+            if _unmanaged_registry(ref):
                 continue
             ctag = canonical_tag(ref)
             if ctag is None:
@@ -306,6 +349,21 @@ def _self_test() -> int:
 
     if not fake_check("v1.20.0"):
         errors.append("self-test expected qdrant v1.20.0 in this tree")
+
+    # A registry is the host, not a substring. These three look alike and
+    # must not be treated as the same registry.
+    if image_registry_host("ghcr.io/org/qdrant:v1.20.0") != "ghcr.io":
+        errors.append("ghcr.io host was not parsed")
+    if image_registry_host("mcr.microsoft.com/oss/nginx:1") != "mcr.microsoft.com":
+        errors.append("mcr.microsoft.com host was not parsed")
+    if _unmanaged_registry("notghcr.io/qdrant/qdrant:v1.7.0"):
+        errors.append("a registry whose name contains ghcr.io was skipped")
+    if _unmanaged_registry("mcr.microsoft.com.attacker.example/library/x:1"):
+        errors.append("a registry whose name contains mcr.microsoft.com was skipped")
+    if not _unmanaged_registry("ghcr.io/beenuar/aisoc:latest"):
+        errors.append("ghcr.io itself was not skipped")
+    if not _unmanaged_registry("sub.mcr.microsoft.com/oss/nginx:1"):
+        errors.append("a subdomain of mcr.microsoft.com was not skipped")
 
     if errors:
         for e in errors:

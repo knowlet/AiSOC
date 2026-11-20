@@ -1952,6 +1952,16 @@ jobs:
         # runners and no workflow ever ran it.
         run: python3 scripts/check_store_migrations.py
 
+      - name: Datastore pins agree, and a direct Qdrant jump is refused
+        # Both scripts exit non-zero when the tree is wrong, which makes them
+        # gates. A gate no workflow runs cannot fail, and check_gate_coverage
+        # reports that as the tree already failing its own self-test.
+        run: |
+          python3 scripts/generate_dependency_inventory.py --self-test
+          python3 scripts/generate_dependency_inventory.py --check
+          python3 scripts/check_qdrant_upgrade_preflight.py --self-test
+          python3 scripts/check_qdrant_upgrade_preflight.py
+
       # Both of these import each service's FastAPI app, so they belong in
       # the job that installs the service dependencies rather than the lint
       # job, which installs only ruff and mypy. Placed there first, they

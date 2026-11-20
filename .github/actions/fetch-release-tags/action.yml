@@ -1,0 +1,57 @@
+name: Fetch published release tags
+description: >-
+  Release tags live on the repository that cuts them. actions/checkout
+  fetches refs/tags/* from origin, and a fork has none, so a full-history
+  checkout still cannot resolve v7.5.0 or answer check_chart_version.py.
+  The commits are already in the history; this step adds the missing refs
+  from the parent repository.
+
+inputs:
+  tag:
+    description: >-
+      One tag that must resolve after this step. Leave empty to require
+      only that some v* tag is present (the chart-version gate reads all
+      of them).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch release tags missing from origin
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        has_tag() {
+          git rev-parse --verify --quiet "refs/tags/${1}^{commit}" >/dev/null
+        }
+        if [ -n "$RELEASE_TAG" ]; then
+          if has_tag "$RELEASE_TAG"; then
+            echo "$RELEASE_TAG already present"
+            exit 0
+          fi
+        elif git tag --list 'v*' | grep -q .; then
+          echo "release tags already present"
+          exit 0
+        fi
+        parent="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.full_name // empty')"
+        if [ -z "$parent" ]; then
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "::error::${RELEASE_TAG} is not a tag on ${GITHUB_REPOSITORY}, and this repository is not a fork"
+          else
+            echo "::error::${GITHUB_REPOSITORY} has no v* tags, and this repository is not a fork"
+          fi
+          exit 1
+        fi
+        echo "fetching release tags from ${parent}"
+        if [ -n "$RELEASE_TAG" ]; then
+          git fetch --no-tags "https://github.com/${parent}.git" \
+            "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          has_tag "$RELEASE_TAG"
+        else
+          git fetch --no-tags "https://github.com/${parent}.git" 'refs/tags/v*:refs/tags/v*'
+          git tag --list 'v*' | grep -q .
+        fi

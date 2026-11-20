@@ -236,7 +236,13 @@ jobs:
             bootstrap: 'apk add --no-cache bash curl ca-certificates procps lsof iproute2 file coreutils'
           - distro: archlinux
             image: archlinux:latest
-            bootstrap: 'pacman -Sy --noconfirm bash curl ca-certificates procps-ng lsof iproute2 file'
+            # -Sy refreshes the databases and then installs curl against them
+            # while the image's already-installed packages stay on the old
+            # soname. Current Arch curl pulls openssl 4, and cryptsetup /
+            # libarchive / pacman still require libcrypto.so=3-64, so the
+            # transaction is refused before --diagnose runs. -Syu upgrades
+            # the installed set in the same transaction.
+            bootstrap: 'pacman -Syu --noconfirm bash curl ca-certificates procps-ng lsof iproute2 file'
           - distro: opensuse-leap
             image: opensuse/leap:15.6
             bootstrap: 'zypper --non-interactive install bash curl ca-certificates procps lsof iproute2 file'

@@ -106,11 +106,20 @@ ENV AISOC_DEV_PYTHON=python3.13
 # `node` at runtime, and any uid the workflow runner gates the container to.
 # The previous pipx approach installed to `/root/.local/bin/`, which is
 # unreadable by `node` (uid 1000) and broke the cold-start KPI probe.
+#
+# `uv python install` has the same default: the interpreter tree lands in
+# root's home. A symlink in /usr/local/bin that points there is not a
+# command `node` can execute (the home directory is mode 700), and bash
+# reports that as "command not found". The install directory below is on
+# a world-executable path.
+ENV UV_PYTHON_INSTALL_DIR=/usr/local/share/uv/python
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
         uv "ruff>=0.16.8,<0.17" \
+ && mkdir -p "$UV_PYTHON_INSTALL_DIR" \
  && uv python install 3.13 \
- && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3.13 \
- && ln -sf /usr/local/bin/python3.13 /usr/local/bin/python3
+ && chmod -R a+rX /usr/local/share/uv \
+ && ln -sfn "$(uv python find 3.13)" /usr/local/bin/python3.13 \
+ && ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python3
 
 # ─── pnpm via corepack ──────────────────────────────────────────────────────
 RUN corepack enable \
