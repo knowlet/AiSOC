@@ -33,7 +33,9 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
 
 const STARTER_YAML = `# Business context rules — YAML.
 # Each rule mutates a fused alert before it reaches the triage agent.
-# Supported actions: set_severity, route_to, tag, suppress.
+# Supported actions: set_severity, route_to, tag, suppress, require_escalation.
+# require_escalation checks the original alert and prevents suppression and
+# automatic closure. Pair it with set_severity to establish a severity floor.
 #
 # Fields are dotted paths into the fused alert: severity, source,
 # hostname, username, src_ip, dst_ip, domain, tags, risk_score, and
@@ -168,8 +170,9 @@ export function BusinessContextSettings() {
           <p className="max-w-2xl text-sm text-slate-400">
             Encode your operational reality between fusion and the triage
             agent — bump severity for prod, route AWS alerts to the cloud
-            team, suppress alerts during a known maintenance window. Rules
-            run in priority order; the last matching action wins.
+            team, or require escalation for selected detections. Ordinary
+            actions run in priority order. Required escalations prevent
+            suppression and automatic closure, and preserve their severity floor.
           </p>
         </div>
         <div className="flex items-center gap-3">

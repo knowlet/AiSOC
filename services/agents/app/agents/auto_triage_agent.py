@@ -463,6 +463,8 @@ def _render_business_context(bc: dict[str, Any] | None) -> str:
         lines.append(f"- Rules {', '.join(rule_ids)} set severity {before} -> {after}.")
     else:
         lines.append(f"- Rules matched: {', '.join(rule_ids)}.")
+    if closure_authorization.requires_escalation(bc):
+        lines.append("- Mandatory escalation applies. The service will keep this alert open for review regardless of your verdict.")
     lines.append(
         "If this business context informs the impact of the alert, you may add an "
         'optional "business_impact" object to your JSON response: '
@@ -874,7 +876,8 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
         confidence=confidence,
         default_threshold=AUTO_CLOSE_THRESHOLD,
     )
-    should_auto_close = verdict in AUTO_CLOSEABLE_DISPOSITIONS and closure.allowed
+    mandatory_escalation = closure_authorization.requires_escalation(state.business_context)
+    should_auto_close = verdict in AUTO_CLOSEABLE_DISPOSITIONS and closure.allowed and not mandatory_escalation
 
     # Phase 7. The threshold above compares the model's own `confidence`
     # field against a number, and that is the whole of the numeric gate on
@@ -1002,6 +1005,15 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
         if verdict_review.changes_decision:
             state.add_finding(verdict_review.summary())
 
+    # This is an operator policy, independent of the model's classification.
+    # Apply it after review as well so no reviewer can restore closure.
+    if mandatory_escalation:
+        should_auto_close = False
+        if state.status is AgentStatus.COMPLETED:
+            state.status = AgentStatus.RUNNING
+        rule_ids = ", ".join(str(value) for value in (state.business_context or {}).get("escalation_rule_ids", []))
+        state.add_finding(f"Business-context rules require escalation: {rule_ids}. Auto-close withheld.")
+
     if should_auto_close:
         _metrics["auto_resolved_count"] += 1
         state.status = AgentStatus.COMPLETED
@@ -1023,10 +1035,12 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
         )
     else:
         _metrics["escalated_count"] += 1
-        state.add_finding(
-            f"Escalating to full pipeline — "
-            f"{'TP verdict' if verdict == 'true_positive' else f'confidence {confidence:.2f} < threshold {AUTO_CLOSE_THRESHOLD:.2f}'}"
+        escalation_reason = (
+            "mandatory business-context policy"
+            if mandatory_escalation
+            else ("TP verdict" if verdict == "true_positive" else f"confidence {confidence:.2f} < threshold {AUTO_CLOSE_THRESHOLD:.2f}")
         )
+        state.add_finding(f"Escalating to full pipeline — {escalation_reason}")
         logger.info(
             "Auto-triage: escalating",
             verdict=verdict,

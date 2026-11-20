@@ -115,6 +115,7 @@ class RuleActionWire(BaseModel):
     route_to: str | None = None
     tag: str | None = None
     suppress: bool = False
+    require_escalation: bool = False
 
 
 class RuleWire(BaseModel):
@@ -208,6 +209,7 @@ def _wire_rule(rule: BusinessContextRule) -> RuleWire:
             route_to=rule.then.route_to,
             tag=rule.then.tag,
             suppress=rule.then.suppress,
+            require_escalation=rule.then.require_escalation,
         ),
     )
 
@@ -715,6 +717,8 @@ def _action_to_dict(action: Any) -> dict[str, Any]:
         out["tag"] = action.tag
     if action.suppress:
         out["suppress"] = True
+    if action.require_escalation:
+        out["require_escalation"] = True
     return out
 
 
