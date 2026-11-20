@@ -13,6 +13,7 @@ HTTP routing uses ``respx`` exactly like ``test_wazuh_connector.py``.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, date, datetime
 
@@ -179,6 +180,24 @@ class TestTheStreamSplit:
         assert f["cvss_score"] == pytest.approx(9.8)
         assert f["severity"] == "critical"
         assert f["source"] == "wazuh"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_inventory_query_covers_custom_markers_without_claiming_exploits(self):
+        custom = _detector_hit()
+        custom["_source"]["rule"]["groups"] = ["custom-detector"]
+        exploit = _real_alert_hit()
+        exploit["_source"]["data"]["cve"] = "CVE-2024-0001"
+        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response([custom, exploit]))
+        findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
+
+        assert [finding["external_id"] for finding in findings] == ["doc-vuln"]
+        query = json.loads(route.calls.last.request.content)
+        selector = query["query"]["bool"]["must"][1]["bool"]
+        assert selector["minimum_should_match"] == 1
+        assert {"terms": {"rule.groups": ["vulnerability-detector", "vulnerability"]}} in selector["should"]
+        assert {"exists": {"field": "data.vulnerability.cve"}} in selector["should"]
+        assert {"exists": {"field": "data.cve"}} in selector["should"]
 
     @pytest.mark.asyncio
     @respx.mock
