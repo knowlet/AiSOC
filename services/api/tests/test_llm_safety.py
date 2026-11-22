@@ -12,6 +12,7 @@ attacker-authored by definition.
 from __future__ import annotations
 
 import ast
+import socket
 from pathlib import Path
 
 import httpx
@@ -21,6 +22,17 @@ from app.services.llm_safety import (
     classify_message,
     safe_chat_completions_request,
 )
+
+
+@pytest.fixture(autouse=True)
+def _public_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtime guard resolves names. These tests use hosts that are not real."""
+
+    def fake(host: str, *_args: object, **_kwargs: object) -> list:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
+
+    monkeypatch.setattr("app._vendor.ssrf_guard.socket.getaddrinfo", fake)
+
 
 RAW_OCSF = '{"class_uid": 2001, "activity_id": 1, "metadata": {"product": {"name": "x"}, "version": "1.0"}}'
 

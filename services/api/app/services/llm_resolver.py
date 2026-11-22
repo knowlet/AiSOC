@@ -235,6 +235,21 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
             env_base=env_base_url,
             env_model=env_model,
         )
+        if cred.provider == "azure-openai" and not (base_url or "").strip():
+            # Fail closed before the stored key is decrypted. There is no
+            # Azure default to send it to, and the deployment base is a
+            # different credential's endpoint.
+            return LlmConfig(
+                allowed=False,
+                base_url="",
+                model=model or "",
+                api_key=None,
+                source="tenant",
+                reason="azure-openai has no base URL; the stored key was not sent to the deployment default",
+                model_from_tenant=tenant_contributed_model,
+                base_url_from_tenant=False,
+                api_key_from_tenant=False,
+            )
         if not inherit_env_key:
             # A tenant-controlled destination must never receive the bundled
             # gateway master key or a different provider's environment key.

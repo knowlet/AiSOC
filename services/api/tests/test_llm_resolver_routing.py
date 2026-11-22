@@ -101,6 +101,62 @@ async def test_foreign_endpoint_never_inherits_gateway_key(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_azure_without_a_base_does_not_send_the_stored_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An Azure row with no endpoint must not inherit the deployment base."""
+    import httpx
+    from app.api.v1.endpoints import llm_credentials as credentials_module
+
+    decrypt_as(monkeypatch, "azure-stored-key")
+    posts: list[tuple[str, str | None]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+        async def post(self, url: str, headers: dict[str, str] | None = None, **_kwargs: object) -> httpx.Response:
+            posts.append((url, None if headers is None else headers.get("Authorization")))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}, request=httpx.Request("POST", url))
+
+    def fake(_host: str, *_args: object, **_kwargs: object) -> list:
+        return [(2, 1, 6, "", ("1.1.1.1", 0))]
+
+    class _Vault:
+        @staticmethod
+        def decrypt(_token: str) -> str:
+            return "azure-stored-key"
+
+    monkeypatch.setattr("app._vendor.ssrf_guard.socket.getaddrinfo", fake)
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(credentials_module, "get_vault", lambda: _Vault())
+
+    db = database(credential(provider="azure-openai", base_url=None, model="gpt-4o", api_key_vault="vault-azure"))
+    tenant_id = uuid.uuid4()
+    cfg = await llm_resolver.resolve_llm_config(db, tenant_id)
+    snap = await status_module.tenant_llm_status(db, tenant_id)
+    user = SimpleNamespace(tenant_id=tenant_id)
+    result = await credentials_module.test_llm_credential(user, db)
+
+    assert cfg.allowed is False
+    assert cfg.api_key is None
+    assert cfg.base_url == ""
+    assert "deployment default" in cfg.reason
+    assert snap["provider"] == "azure-openai"
+    assert snap["effective_path"] == "fallback"
+    assert snap["base_url"] in ("", None)
+    assert "azure-stored-key" not in str(snap)
+    assert result.outcome == "refused"
+    assert "base URL" in result.detail
+    assert posts == []
+    assert "azure-stored-key" not in result.detail
+
+
+@pytest.mark.asyncio
 async def test_same_gateway_can_inherit_its_key() -> None:
     db = database(credential(provider="local-litellm", base_url="http://litellm:4000/v1/", model="aisoc-triage", api_key_vault=None))
     tenant_id = uuid.uuid4()

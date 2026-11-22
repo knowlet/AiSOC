@@ -66,6 +66,7 @@ from app._vendor.llm_contract_rules import (
 from app._vendor.llm_contract_rules import (
     validate_messages as validate_messages,
 )
+from app._vendor.ssrf_guard import guard_runtime_llm_url
 from app.services import llm_health
 
 # These names are re-exports: callers do
@@ -82,6 +83,7 @@ __all__ = [
     "LLMInputContract",
     "classify_message",
     "is_contract_enforced",
+    "guard_runtime_llm_url",
     "safe_chat_completions_request",
     "validate_messages",
 ]
@@ -121,6 +123,11 @@ async def safe_chat_completions_request(
     than the provider failing to answer.
     """
     validated = LLMInputContract.validate(messages)
+    # Every runtime completion passes through this function, so the outbound
+    # guard lives here rather than at each caller. A tenant route the probe
+    # would refuse must not be posted to from explain, triage or any other
+    # caller that already holds a resolved URL.
+    guard_runtime_llm_url(url)
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:

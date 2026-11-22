@@ -538,6 +538,15 @@ async def test_llm_credential(
     if api_key is None and inherit_env_key:
         api_key = env_key
 
+    if existing.provider == "azure-openai" and not (base_url or "").strip():
+        # The decrypted key must not travel to the deployment's default base.
+        # Azure has no canonical endpoint to substitute.
+        return LlmCredentialTestResult(
+            outcome="refused",
+            detail="azure-openai has no base URL. The stored key was not sent to the deployment default.",
+            provider=existing.provider,
+        )
+
     result: ProbeResult = await probe_credential(
         provider=existing.provider,
         base_url=base_url,

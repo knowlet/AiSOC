@@ -1,0 +1,105 @@
+"""Agents runtime calls use the same outbound guard as the API explain path."""
+
+from __future__ import annotations
+
+import socket
+
+import pytest
+from app.llm.contract import safe_ainvoke, safe_chat_completions_request
+from app.llm.factory import completions_url_for_base, sdk_base_url_for
+from app.playbook.ssrf_guard import SSRFError
+from langchain_core.messages import HumanMessage
+
+
+def _resolve_as(monkeypatch: pytest.MonkeyPatch, address: str) -> None:
+    def fake(_host: str, *_args: object, **_kwargs: object) -> list:
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        sockaddr = (address, 0, 0, 0) if family is socket.AF_INET6 else (address, 0)
+        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
+
+    monkeypatch.setattr("app.playbook.ssrf_guard.socket.getaddrinfo", fake)
+
+
+class _Model:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+        self.calls = 0
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> object:
+        self.calls += 1
+        return object()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:11434/v1",
+        "http://[::1]/v1",
+        "http://169.254.169.254/v1",
+        "http://169.254.1.1/v1",
+        "http://metadata.google.internal/computeMetadata/v1",
+    ],
+)
+async def test_langchain_calls_do_not_reach_a_blocked_base(base_url: str) -> None:
+    model = _Model(base_url)
+    with pytest.raises(SSRFError):
+        await safe_ainvoke(model, [HumanMessage(content="Explain this alert.")])
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "::1", "fe80::1"])
+async def test_a_dns_name_resolving_to_a_blocked_address_is_refused(monkeypatch: pytest.MonkeyPatch, address: str) -> None:
+    _resolve_as(monkeypatch, address)
+    model = _Model("http://evil.example/v1")
+    with pytest.raises(SSRFError):
+        await safe_ainvoke(model, [HumanMessage(content="Explain this alert.")])
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_metadata_resolution_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "evil.example")
+    _resolve_as(monkeypatch, "169.254.169.254")
+    model = _Model("http://evil.example/api")
+    with pytest.raises(SSRFError):
+        await safe_ainvoke(model, [HumanMessage(content="Explain this alert.")])
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_raw_http_completions_use_the_same_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    posts: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+        async def post(self, url: str, **_kwargs: object) -> object:
+            posts.append(url)
+            raise AssertionError(url)
+
+    monkeypatch.setattr("httpx.AsyncClient", _Client)
+    with pytest.raises(SSRFError):
+        await safe_chat_completions_request(
+            api_key="aisoc-no-auth",
+            model="local",
+            messages=[{"role": "user", "content": "Explain this alert."}],
+            url="http://169.254.169.254/v1/chat/completions",
+        )
+    assert posts == []
+
+
+def test_an_api_base_matches_the_sdk_builder() -> None:
+    base = "https://gateway.example/api"
+    assert completions_url_for_base(base) == "https://gateway.example/api/chat/completions"
+    assert sdk_base_url_for(base).rstrip("/") + "/chat/completions" == completions_url_for_base(base)
+    assert "/v1" not in completions_url_for_base(base)
+    assert sdk_base_url_for("http://litellm:4000/v1") == "http://litellm:4000/v1"

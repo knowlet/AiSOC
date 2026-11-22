@@ -62,6 +62,9 @@ class TestABareHostStillGetsOne:
             ("https://api.openai.com", "https://api.openai.com/v1/chat/completions"),
             ("https://api.openai.com/", "https://api.openai.com/v1/chat/completions"),
             ("http://vllm.internal:8000", "http://vllm.internal:8000/v1/chat/completions"),
+            ("https://gateway.example/api", "https://gateway.example/api/chat/completions"),
+            ("https://gateway.example/api/", "https://gateway.example/api/chat/completions"),
+            ("https://gateway.example/openai", "https://gateway.example/openai/chat/completions"),
         ],
     )
     def test_version_is_appended(self, base: str, expected: str) -> None:
@@ -81,6 +84,27 @@ class TestOtherShapes:
     def test_an_empty_base_falls_back_to_the_provider_default(self) -> None:
         assert completions_url_for_base("") == "https://api.openai.com/v1/chat/completions"
         assert completions_url_for_base("   ") == "https://api.openai.com/v1/chat/completions"
+
+
+def test_an_api_base_is_not_given_an_extra_version_segment() -> None:
+    """The SDK posts to ``{base}/chat/completions``. Inserting ``/v1`` probed
+    a different path from the runtime call."""
+    assert completions_url_for_base("https://gateway.example/api") == "https://gateway.example/api/chat/completions"
+    assert "/v1" not in completions_url_for_base("https://gateway.example/api")
+
+
+def test_the_sdk_base_is_the_completions_builder_without_the_suffix() -> None:
+    """Runtime hands the SDK the base this builder already decided."""
+    from app.services.model_aliases import sdk_base_url_for
+
+    base = "https://gateway.example/api"
+    assert completions_url_for_base(base) == "https://gateway.example/api/chat/completions"
+    assert sdk_base_url_for(base).rstrip("/") + "/chat/completions" == completions_url_for_base(base)
+    assert sdk_base_url_for("https://api.openai.com") == "https://api.openai.com/v1"
+    assert sdk_base_url_for("http://litellm:4000/v1") == "http://litellm:4000/v1"
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    agents = (repo / "services/agents/app/llm/factory.py").read_text(encoding="utf-8")
+    assert 'params["base_url"] = sdk_base_url_for(base_url)' in agents
 
 
 def test_neither_explain_path_builds_the_url_by_hand() -> None:

@@ -72,6 +72,7 @@ __all__ = [
     "resolve_api_key",
     "resolve_base_url",
     "resolve_model_alias",
+    "sdk_base_url_for",
 ]
 
 # Wave 1 — per-tenant BYOK override. The auto-triage / investigation paths
@@ -136,15 +137,32 @@ def completions_url_for_base(base_url: str) -> str:
     compose sets ``LLM_GATEWAY_URL=http://litellm:4000/v1`` that resolved to
     ``http://litellm:4000/v1/v1/chat/completions`` and 404'd against the
     gateway running beside it.
+
+    A base that already has a non-version path, such as ``/api``, does not
+    gain a ``/v1`` segment. The OpenAI SDK appends ``/chat/completions`` to
+    the base it was given; inserting ``/v1`` made a probe of that base hit a
+    different path from this runtime.
     """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         return DEFAULT_OPENAI_CHAT_COMPLETIONS_URL
     if base.endswith("/chat/completions"):
         return base
-    if _VERSION_SUFFIX.search(base):
+    path = urlsplit(base).path.rstrip("/")
+    if _VERSION_SUFFIX.search(path):
+        return f"{base}/chat/completions"
+    if path:
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
+
+
+def sdk_base_url_for(base_url: str) -> str:
+    """Base URL to give the OpenAI SDK so it requests :func:`completions_url_for_base`."""
+    full = completions_url_for_base(base_url)
+    suffix = "/chat/completions"
+    if full.endswith(suffix):
+        return full[: -len(suffix)]
+    return full
 
 
 def _needs_legacy_max_tokens(base_url: str | None) -> bool:
@@ -228,7 +246,10 @@ def make_chat_model(
         }
     assert_routable(model, base_url)
     if base_url:
-        params["base_url"] = base_url
+        # Same builder the probe and the raw-HTTP explain path use. The SDK
+        # appends /chat/completions itself, so it must be handed the base that
+        # builder already decided, not a second copy of the suffix rule.
+        params["base_url"] = sdk_base_url_for(base_url)
     # Direct Anthropic supports max_completion_tokens without a legacy duplicate.
     if max_tokens is not None and not direct_anthropic and _needs_legacy_max_tokens(base_url):
         # langchain-openai 1.x renders the typed `max_tokens` field onto the

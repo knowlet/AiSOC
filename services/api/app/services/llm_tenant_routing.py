@@ -87,8 +87,14 @@ def tenant_route(
     For other providers, preserve the existing explicit override semantics.
     """
     default_base, default_model = PROVIDER_DEFAULTS.get(provider, ("", ""))
-    tenant_base = base_url or default_base
-    tenant_model = model or default_model
+    explicit_base = (base_url or "").strip()
+    explicit_model = (model or "").strip()
+    # Azure OpenAI has no canonical endpoint. Substituting the deployment
+    # base would send the tenant's decrypted key to a different service.
+    if provider == "azure-openai" and not explicit_base:
+        return "", explicit_model, False, bool(explicit_model), False
+    tenant_base = explicit_base or default_base
+    tenant_model = explicit_model or default_model
     base = tenant_base or env_base
     resolved_model = tenant_model or env_model
     # An unset baseline is the OpenAI client's default endpoint. This is the

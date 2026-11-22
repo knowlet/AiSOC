@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+from urllib.parse import urlsplit
 
 # Mirrors the roles in services/agents/app/llm/model_pins.py.
 ROLES = frozenset({"triage", "recon", "investigation", "copilot", "summary", "report", "nl", "hunt", "detection"})
@@ -161,13 +162,33 @@ def completions_url_for_base(base_url: str) -> str:
     So the suffix is decided by what the base already carries rather than
     assumed: a base that ends in a version segment takes ``/chat/completions``,
     and a bare host takes ``/v1/chat/completions`` so a BYOK value like
-    ``https://api.openai.com`` still resolves.
+    ``https://api.openai.com`` still resolves. A base that already has some
+    other path, such as ``/api``, does not gain a ``/v1`` segment: the OpenAI
+    SDK appends ``/chat/completions`` to the base it was given, and inserting
+    ``/v1`` made a probe of that base hit a different path from runtime.
     """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         return DEFAULT_OPENAI_CHAT_COMPLETIONS_URL
     if base.endswith("/chat/completions"):
         return base
-    if _VERSION_SUFFIX.search(base):
+    path = urlsplit(base).path.rstrip("/")
+    if _VERSION_SUFFIX.search(path):
+        return f"{base}/chat/completions"
+    if path:
         return f"{base}/chat/completions"
     return f"{base}/v1/chat/completions"
+
+
+def sdk_base_url_for(base_url: str) -> str:
+    """Base URL to give the OpenAI SDK so it requests :func:`completions_url_for_base`.
+
+    The SDK joins ``base_url`` with ``chat/completions``. Returning the
+    completions URL with that suffix removed is how a runtime client and a
+    probe that calls :func:`completions_url_for_base` stay on one builder.
+    """
+    full = completions_url_for_base(base_url)
+    suffix = "/chat/completions"
+    if full.endswith(suffix):
+        return full[: -len(suffix)]
+    return full
