@@ -348,7 +348,13 @@ def apply_rules(alert: dict[str, Any], rules: list[BusinessContextRule]) -> Busi
             continue
         matched.append(rule.id)
         act = rule.then
-        if act.set_severity is not None:
+        # An escalation rule's severity is a floor. Assigning it here used to
+        # replace a higher severity with that floor before the floor check ran,
+        # so a critical alert became high and the later check had nothing left
+        # to restore. Ordinary rules still assign, including downward.
+        if act.set_severity is not None and (
+            not act.require_escalation or _SEVERITY_RANK.get(str(out.get("severity")), -1) < _SEVERITY_RANK[act.set_severity]
+        ):
             out["severity"] = act.set_severity
         if act.route_to is not None:
             out["route_to"] = act.route_to

@@ -42,39 +42,57 @@ also raise the alert's severity. Severity alone does not prohibit closure.
 The two actions have separate meanings:
 
 - `set_severity` changes the alert's severity. Ordinary severity actions keep
-  their existing last-matching-rule behavior.
+  their existing last-matching-rule behavior, including a later rule that
+  lowers severity.
 - `require_escalation` prohibits automatic suppression and closure. A model
-  can still assess the evidence, but a benign verdict or a remembered benign
-  prior cannot cancel the requirement. The matched rule IDs travel with the
-  verdict, and the durable closure check refuses to resolve the alert.
+  can still assess the evidence. The benign or false-positive classification
+  can remain, and a remembered benign prior cannot cancel the requirement.
+  The matched rule IDs travel with the verdict. The durable closure check
+  refuses to resolve the AiSOC alert. The worker carries that same decision
+  into source writeback. When it is set, a closing disposition is refused:
+  no source close is dispatched, and the linked case is not resolved. A
+  non-closing writeback, such as a true positive, is unchanged.
 
 Mandatory rules match against the **original alert**, before any ordinary
 rule changes it. When one matches, suppression is refused regardless of rule
-priority. A severity supplied by a matching mandatory rule is a floor on the
-final result; another rule cannot reduce it. The live alert row is raised to
-that severity without lowering a more severe existing value. Shadow runs
-still leave the operational alert columns unchanged.
+priority. A severity on a matching mandatory rule is a floor in triage and in
+preview. It raises a lower severity and does not replace a higher one. An
+ordinary rule cannot leave the final severity below that floor. The live
+alert row is raised to the floor and is not lowered when it is already more
+severe. Shadow runs still leave the operational alert columns unchanged.
 
 The action must be a YAML boolean, not a quoted string or a number. A rule
 cannot combine `require_escalation: true` and `suppress: true`; the API rejects
 that contradiction. Rules with the action set to `false`, disabled rules,
 and nonmatching rules do not add a restriction. Preview uses the same
-original-alert matching and conflict behavior as the worker.
+original-alert matching, severity floor, and conflict behavior as the worker.
+The preview sample is not the full fused alert: it does not include
+`connector_type`.
 
 ### Wazuh rule identities
 
-Scope an ID list to `connector_type: wazuh` so an identically numbered
-detection from another source is not included. Inspect a fused alert before
-choosing the ID field. In the current connector, Wazuh's rule ID is emitted as
-`external_id`; ingest projects it to OCSF `finding.uid`, available to
-business-context as `raw_event.finding.uid`. The top-level fused `rule_id`
-must not be assumed to carry the Wazuh rule ID. A connector version that
+Scope an ID list to `connector_type: wazuh` on the fused alert the worker
+evaluates, so an identically numbered detection from another source is not
+included. The settings preview builds its sample from stored alerts and
+exposes the `alerts.connector_type` column as `source`. That sample has no
+`connector_type` field, so this clause matches in triage and does not match
+those preview rows. Inspect a fused alert before choosing the ID field. In
+the current connector, Wazuh's rule ID is emitted as `external_id`; ingest
+projects it to OCSF `finding.uid`. Fusion stores that OCSF event as the
+alert's `raw_event`. The worker evaluates the fused alert and preview reads
+the stored row, so both see `raw_event.finding.uid`. The `in`
+comparator does not coerce types: a quoted id matches a string uid and does
+not match a numeric one. The top-level fused `rule_id` is the detection that
+fired, when one did, and is not the Wazuh rule ID. A connector version that
 changes its external finding identity needs its matching field verified
 again.
 
 This template is deliberately disabled. Replace the placeholder with the
-verified, quoted Wazuh rule IDs, preview it against matching and nonmatching
-alerts, then enable it. It does not contain a recommended or preconfigured
+verified Wazuh rule IDs, using the same type as `raw_event.finding.uid` on a
+real alert. The rule-id clause can be checked against stored alerts in
+preview. The `connector_type` clause has to be checked on a fused alert,
+because the preview sample does not carry it. Enable the rule after both
+clauses have been checked. It does not contain a recommended or preconfigured
 production ID list.
 
 ```yaml
@@ -93,7 +111,7 @@ rules:
 ```
 
 Saving this YAML through `/settings/business-context` or
-`POST /v1/business-context/rules` replaces the tenant's whole rule set, so
+`POST /api/v1/business-context/rules` replaces the tenant's whole rule set, so
 retain its other rules in the document. Tenant rules are cached by the worker
 for up to 30 seconds. A deployment-wide rules file applies to every tenant;
 use the tenant-scoped editor for an environment-specific ID list.

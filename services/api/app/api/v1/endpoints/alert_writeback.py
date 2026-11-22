@@ -54,6 +54,14 @@ class SourceWritebackRequest(BaseModel):
     #: Required from a service caller, which has no session to read it from.
     #: Ignored for a session caller, whose tenant comes from the session.
     tenant_id: uuid.UUID | None = None
+    require_escalation: bool = Field(
+        default=False,
+        description=(
+            "When true, a closing disposition is not written to the source "
+            "finding and does not resolve the linked case. The triage worker sets this "
+            "from a matched mandatory business-context rule."
+        ),
+    )
 
 
 class SourceLinkResponse(BaseModel):
@@ -161,6 +169,7 @@ async def write_back(
         confidence=body.confidence,
         rationale=body.rationale,
         requested_by=requested_by,
+        require_escalation=body.require_escalation,
     )
     logger.info(
         "alert_writeback.completed",

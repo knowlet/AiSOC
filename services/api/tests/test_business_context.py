@@ -402,6 +402,21 @@ class TestMandatoryEscalation:
         assert result.after["severity"] == "high"
         assert result.after["tags"] == ["intermediate-low"]
 
+    def test_escalation_severity_does_not_lower_a_higher_severity(self) -> None:
+        result = _evaluate_escalation_rules(
+            _yaml("""
+            rules:
+              - id: must-investigate
+                when: {field: source, op: eq, value: fixture-source}
+                then: {require_escalation: true, set_severity: high}
+            """),
+            {"source": "fixture-source", "severity": "critical"},
+        )
+        assert result.require_escalation is True
+        assert result.escalation_rule_ids == ["must-investigate"]
+        assert result.before["severity"] == "critical"
+        assert result.after["severity"] == "critical"
+
     def test_escalation_without_severity_does_not_invent_a_floor(self) -> None:
         result = _evaluate_escalation_rules(
             "id: must-review\nwhen: {field: source, op: eq, value: fixture-source}\nthen: {require_escalation: true}\n",

@@ -13,6 +13,7 @@ from app.core.cost_governor import Decision
 from app.models.state import AgentStatus
 from app.workers import fused_alert_consumer as consumer
 from app.workers.business_context import BusinessContextApplier, apply_rules, load_rules_from_yaml
+from app.workers.triage_persistence import LiveTriageWriter
 
 TENANT = "11111111-1111-1111-1111-111111111111"
 RULES = """
@@ -118,6 +119,122 @@ async def test_worker_enforces_escalation_before_persisting_or_skipping_graph(tm
         if tier != "cached":
             assert written["auto_closed"] is True
             escalated.assert_not_awaited()
+
+
+_CLOSING_DISPOSITIONS = frozenset({"false_positive", "benign", "benign_true_positive"})
+
+
+class _WritebackRecorder(LiveTriageWriter):
+    """Records whether a closing disposition was sent without the escalation veto."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.closes: list[str] = []
+
+    async def write_back_disposition(
+        self,
+        *,
+        tenant_id: str,
+        alert_id: str,
+        disposition: str,
+        confidence: float | None = None,
+        rationale: str = "",
+        require_escalation: bool = False,
+    ):
+        self.calls.append(
+            {
+                "tenant_id": tenant_id,
+                "alert_id": alert_id,
+                "disposition": disposition,
+                "confidence": confidence,
+                "rationale": rationale,
+                "require_escalation": require_escalation,
+            }
+        )
+        if disposition in _CLOSING_DISPOSITIONS and require_escalation is not True:
+            self.closes.append(disposition)
+        return {"executed": False, "outcomes": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mandatory", [True, False])
+async def test_benign_classification_does_not_dispatch_a_source_close_when_escalation_is_mandatory(tmp_path, monkeypatch, mandatory):
+    """A mandatory alert stays open and its benign verdict is not a source close.
+
+    The negative control is the same benign verdict with a nonmatching rule.
+    That verdict is still sent as a close. The matching case keeps the
+    classification and carries the escalation decision so writeback refuses it.
+    """
+    rules_path = tmp_path / "rules.yaml"
+    rules_path.write_text(RULES.replace(", set_severity: critical", ""))
+    writer = _WritebackRecorder()
+    worker = consumer.FusedAlertTriageWorker(
+        bootstrap_servers="unused",
+        business_context=BusinessContextApplier(rules_file=str(rules_path)),
+        writer=writer,
+    )
+    monkeypatch.setenv("AISOC_DETERMINISTIC", "0")
+    monkeypatch.setattr(consumer, "is_deterministic_mode", lambda: False)
+    monkeypatch.setattr(consumer, "_memory_suppression_enabled", lambda: False)
+    monkeypatch.setattr(worker, "_resolve_tenant_llm", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        consumer.get_governor(),
+        "check",
+        lambda *_: SimpleNamespace(decision=None, cached_verdict=None, use_llm=False),
+    )
+
+    async def benign(state):
+        state.verdict = "benign"
+        state.confidence = 0.99
+        state.status = AgentStatus.COMPLETED
+        return state
+
+    monkeypatch.setattr(consumer, "run_triage", benign)
+    monkeypatch.setattr(worker, "_maybe_escalate", AsyncMock())
+    monkeypatch.setattr("app.workers.triage_persistence.ledger_module.persist_auto_triage", AsyncMock(return_value=True))
+
+    result = await worker.triage(_message("fixture-protected" if mandatory else "fixture-ordinary"))
+
+    assert result is not None
+    assert result["verdict"] == "benign"
+    assert writer.calls
+    assert writer.calls[0]["disposition"] == "benign"
+    if mandatory:
+        assert result["decision_contract"]["operational_disposition"] == "escalated_to_investigation"
+        assert writer.calls[0]["require_escalation"] is True
+        assert writer.closes == []
+    else:
+        assert writer.calls[0]["require_escalation"] is False
+        assert writer.closes == ["benign"]
+
+
+def test_escalation_rule_does_not_lower_a_higher_severity():
+    rules = load_rules_from_yaml(
+        """
+rules:
+  - id: floor-high
+    when: {field: rule_id, op: eq, value: fixture-protected}
+    then: {require_escalation: true, set_severity: high}
+"""
+    )
+    result = apply_rules({"rule_id": "fixture-protected", "severity": "critical"}, rules)
+    assert result.require_escalation is True
+    assert result.escalation_rule_ids == ["floor-high"]
+    assert result.alert["severity"] == "critical"
+
+
+def test_ordinary_severity_action_can_still_lower():
+    rules = load_rules_from_yaml(
+        """
+rules:
+  - id: ordinary-high
+    when: {field: rule_id, op: eq, value: fixture-protected}
+    then: {set_severity: high}
+"""
+    )
+    result = apply_rules({"rule_id": "fixture-protected", "severity": "critical"}, rules)
+    assert result.require_escalation is False
+    assert result.alert["severity"] == "high"
 
 
 def test_escalation_uses_original_alert_and_overrides_suppression_and_downgrade():

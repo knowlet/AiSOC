@@ -1181,6 +1181,7 @@ class FusedAlertTriageWorker:
                 disposition=str(verdict),
                 confidence=float(confidence or 0.0),
                 rationale=rationale,
+                require_escalation=requires_escalation(state.business_context),
             )
         except Exception as exc:  # noqa: BLE001 — a durable verdict outranks its writeback
             logger.warning("auto_triage_worker.source_writeback_failed", alert_id=alert_id, error=str(exc)[:300])

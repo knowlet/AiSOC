@@ -70,6 +70,7 @@ async def write_back_disposition(
     disposition: str,
     confidence: float | None = None,
     rationale: str = "",
+    require_escalation: bool = False,
 ) -> dict[str, Any] | None:
     """Post the verdict to the API's writeback route.
 
@@ -106,6 +107,9 @@ async def write_back_disposition(
         "disposition": disposition,
         "rationale": rationale[:4000],
         "tenant_id": tenant_id,
+        # The API refuses a closing action when this is true. Omitting it
+        # would let a benign verdict close the source finding.
+        "require_escalation": require_escalation is True,
     }
     if confidence is not None:
         payload["confidence"] = max(0.0, min(1.0, float(confidence)))

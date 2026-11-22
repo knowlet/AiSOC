@@ -33,7 +33,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import UUID
 
@@ -289,7 +289,17 @@ def _evaluate_rules(rules: tuple[BusinessContextRule, ...], alert: Mapping[str, 
         matches = rule.id in escalation_ids if rule.then.require_escalation else evaluate_condition(rule.when, current)
         if not matches:
             continue
-        current = _apply_action(current, rule.then)
+        action = rule.then
+        # Same rule as the worker: an escalation severity is a floor, so it
+        # must not replace a higher severity before the floor is applied.
+        # Ordinary actions still assign, including downward.
+        if (
+            rule.then.require_escalation
+            and rule.then.set_severity is not None
+            and _SEVERITY_RANK.get(str(current.get("severity")), -1) >= _SEVERITY_RANK[rule.then.set_severity]
+        ):
+            action = replace(rule.then, set_severity=None)
+        current = _apply_action(current, action)
         result.matched_rule_ids.append(rule.id)
         if current.get("__suppressed__"):
             if escalation_rules:

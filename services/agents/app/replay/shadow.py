@@ -226,6 +226,7 @@ class ShadowTriageWriter:
         disposition: str,
         confidence: float | None = None,
         rationale: str = "",
+        require_escalation: bool = False,
     ) -> dict[str, Any] | None:
         self.calls["write_back_disposition"] += 1
         return None

@@ -410,6 +410,7 @@ class ShadowModeTriageWriter:
         disposition: str,
         confidence: float | None = None,
         rationale: str = "",
+        require_escalation: bool = False,
     ) -> dict[str, Any] | None:
         return None
 
