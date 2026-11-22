@@ -38,9 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Alert drill-down filters now stay in sync with the URL when changed or
   cleared, so reloading or restoring browser history does not revive removed
-  filters. Explicit drill-downs take precedence over default saved views while
-  preserving manual preset selection. Empty-state guidance
-  includes unresolved-only and creation-time filters, and posture bar links
+  filters. Clearing filters also returns the queue to page 1 and the default
+  page size, with an empty search and no disposition: the live query string
+  wins over queue values restored from a cached server payload. Explicit
+  drill-downs take precedence over default saved views while preserving
+  manual preset selection. Empty-state guidance includes unresolved-only and
+  creation-time filters, and posture bar links
   have a visible keyboard-focus indicator. Regression tests preserve link
   accessibility attributes, accept SQLAlchemy's expanding collection binds,
   and verify the alerts client's HTTP query parameter names.

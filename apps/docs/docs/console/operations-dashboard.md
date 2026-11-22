@@ -52,6 +52,10 @@ canonical unresolved-status predicate used by the statistics endpoint;
 The drill-down's extra filters appear as removable chips above the grid.
 Changing or clearing filters updates the URL, so reloading keeps the current
 selection and stays in the alert grid even after the final filter is removed.
+Page, page size, search, and disposition follow that same query string.
+Clearing filters returns to page 1 and the default page size, with an empty
+search and no disposition, including when the browser restores an older
+page payload.
 Explicit drill-down links take precedence over a default saved view; a saved
 view can still be selected manually from the toolbar.
 Tenant scope still comes from the logged-in principal, never URL parameters.

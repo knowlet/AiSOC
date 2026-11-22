@@ -155,6 +155,50 @@ describe('operations posture links open the filtered alert grid', () => {
     });
   });
 
+  it('clears filters and drops cached page and search back to page 1', async () => {
+    const cachedProps = {
+      view: 'alerts',
+      severity: 'critical',
+      page: '4',
+      search: 'powershell',
+    };
+    window.history.replaceState(
+      null,
+      '',
+      '/alerts?view=alerts&severity=critical&page=4&search=powershell&keep=cleared#queue',
+    );
+    const cachedPage = await AlertsPage({ searchParams: Promise.resolve(cachedProps) });
+    const { unmount } = render(cachedPage, { wrapper: NavigationTestProvider });
+
+    expect(screen.getByText('Page 4')).toBeTruthy();
+    expect(requestedFilters()).toMatchObject({
+      page: 4,
+      search: 'powershell',
+      severity: 'critical',
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+
+    expect(screen.getByText('Page 1')).toBeTruthy();
+    expect(requestedFilters()).toEqual({ page: 1, pageSize: 25, sort: 'priority' });
+    expect(requestedFilters()?.search).toBeUndefined();
+    const cleared = new URL(window.location.href);
+    expect(cleared.searchParams.get('view')).toBe('alerts');
+    expect(cleared.searchParams.has('page')).toBe(false);
+    expect(cleared.searchParams.has('search')).toBe(false);
+    expect(cleared.searchParams.has('severity')).toBe(false);
+    expect(cleared.searchParams.get('keep')).toBe('cleared');
+    expect(cleared.hash).toBe('#queue');
+
+    unmount();
+    render(cachedPage, { wrapper: NavigationTestProvider });
+    expect(screen.getByText('Page 1')).toBeTruthy();
+    expect(requestedFilters()?.page).toBe(1);
+    expect(requestedFilters()?.search).toBeUndefined();
+    expect(requestedFilters()?.severity).toBeUndefined();
+    expect(new URL(window.location.href).searchParams.has('search')).toBe(false);
+  });
+
   it('explains the new filters in the empty state and clears them from the URL', async () => {
     window.history.replaceState(null, '', '/alerts?severity=critical&status=escalated&unresolved_only=true&created_within_hours=24');
     const { unmount } = await renderCurrentUrl();

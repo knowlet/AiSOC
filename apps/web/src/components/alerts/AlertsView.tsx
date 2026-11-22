@@ -404,9 +404,9 @@ export function AlertsView({
     sort: 'priority',
     ...initialFilters,
   });
-  // History can restore cached server props after a chip was removed. Read
-  // URL-controlled fields from the live router, keeping local sort, page size,
-  // and other saved-view fields when replacing the URL.
+  // History can restore cached server props after filters are cleared. The
+  // live query string owns drilldown filters, page, page size, search, and
+  // disposition. Sort and saved-view fields that are not in the query stay local.
   const filters: AlertFilters = useMemo(
     () => mergeAlertFiltersFromUrl(localFilters, drilldown),
     [drilldown, localFilters],

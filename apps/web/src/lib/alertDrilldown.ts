@@ -64,6 +64,9 @@ export function readAlertDrilldown(params: { get: (name: string) => string | nul
   return { filters, viewMode };
 }
 
+const DEFAULT_QUEUE_PAGE = 1;
+const DEFAULT_QUEUE_PAGE_SIZE = 25;
+
 /** Apply URL-authoritative filters on top of local console state (history-aware). */
 export function mergeAlertFiltersFromUrl(
   localFilters: AlertFilters,
@@ -76,11 +79,18 @@ export function mergeAlertFiltersFromUrl(
     if (value === undefined) delete next[key];
     else next[key] = value as never;
   }
+  // The query string owns queue fields. A restored server payload can still
+  // carry the previous page and search after the operator clears filters;
+  // absence means the canonical empty state, not "keep the cached prop".
   for (const key of QUEUE_URL_FILTER_KEYS) {
-    if (!(key in drilldown.filters)) continue;
     const value = drilldown.filters[key];
-    if (value === undefined) delete next[key];
-    else next[key] = value as never;
+    if (value !== undefined) {
+      next[key] = value as never;
+      continue;
+    }
+    if (key === 'page') next.page = DEFAULT_QUEUE_PAGE;
+    else if (key === 'pageSize') next.pageSize = DEFAULT_QUEUE_PAGE_SIZE;
+    else delete next[key];
   }
   return next;
 }

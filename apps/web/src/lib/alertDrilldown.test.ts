@@ -50,6 +50,22 @@ describe('readAlertDrilldown', () => {
     expect(merged).toEqual({ page: 1, pageSize: 25, sort: 'priority' });
   });
 
+  it('drops cached page and search when the cleared URL omits them', () => {
+    const merged = mergeAlertFiltersFromUrl(
+      {
+        page: 4,
+        pageSize: 50,
+        search: 'powershell',
+        disposition: 'needs_review',
+        sort: 'priority',
+        severity: 'critical',
+      },
+      readAlertDrilldown({ get: get('view=alerts') }),
+    );
+    expect(merged).toEqual({ page: 1, pageSize: 25, sort: 'priority' });
+    expect(merged.search).toBeUndefined();
+  });
+
   it('still parses drilldown posture filters', () => {
     const { filters } = readAlertDrilldown({
       get: get('severity=critical&status=escalated&unresolved_only=true&created_within_hours=24'),
