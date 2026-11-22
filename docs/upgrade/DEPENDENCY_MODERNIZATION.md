@@ -91,10 +91,27 @@ Run local audit: `python3 scripts/security_audit.py` (workflow also on push).
 
 ---
 
+## Qdrant volume preflight
+
+`qdrant/qdrant:v1.20.0` in `docker-compose.yml` is the image Compose will start. It is not the release that wrote `qdrant_data`. Qdrant stores that release in `collections/<name>/version.info` (plain text, the crate version, for example `1.7.0`). v1.7.0 data on v1.20.0 panics.
+
+`make upgrade` runs `scripts/check_qdrant_upgrade_preflight.py` before `docker compose up` recreates the container, and so do `make up`, `make up-dev`, `make up-full`, `make up-gpu`, and `make up-host-llm`. The script reads that file from the existing volume. It does not substitute the Compose pin when the file is missing.
+
+| What was read | Result |
+| --- | --- |
+| `version.info` is `1.19.0` and the target is `v1.20.0` | **GO** (exit 0). Consecutive minor. |
+| `version.info` is `1.7.0` and the target is `v1.20.0` | **NO-GO** (exit 1). The Make target stops. Compose does not recreate Qdrant. |
+| A collection directory is present but `version.info` is missing or unreadable, or Docker could not be asked | **NO-GO**. `storage_version_observed` is null. |
+| Docker reports the `qdrant_data` volume does not exist, the storage directory has no Qdrant files, or the only files are `raft_state.json` / `aliases/data.json` with no collection directory | **GO**. `volume_state` is `absent`, `empty`, or `no-collections`, and `storage_version_observed` is null. There is no collection storage to attach. |
+
+`scripts/upgrade_rehearsal_disposable.sh` runs the same script against the v1.7 data directory and does not start `v1.20.0` on it. `scripts/qdrant_migration_evidence.sh` is the disposable panic demonstration, not the upgrade path. Helm does not run this script: before rolling the image onto an existing PVC, run it with `--storage-dir` pointed at that volume. `aisoc db upgrade` applies SQL migrations only and does not recreate Qdrant.
+
+CI runs the preflight against `tests/fixtures/qdrant/v1.19.0` (GO), `tests/fixtures/qdrant/v1.7.0` (NO-GO), and `tests/fixtures/qdrant/unknown` (NO-GO). A bare invocation with no storage directory is not a passing check.
+
 ## Rollout / rollback
 
 1. Backup Postgres and datastore volumes (`make doctor` + [`MIGRATION.md`](MIGRATION.md)).
-2. Pull new tags; recreate or migrate stateful volumes per component table.
+2. `make upgrade`. The Qdrant preflight runs before Compose recreates the container.
 3. `make smoke` when Docker/resources allow.
 
 **Rollback:** Git revert + `docker compose pull` old tags + **restore volumes** for
@@ -125,7 +142,7 @@ Authoritative rehearsal table: [`STATEFUL_MIGRATION_EVIDENCE.md`](STATEFUL_MIGRA
 | Area | Verdict |
 |------|---------|
 | ClickHouse 26.8 | **Conditional GO** — in-place upgrade + `BACKUP`/`RESTORE` proved; down-grade without restore **no** |
-| Qdrant v1.20.0 | **NO-GO** raw v1.7 volume / v1.7 snapshots; **GO** via consecutive-minor ladder + post-migration snapshot (`qdrant_migration_evidence.sh`) |
+| Qdrant v1.20.0 | **NO-GO** raw v1.7 volume / v1.7 snapshots; **GO** via consecutive-minor ladder + post-migration snapshot (`qdrant_migration_evidence.sh`). `make upgrade` reads `collections/<name>/version.info` and exits 1 before Compose recreates the container when that version is unknown or unsafe |
 | Kafka 7.8.12 | **Conditional GO** — paired-volume rehearsal with compose-aligned listeners |
 | OpenSearch 2.19.7 | **Open** — index store not rehearsed |
 | Python 3.13 toolchain | **GO** for locked unit suites exercised (actions/agents); full matrix pending green lint job |

@@ -16,6 +16,7 @@ need() {
 }
 
 need docker
+need python3
 
 DOCKER=(docker)
 if ! docker info >/dev/null 2>&1; then
@@ -116,12 +117,16 @@ curl -fsS -X PUT "http://127.0.0.1:16333/collections/probe/points" \
 SNAP=$(curl -fsS -X POST "http://127.0.0.1:16333/collections/probe/snapshots" 2>/dev/null | head -c 200 || echo none)
 log "Qdrant v1.7 snapshot: $SNAP"
 "${DOCKER[@]}" stop aisoc-qdrant-r1 >/dev/null
-"${DOCKER[@]}" run -d --name aisoc-qdrant-r2 -p 16334:6333 -v "$QD_VOL:/qdrant/storage" qdrant/qdrant:v1.20.0
-sleep 5
-SEARCH=$(curl -fsS -X POST "http://127.0.0.1:16334/collections/probe/points/search" \
-  -H 'Content-Type: application/json' \
-  -d '{"vector":[0.1,0.2,0.3,0.4],"limit":1}' 2>/dev/null | head -c 300 || echo FAIL)
-log "Qdrant v1.20 search: $SEARCH"
+# version.info in $QD_VOL is the stored release. Do not start v1.20 on it.
+set +e
+python3 "$ROOT/scripts/check_qdrant_upgrade_preflight.py" --storage-dir "$QD_VOL" --target v1.20.0
+preflight_status=$?
+set -e
+if [[ "$preflight_status" -eq 0 ]]; then
+  log "FAIL: preflight returned GO for the v1.7 data directory against v1.20.0"
+  exit 1
+fi
+log "NO-GO: preflight exit ${preflight_status}; not starting qdrant v1.20.0 on the v1.7 data directory"
 
 log "=== Kafka/ZK 7.5.0 -> 7.8.12 (paired volumes) ==="
 KZK_VOL="$WORK/kafka_zk"

@@ -429,6 +429,21 @@ def test_upgrade_target_exists_and_is_ordered() -> None:
     )
 
 
+@pytest.mark.parametrize("target", ["upgrade", "up", "up-dev", "up-full", "up-gpu", "up-host-llm"])
+def test_qdrant_preflight_runs_before_compose_recreates_the_container(target: str) -> None:
+    """The stored volume is judged before `compose up` recreates Qdrant.
+
+    A check that appears only after `up -d` reports a panic the operator
+    already has. `upgrade` is the supported path; the other targets are the
+    commands that also recreate the container on `qdrant_data`.
+    """
+    recipe = _own_recipe(target)
+    assert "check_qdrant_upgrade_preflight.py" in recipe, f"`make {target}` never runs the Qdrant storage preflight:\n{recipe}"
+    assert recipe.index("check_qdrant_upgrade_preflight.py") < recipe.index("up -d"), (
+        f"`make {target}` recreates containers before reading the Qdrant volume:\n{recipe}"
+    )
+
+
 def test_upgrade_is_declared_phony_and_advertised() -> None:
     """An undocumented command is one nobody runs. `make help` is the index."""
     text = MAKEFILE.read_text(encoding="utf-8")
