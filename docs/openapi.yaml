@@ -3,7 +3,7 @@ info:
   title: AiSOC Platform API
   description: AiSOC — open-source AI Security Operations Center. Autonomous threat
     detection, investigation, and response.
-  version: 23.4.0
+  version: 23.5.3
 paths:
   /api/v1/auth/login:
     post:
@@ -776,6 +776,19 @@ paths:
           - type: string
           - type: 'null'
           title: Status
+      - name: unresolved_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: 'Restrict to unresolved alerts (alert_status.unresolved_filter:
+            any status that is not terminal). Dashboard tiles deep-link with this
+            so the clicked number and the resulting list answer the same question.'
+          default: false
+          title: Unresolved Only
+        description: 'Restrict to unresolved alerts (alert_status.unresolved_filter:
+          any status that is not terminal). Dashboard tiles deep-link with this so
+          the clicked number and the resulting list answer the same question.'
       - name: disposition
         in: query
         required: false
@@ -2176,15 +2189,8 @@ paths:
       tags:
       - cases
       summary: List related cases (by alert/observable overlap)
-      description: 'Return other cases that share alerts or observables with this
-        case.
-
-
-        This is intentionally a lightweight heuristic — we look for cases that
-
-        overlap on `alert_ids` or share an observable IP/host.  It''s the smallest
-
-        thing the case detail page needs to stop 404''ing.'
+      description: Show shared evidence for this tenant's related cases without merging
+        them.
       operationId: list_related_cases_api_v1_cases__case_id__related_get
       security:
       - HTTPBearer: []
@@ -2201,10 +2207,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response List Related Cases Api V1 Cases  Case Id  Related
-                  Get
+                $ref: '#/components/schemas/RelatedCasesResponse'
         '422':
           description: Validation Error
           content:
@@ -38487,6 +38490,113 @@ components:
           default: My phone
       type: object
       title: RegisterBeginRequest
+    RelatedCase:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        case_number:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Number
+        title:
+          type: string
+          title: Title
+        severity:
+          type: string
+          title: Severity
+        status:
+          type: string
+          title: Status
+        created_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Created At
+        reason:
+          type: string
+          enum:
+          - shared_alerts
+          - shared_observables
+          title: Reason
+        shared_alert_ids:
+          items:
+            type: string
+            format: uuid
+          type: array
+          maxItems: 10
+          title: Shared Alert Ids
+        shared_alert_count:
+          type: integer
+          minimum: 0.0
+          title: Shared Alert Count
+        shared_observables:
+          items:
+            $ref: '#/components/schemas/RelatedCaseObservable'
+          type: array
+          maxItems: 10
+          title: Shared Observables
+        shared_observable_count:
+          type: integer
+          minimum: 0.0
+          title: Shared Observable Count
+      type: object
+      required:
+      - id
+      - case_number
+      - title
+      - severity
+      - status
+      - created_at
+      - reason
+      - shared_alert_ids
+      - shared_alert_count
+      - shared_observables
+      - shared_observable_count
+      title: RelatedCase
+    RelatedCaseObservable:
+      properties:
+        kind:
+          type: string
+          enum:
+          - ip
+          - user
+          - host
+          - domain
+          - hash
+          - file
+          - process
+          - alert
+          title: Kind
+        value:
+          type: string
+          title: Value
+      type: object
+      required:
+      - kind
+      - value
+      title: RelatedCaseObservable
+    RelatedCasesResponse:
+      properties:
+        related:
+          items:
+            $ref: '#/components/schemas/RelatedCase'
+          type: array
+          maxItems: 20
+          title: Related
+        limit:
+          type: integer
+          title: Limit
+          default: 20
+        has_more:
+          type: boolean
+          title: Has More
+          default: false
+      type: object
+      title: RelatedCasesResponse
     RelatedEntity:
       properties:
         group:

@@ -2120,6 +2120,20 @@ function normalizeAlertFacets(raw: unknown): AlertFacets | undefined {
 export interface AlertFilters {
   severity?: string;
   status?: string;
+  /**
+   * Unresolved-only queue (server: `unresolved_only`, the same
+   * `alert_status.unresolved_filter` the dashboard tiles count with). Set by
+   * the dashboard's Active/Critical tiles so a clicked number opens the list
+   * that produced it.
+   */
+  unresolvedOnly?: boolean;
+  /**
+   * Exact-match on the triage disposition (e.g. 'needs_review'). The console
+   * defaults to 'needs_review' — the operator queue that spans new + triaged
+   * escalated rows. HARD LINE: do not remove; NeedsReviewDefault.test.tsx
+   * pins it. (Backend: services/api/app/api/v1/endpoints/alerts.py.)
+   */
+  disposition?: string;
   source?: string;
   assignee?: string;
   startTime?: string;
@@ -2161,6 +2175,44 @@ export interface AlertUpdate {
   case_id?: string | null;
 }
 
+/**
+ * Map console filter state onto the server's query vocabulary.
+ *
+ * The server reads `page_size` (capped at 200) and `unresolved_only`; the
+ * console's state is camelCase, and the previous blind pass-through sent
+ * `pageSize` — a name FastAPI discards as undeclared, which pinned every
+ * queue page to the server default of 25 no matter what the console asked
+ * for. Silence here is a UX bug, not a compatibility shim.
+ */
+function alertListParams(filters: AlertFilters): Record<string, string> {
+  const { pageSize, unresolvedOnly, ...rest } = filters;
+  // Every pass-through key is enumerated at compile time — a missing or extra
+  // key is a type error — so the property names written below are constants,
+  // never a name derived from runtime input (CodeQL js/remote-property-injection),
+  // and a new `AlertFilters` field must opt in here to reach the wire.
+  const passthrough: Record<keyof typeof rest, true> = {
+    severity: true,
+    status: true,
+    disposition: true,
+    source: true,
+    assignee: true,
+    startTime: true,
+    endTime: true,
+    search: true,
+    page: true,
+    tenantId: true,
+    sort: true,
+  };
+  const params: Record<string, string> = {};
+  for (const key of Object.keys(passthrough) as (keyof typeof rest)[]) {
+    const value = rest[key];
+    if (value !== undefined && value !== null && value !== "") params[key] = String(value);
+  }
+  if (pageSize) params.page_size = String(pageSize);
+  if (unresolvedOnly) params.unresolved_only = "true";
+  return params;
+}
+
 export const alertsApi = {
   list: async (filters: AlertFilters = {}) => {
     const raw = await request<{
@@ -2172,7 +2224,7 @@ export const alertsApi = {
       pageSize?: number;
       facets?: unknown;
     }>("/api/v1/alerts", {
-      params: filters as Record<string, string>,
+      params: alertListParams(filters),
     });
     // `AlertListResponse` puts the rows under `items`, not `alerts`
     // (services/api/app/api/v1/endpoints/alerts.py). Reading only `alerts`
@@ -2397,6 +2449,17 @@ export interface EntityRiskContribution {
   observed_at: string;
   title?: string | null;
   source?: string | null;
+  /** Host the contributing alert named (#1950); null when it carried none. */
+  host?: string | null;
+}
+
+/** One host a user/ip/domain entity was seen on (#1950). */
+export interface EntityRiskHost {
+  name: string;
+  /** Contributing alerts that named this host, within the decay window. */
+  alert_count: number;
+  /** ISO-8601 timestamp of the most recent sighting, or null. */
+  last_seen: string | null;
 }
 
 /** A rolled-up entity with its current decayed risk score. */
@@ -2424,6 +2487,12 @@ export interface EntityRiskRecord {
   severity_histogram: Record<AlertSeverity, number>;
   /** Convenience: total alert count in the decay window. */
   alert_count: number;
+  /**
+   * Hosts this entity was seen on, count-ranked (#1950). Empty when no
+   * contributing alert named a host, or when the entity is itself a host;
+   * optional only for responses cached before the field shipped.
+   */
+  hosts?: EntityRiskHost[];
 }
 
 export interface EntityRiskQueueResponse {
@@ -2600,6 +2669,29 @@ export interface CasesResponse {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export interface RelatedCase {
+  id: string;
+  case_number: string | null;
+  title: string;
+  severity: AlertSeverity;
+  status: CaseStatus;
+  created_at: string | null;
+  reason: "shared_alerts" | "shared_observables";
+  shared_alert_count: number;
+  shared_alert_ids: string[];
+  shared_observable_count: number;
+  shared_observables: Array<{
+    kind: "ip" | "user" | "host" | "domain" | "hash" | "file" | "process" | "alert";
+    value: string;
+  }>;
+}
+
+export interface RelatedCasesResponse {
+  related: RelatedCase[];
+  limit: number;
+  has_more: boolean;
 }
 
 // ─── WS-D2 — Per-case auto-summary artifact ─────────────────────────────────
@@ -2842,6 +2934,9 @@ export const casesApi = {
     const raw = await request<unknown>(`/api/v1/cases/${id}`);
     return normalizeCase(raw);
   },
+
+  getRelated: (id: string) =>
+    request<RelatedCasesResponse>(`/api/v1/cases/${encodeURIComponent(id)}/related`),
 
   create: async (data: Partial<Case>) => {
     // The backend CreateCaseRequest speaks snake_case and does NOT enable
@@ -6248,6 +6343,8 @@ export interface PushSubscribeRequest {
   user_agent?: string;
   user_id?: string | null;
   topics?: string[];
+  minimum_alert_severity?: 'critical' | 'high' | 'medium' | 'low';
+  alert_notifications_enabled?: boolean;
 }
 
 export interface PushSubscribeResponse {

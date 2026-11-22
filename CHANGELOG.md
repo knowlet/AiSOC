@@ -9,6 +9,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-device minimum severity for fused-alert Web Push notifications** in
+  the console's Settings → Notifications and Responder settings. Choose
+  Critical, High, Medium or Low, with the selected level included in the
+  threshold. Existing subscriptions without a stored threshold retain High
+  and Critical alerts. The Desktop notifications control enables alert push
+  on this device or disables fused-alert pushes without silencing agent
+  approvals, on-call hand-offs or manual test pushes.
+
+### Fixed
+
+- **SOC Insights uses the console theme and keeps its last successful snapshot
+  during refresh.** Remove duplicate page padding and undefined colour tokens,
+  correct the dashboard route title, deduplicate remount requests and coalesce
+  realtime updates without mixing tenants or time windows. Background failures
+  retain the visible metrics with an explicit retry message. The API combines
+  17–19 sequential data reads into three aggregate SELECTs, returning at most
+  25 grouped rows per read instead of every sparkline event. Both comparison
+  periods count closed cases consistently; optional cost reads use a savepoint
+  so a missing cost table cannot abort the request transaction. Materializing
+  the permitted investigation runs also prevents repeated scans when the
+  row-security estimates produce a slow generic cost-join plan.
+
+## [23.5.3] - 2026-11-19
+
+### Fixed
+
+- **Checkpoint cursors order and compare the instant a timestamp names, not
+  its text** (#1970, fixed in #1973 by @Varshith-Kali, reported with failing
+  tests by @pavancharak). `apply_checkpoint` ordered and compared vendor
+  timestamps as raw strings, so a `10:00:00.500Z` row was dropped against a
+  `10:00:00Z` cursor and a cursor written with a `+05:00` offset dropped later
+  rows. Rows are now ordered and compared by the aware UTC instant their
+  timestamp names, with the id breaking ties within one instant, and the
+  staged cursor names the newest instant — so fractional-second and UTC-offset
+  forms no longer drop newer rows. A timestamp that does not parse keeps the
+  row and falls back to the previous text comparison, so an unreadable time
+  degrades to the old behaviour instead of losing data. Pinned by
+  `tests/connectors/test_checkpoint_instant_ordering.py`.
+
+- **Huntress, Cisco Secure Endpoint and Sophos Central persist an event-time
+  cursor and overlap one poll interval** (#1971, fixed in #1973 by
+  @Varshith-Kali, reported with failing tests by @pavancharak). The three
+  connectors polled clock-derived windows with no persisted cursor, so a run
+  the scheduler skipped left a window no later poll requested and no backfill
+  ever covered. Each now declares a checkpoint and widens its poll window by
+  the persisted cursor (one interval of overlap when none exists), so a
+  skipped run's gap is covered, and skipped runs are logged
+  (`connector.scheduler.poll_skipped`) instead of vanishing silently. Pinned
+  by `tests/connectors/test_poll_window_overlap.py`.
+
+## [23.5.2] - 2026-11-19
+
+### Security
+
+- **Managed-tenant provisioning no longer publishes the known-password demo
+  administrator** (#1966). `_default_demo_seeder` called
+  `seed_demo._ensure_user`, which upserts the deterministic `demo@example.com`
+  user with the published password, an `admin` wildcard role and
+  `is_active=True` — and *moves* an existing row into the newly provisioned
+  tenant. Because `provision_from_waitlist` defaults to `seed_demo=True` and
+  the provision endpoint exposes no seeder field, every ordinary managed
+  promote created a public administrative login. (The #1904 env-gate that
+  covered this was itself a casualty of the #1933 stale-base revert — and this
+  fix supersedes it structurally rather than restoring it.) Provisioning now
+  seeds labelled starter content only, never the identity; `_ensure_user`
+  itself refuses any tenant but the canonical demo tenant before touching the
+  database; migration 163 retires already-published demo admins in managed
+  tenants (deactivated, sessions revoked, hash replaced with a sentinel, role
+  demoted) while leaving the canonical demo tenant working; and a live
+  negative control re-weakens both layers and asserts the suite fails.
+  Contributed by @knowlet.
+
+- **The threat-actor attribution API is fail-closed again** (#1967, restoring
+  #1904/#1901). A stale-base push serialized an old tree over `main`: the
+  #1933 merge (a cases fix) silently reverted the fail-closed enforcer in
+  `services/threatintel/app/api/auth.py` back to warn-once-and-allow, reverted
+  its tests, and deleted the `tests/test_threatintel_token_env_gate.py` gate —
+  so the v23.5.0 and v23.5.1 tags shipped an enforcer that allows every caller
+  when the token is unset, while both releases' notes described 503. (The same
+  revert took the token generation and compose wiring, which #1961 had already
+  re-added without knowing it was a restoration, and the provisioner demo-seed
+  gate, which #1966 supersedes structurally.) This restores the enforcer
+  (unset token → 503 unless `AISOC_THREATINTEL_ALLOW_UNAUTHENTICATED=1` is set
+  deliberately), its once-only `lru_cache` warning, the reverted
+  `test_actor_attribution_auth.py` assertions, and the compose-forwarding gate
+  — which now coexists with #1961's source-derived wiring gate, two detectors
+  for one contract.
+
+### Fixed
+
+- **The realtime OpenTelemetry bump is re-applied** (#1967). The same #1933
+  stale-base merge reverted Dependabot #1928's
+  `@opentelemetry/exporter-trace-otlp-grpc` and `@opentelemetry/sdk-node`
+  0.301.0 → 0.301.2 bump in `services/realtime`; package.json and the lockfile
+  are restored to the bumped state.
+
+
+## [23.5.1] - 2026-11-18
+
+### Fixed
+
+- **The threat-actor attribution token is actually generated and wired now**
+  (#1961). v23.5.0's notes said the "sixteenth secret" was generated by
+  `ensure_env` and forwarded to both ends; on the tag it was neither. The
+  generator never minted `AISOC_THREATINTEL_SERVICE_TOKEN` and compose
+  delivered it only to the API — not to the `threatintel` container that
+  *enforces* the fail-closed gate, nor to the `agents` container that *sends*
+  it — so a fresh `make up` answered **503 for every `/api/v1/actors/*` call**
+  with every secret "correctly" generated. `ensure_env` now generates it (the
+  count of generated secrets moves 15 → 16, reflected in `.env.example` and the
+  documented count), and compose forwards it to both the enforcer and the
+  caller. Pinned by `tests/test_threatintel_token_wiring.py`, which discovers
+  the readers from source and asserts compose delivers to each, so the
+  generator and the wiring cannot drift apart again.
+
+- **`GET /cases?status=open` matches the open caseload again** (#1961). `open`
+  is a write-path alias the read path string-matched literally, so the filter
+  returned zero rows on every deployment — which left the console's "add to
+  existing case" picker permanently empty and the related-cases path
+  unreachable. The list endpoint now expands the alias through the same
+  `case_status.OPEN_STATUSES` the rest of the product uses; a concrete status
+  still matches exactly, and the tenant predicate is unchanged. Pinned by
+  `services/api/tests/test_cases_open_alias.py`.
+
+- **The documentation portal builds again** (#1960). A generated connector page
+  shipped `<your subdomain>.huntress.io` in a table cell on Nov 12; MDX parses
+  `<your subdomain>` as an unclosed JSX tag, so every GitHub Pages deploy had
+  failed for six days (15 consecutive runs) while per-PR CI — which does not
+  run the Docusaurus build — stayed green. `scripts/generate_connector_docs.py`
+  now escapes angle-bracket placeholders in prose, the page is regenerated, and
+  the previously-untested escape function is pinned by
+  `tests/test_connector_docs_mdx_safe.py`. The portal serves the Huntress page
+  and all three new v23.5.0 connector pages again.
+
+### Changed
+
+- README screenshots and the deployment walkthrough video were re-captured
+  against a live v23.5.0 stack (demo mode off, local-model triage verdicts,
+  the real CISA KEV feed, a genuine full-profile attack graph), with two new
+  tiles for this line's entity-risk-hosts and related-cases features. Docs and
+  assets only; no runtime change.
+
+## [23.5.0] - 2026-11-18
+
+### Added
+
+- **The entity queue says where an entity was seen** (#1950). A `user`, `ip`
+  or `domain` row showed only value, score and count — but `root` with 40
+  points could be a brute force on one internet-facing box or one failed
+  login on each of ten servers, and `NT AUTHORITY\SYSTEM` is on every
+  Windows machine, so triage from the list meant opening every entity.
+  Fusion now rolls up each contributing alert's hostname per entity —
+  bounded at twelve hosts with least-contributing eviction, aged out with
+  the same decay window, never recorded for `host` entities (a host's host
+  is itself) — and the wire carries `hosts: [{name, alert_count,
+  last_seen}]` count-ranked, plus the host on each contribution. The
+  console shows the top three on the row with an honest `+N`, the full
+  ranked list and per-contribution hosts in the detail drawer, and renders
+  no host line at all when no contributing alert named one. Designed by
+  @relains in #1950, who also enumerated why the display-hack alternative
+  (overloading `entity_value` at the gateway) was the wrong layer.
+
+- **Opt-in auto-close for cases that stay `resolved` past a cooling-off
+  window** (#1945). `resolved` is deliberately not terminal — it stamps
+  `resolved_at` but not `closed_at`, and every closure metric reads
+  `closed` — so a resolved case nobody revisited sat open forever. With
+  `CASE_AUTO_CLOSE_ENABLED=true`, an hourly sweep closes cases that have
+  stayed resolved for `CASE_AUTO_CLOSE_AFTER_DAYS` (default 7). The
+  human/system split keeps the window safe: only a human sets `resolved`
+  (the clock starts on a deliberate act), a reopen clears `resolved_at` and
+  the claim UPDATE requires `status = 'resolved'`, so a case that came back
+  to life — or that a human closed or reopened mid-sweep — is untouched.
+  Each close is its own transaction, stamps the custody chain as a system
+  action, and fails soft per case. **Ships off by default**: closing cases
+  changes what closure metrics and MTTR dashboards report, so the operator
+  turns the janitor on. Partial index on `resolved_at WHERE
+  status='resolved'` keeps the hourly scan off the table. Contributed by
+  @alexmateescu.
+
+- **Related cases with inspectable evidence.** The case Overview now shows
+  other cases in the same tenant that share linked alerts or exact typed
+  observables, including closed cases. Results are ranked by distinct shared
+  evidence and include explicit result/evidence truncation, loading, empty,
+  error and retry states. Shared and linked alert IDs open their detail pages.
+
 - **Certificate authentication for Microsoft Entra ID and Microsoft 365 audit.**
   Both connectors accept an Entra app certificate instead of a client secret:
   new optional `certificate_pem` (secret, PEM private key, optionally with the
@@ -115,6 +300,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The LLM gateway no longer sends the platform's provider key to a
+  tenant-selected endpoint** (#1953, carried in #1954). When a tenant's BYOK
+  row selected its own endpoint but the stored key was absent or failed to
+  decrypt, the resolver fell back to the environment key — the platform's
+  own gateway/provider credential — and sent it wherever the tenant's
+  `base_url` pointed, so a tenant could harvest it with a deliberately
+  broken vault token. An environment key is now inherited only when the
+  resolved destination is exactly the environment's own endpoint (scheme,
+  host, port, path and query compared; userinfo refused), the triage worker
+  pins the resolver's paired key at the call site so the SDK cannot
+  substitute `OPENAI_API_KEY`, keyless operation is permitted only for
+  local/custom providers that never stored a key, and the agents' air-gap
+  check mirrors the API's egress classifier instead of blocking one
+  hostname. The gateway container normalises empty-vs-absent env before
+  LiteLLM's entrypoint (Bedrock's SDK credential chain and keyless custom
+  endpoints both keep working), with negative controls running in CI that
+  sabotage the config three ways and assert each breaks the right test.
+  Contributed by @knowlet.
+
+- **The threat-actor attribution API fails closed, and the default stack
+  carries the key** (#1901, SEC-15/NC-7, carried in #1904).
+  `/api/v1/actors/*` was fail-open by design: an unset
+  `AISOC_THREATINTEL_SERVICE_TOKEN` warned once and allowed every caller, so
+  a deployment that exposed the service beyond the private network served
+  actor profiles to anyone who could reach the port. The gate now answers
+  503 when the token is unset (the open behaviour survives only behind an
+  explicit `AISOC_THREATINTEL_ALLOW_UNAUTHENTICATED=1`), `ensure_env.py`
+  generates the token as the sixteenth secret, and compose forwards it to
+  the enforcing `threatintel` container *and* the calling `agents`
+  container — a generated value that reaches neither end is a 503 for every
+  attribution call, pinned by a tree-derived, negative-controlled gate.
+  Contributed by @alexmateescu.
+
+- **Tenant provisioning refuses demo identities outside development**
+  (#1901, SEC-2, carried in #1904). The demo dataset creates a
+  known-password administrator inside the live tenant, and the seeder's own
+  production guard covered only the standalone script —
+  `provision_from_waitlist` bypassed it, so a production waitlist
+  provisioning that asked for demo seeding got the known-password admin. A
+  non-development `ENVIRONMENT` never seeds demo identity now, whatever the
+  caller asked for. Contributed by @alexmateescu.
+
+- **The archived prototype's region reads require the tenant context**
+  (GHSA-grv9-vcqp-f37v, #1957). In `plans/cyble-aisoc/platform/backend`,
+  `GET /regions/tenants/{tenant_id}/events` and `.../home` carried no auth
+  dependency while their sibling PUT did — an unauthenticated caller could
+  read any tenant's home region and migration audit trail (operator
+  identity, free-text notes). Both now require the tenant context and map
+  cross-tenant reads to 403; the reporter's framework-level method stays as
+  a regression gate that walks FastAPI's dependency table (145 routes) and
+  refuses any tenant-scoped route with zero dependencies — and refuses a
+  clean verdict over a table it could not enumerate. The shipping services
+  never had these routes. Reported by @wuming815.
+
+- **MFA verify is throttled; a phished `mfa_token` can no longer sweep the
+  TOTP space** (#1942). `POST /auth/login` consults the shared
+  `LoginThrottle`, but passing login only *issues* the challenge — the
+  session is minted by `/auth/mfa/verify` and `/auth/mfa/webauthn/verify`,
+  and those routes consulted no throttle at all: a leaked challenge token
+  bought an unthrottled brute force of the 6-digit code space, every wrong
+  answer a free 401. Both verify routes now check the same throttle class
+  before any cryptography, scoped `mfa-account:<user-id>` so the password
+  stage's counter and the code stage's cannot collide, count failures toward
+  the shared lockout thresholds, reset on success, and answer 429 with
+  `Retry-After` once locked. The throttle's principal digest is keyed (HMAC
+  under the process secret): emails are enumerable, so the previous unsalted
+  hash fell to an offline dictionary against a leaked Redis dump
+  (CodeQL py/weak-sensitive-data-hashing on this change's own diff).
+  Behavioural lockout tests drive the real in-process throttle to refusal on
+  both routes. Contributed by @alexmateescu.
+
 - **BREAKING: action requests require a principal by default** (#1900,
   NC-3). `AISOC_ACTIONS_REQUIRE_PRINCIPAL` shipped `default=False`, so a
   principal-less `ActionRequest` passed `authorize_action` with no identity
@@ -130,12 +386,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-out. Contributed by @alexmateescu, with tests for both the default
   refusal and the opt-out.
 
+- **Analyst-authored rule patterns can no longer pin a worker (ReDoS)**
+  (#1943). The rule engine compiles analyst- and LLM-authored pattern bodies
+  on `/detection/test`, `/rules/{id}/execute` and `run_hunt`, on the stdlib
+  backtracking engine with no bound — one catastrophic pattern
+  (`(a|a)*$`-family) against a 48-character payload runs effectively
+  forever. The regex rule runner now compiles on the `regex` engine and
+  bounds every search with `AISOC_REGEX_TIMEOUT_SECONDS` (default 2.0s),
+  failing closed with "rule timed out" so the analyst fixes the pattern
+  instead of a worker silently burning. Review found a second, worse site
+  the same class reaches: the KQL wildcard branch compiled the analyst's
+  value **raw**, making it a regex injection as well as unbounded — a KQL
+  value is a glob, so it is now escaped with only `*` translated, the same
+  construction the module's own wildcard-rule branch already used. Both
+  pre-fix sites were measured still backtracking after 4s on inputs the
+  fixed code answers in milliseconds. Contributed by @alexmateescu.
+
 - **`hono` and `@hono/node-server` override floors raised** to `>=4.13.16`
   and `>=2.1.6` (Dependabot #236–#242; both ride in transitively through
   `@modelcontextprotocol/sdk`). Within-major moves of existing floors in the
   root `pnpm.overrides`, re-resolved to 4.13.18 / 2.1.8 — the scoped-range
   discipline from the minimatch incident, not a blanket pin.
 
+
+- **Mesh opt-out requires proof of key possession** (#1944, carried in
+  part). `POST /v1/opt-out` took any caller-named public key unverified, and
+  opt-out is a permanent publish denylist — so an anonymous caller could
+  permanently silence any contributing instance (and dissolve its
+  participation in every k-anonymity cohort) by merely reading its public
+  key off the mesh. A withdrawal now carries an Ed25519 signature over the
+  fixed domain string `aisoc-mesh:opt-out:v1`, verified against the claimed
+  key; domain separation is test-pinned in both directions (an artifact
+  signature is not a withdrawal, a withdrawal is not a publish). The
+  contribution's other half — a platform bearer on the publish routes — was
+  deliberately **not** carried: publishes are already Ed25519-verified per
+  artifact, the hub is a federation surface, and foreign instances do not
+  hold this hub's platform secret, so a bearer would break federation
+  rather than secure it (sybil resistance remains an open gap that needs a
+  federation-compatible answer such as instance registration). Contributed
+  by @alexmateescu.
 
 - **`opentelemetry-api` re-locked to 1.45.2 across all thirteen Python
   services** (CVE-2026-126360, high). The CVE published against 1.45.1 the
@@ -172,6 +461,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range moves, three lines of churn.
 
 ### Fixed
+
+- **Distinct Wazuh documents are distinct events; repeat occurrences count**
+  (#1951). The connector set `external_id` to the *rule* id, so every hit of
+  one rule shared one replay-stable event identity and fusion's occurrence
+  guard discarded real repeats as redeliveries — the count stuck while the
+  estate kept firing. `external_id` is now the indexer document `_id`;
+  fusion's occurrence rollup updates the alert's `first_seen`/`last_seen`
+  window atomically with the count, inspects provenance before appending it
+  (an identified repeat of an id-less original is counted once, and a failed
+  rollup returns before the append so a retry can recover it), and ingest's
+  tenant directory serves the last observed answer when Postgres blinks
+  mid-outage instead of 503ing pushes after the cache TTL. An end-to-end
+  recurrence test drives the real connector output through authenticated
+  HTTP, Kafka, fusion and Postgres in CI, Redis windows expired for real.
+  Contributed by @knowlet.
 
 - **Case comments save again, and the Resolution panel actually persists**
   (#1932). `casesApi.addComment` sent `{"comment": ...}` while the API's
@@ -236,6 +540,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #1886. Pinned by a gate derived from `config.go` that fails when a Cyble
   credential the config reads is not forwarded by the enrichment service in
   compose.
+
+- **Kafka consumers in agents and UEBA recover from transient broker
+  outages instead of dying permanently** (#1930). Both services
+  bootstrapped their consumer exactly once: a `KafkaConnectionError` at
+  startup (a broker still booting after a host reboot, a leader election, a
+  DNS record not up yet) ended the consume task for the life of the
+  container, while the container itself stayed `Up` — so `restart:
+  unless-stopped` never acted, Compose does not restart unhealthy
+  containers, and on the reporting deployment six days passed with 1,058
+  fused alerts untriaged and ~827k events unscored. Both workers now run
+  under the same supervision the fusion worker shipped: transient failures
+  are retried with capped exponential backoff (escalating to an error
+  naming the operator action once a streak outlives any transient
+  explanation), Kafka-permanent failures (bad SASL credentials, missing
+  grants) stop the loop with the fix on the final log line, and `/readyz`
+  recovers on its own when a retry re-attaches. The restructure also closes
+  a client leak in UEBA (a failed `producer.start()` left a started
+  consumer nothing would ever stop) and covers the bootstrap with the
+  teardown `finally` in both services. The `agents` service gained the
+  `/readyz` compose healthcheck it was missing (UEBA already had one; the
+  Helm chart already probes both paths), so a detached subscription is
+  visible in `docker compose ps` while supervision recovers it.
 
 - **An offline endpoint's late-uploaded ESET detections are swept, not
   skipped** (#1890). ESET filters `/v1/detections` on `occurTime` — when the
