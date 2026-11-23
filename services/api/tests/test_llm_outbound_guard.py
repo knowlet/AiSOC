@@ -21,6 +21,15 @@ from app.services.alert_explain import HistoricalFpRate, RuleLineage, _call_llm_
 from app.services.llm_resolver import LlmConfig
 from app.services.llm_safety import safe_chat_completions_request
 
+_OPERATOR_BASE_ENV = ("OPENAI_BASE_URL", "LLM_BASE_URL", "LLM_GATEWAY_URL")
+
+
+@pytest.fixture(autouse=True)
+def _no_operator_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each case states the deployment endpoint it needs, starting from none."""
+    for name in _OPERATOR_BASE_ENV:
+        monkeypatch.delenv(name, raising=False)
+
 
 def _alert() -> Alert:
     return cast(
@@ -228,3 +237,41 @@ def test_the_guard_is_inside_the_shared_request_function() -> None:
     assert guard < post
     explain = (Path(__file__).resolve().parents[1] / "app/services/alert_explain.py").read_text(encoding="utf-8")
     assert "safe_chat_completions_request" in explain
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_name", _OPERATOR_BASE_ENV)
+async def test_the_deployments_own_loopback_endpoint_is_still_called(
+    monkeypatch: pytest.MonkeyPatch, recorder: list[str], env_name: str
+) -> None:
+    monkeypatch.setenv(env_name, "http://127.0.0.1:11434/v1")
+    await safe_chat_completions_request(
+        api_key="aisoc-no-auth",
+        model="local",
+        messages=[{"role": "user", "content": "Explain this alert."}],
+        url="http://127.0.0.1:11434/v1/chat/completions",
+    )
+    assert recorder == ["http://127.0.0.1:11434/v1/chat/completions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:4000/v1/chat/completions",
+        "http://localhost:11434/v1/chat/completions",
+        "https://127.0.0.1:11434/v1/chat/completions",
+    ],
+)
+async def test_another_loopback_origin_is_refused_beside_a_loopback_deployment(
+    monkeypatch: pytest.MonkeyPatch, recorder: list[str], url: str
+) -> None:
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://127.0.0.1:11434/v1")
+    with pytest.raises(SSRFError):
+        await safe_chat_completions_request(
+            api_key="aisoc-no-auth",
+            model="local",
+            messages=[{"role": "user", "content": "Explain this alert."}],
+            url=url,
+        )
+    assert recorder == []
