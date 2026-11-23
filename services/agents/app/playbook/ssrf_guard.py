@@ -139,6 +139,11 @@ def _is_disallowed_address(ip: ipaddress._BaseAddress, *, allow_private: bool) -
         return True, "multicast address"
     if ip.is_reserved:
         return True, "reserved address"
+    # Some metadata endpoints are neither link-local nor public: AWS's IPv6
+    # one is in the ULA band and Alibaba's is in shared address space, so
+    # ``allow_private`` alone let a name that resolves to them through.
+    if str(ip) in _METADATA_ADDRESSES:
+        return True, "cloud metadata address"
     # Block IPv4-mapped/IPv4-compatible IPv6 against private v4 ranges.
     if isinstance(ip, ipaddress.IPv6Address):
         mapped = getattr(ip, "ipv4_mapped", None)
@@ -337,13 +342,16 @@ def guard_runtime_llm_url(url: str) -> str:
     link-local and metadata stay blocked for every destination.
     """
     origin = _origin(url)
-    if origin is None or origin not in _operator_llm_origins():
+    operator_endpoint = origin is not None and origin in _operator_llm_origins()
+    if not operator_endpoint:
         validate_outbound_url(url, allow_private=True)
-    _reject_link_local_and_metadata(url)
+    # The operator exemption skips ``validate_outbound_url`` and so skips its
+    # lookup; a name there has to be resolved here instead.
+    _reject_link_local_and_metadata(url, resolve_names=operator_endpoint)
     return url
 
 
-def _reject_link_local_and_metadata(url: str) -> None:
+def _reject_link_local_and_metadata(url: str, *, resolve_names: bool = False) -> None:
     """Refuse link-local and metadata even when the allow-list skipped classification.
 
     ``validate_outbound_url`` already rejects those addresses for a host it
@@ -357,8 +365,9 @@ def _reject_link_local_and_metadata(url: str) -> None:
 
     literal = _coerce_ip(host)
     # A name the shared guard already resolved is not looked up again. The
-    # allow-list and IP literals are the paths that skipped that lookup.
-    if literal is None and host not in _allowed_hosts():
+    # allow-list, the operator endpoint and IP literals are the paths that
+    # skipped that lookup.
+    if literal is None and not resolve_names and host not in _allowed_hosts():
         return
 
     raw = [literal] if isinstance(literal, ipaddress.IPv4Address | ipaddress.IPv6Address) else _resolve_host_addresses(host)
