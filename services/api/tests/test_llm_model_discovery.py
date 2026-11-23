@@ -192,6 +192,7 @@ class TestTheUrl:
             ("https://gw.example.com/v1/", "https://gw.example.com/v1/models"),
             ("https://gw.example.com", "https://gw.example.com/v1/models"),
             ("https://gw.example.com/v1/chat/completions", "https://gw.example.com/v1/models"),
+            ("https://gw.example.com/api", "https://gw.example.com/api/models"),
         ],
     )
     def test_models_is_listed_beside_the_completions_url_triage_calls(self, base: str, expected: str) -> None:

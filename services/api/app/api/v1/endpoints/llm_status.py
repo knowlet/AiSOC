@@ -69,7 +69,7 @@ from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
 from app.services import llm_health
 from app.services.llm_runtime import probe as probe_runtime
-from app.services.llm_tenant_routing import allows_unauthenticated, tenant_route
+from app.services.llm_tenant_routing import allows_unauthenticated, requires_explicit_base, tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -178,6 +178,7 @@ def _compute_status(
     key_set: bool,
     source: str,
     allows_no_auth: bool = False,
+    policy_override: str | None = None,
 ) -> dict[str, object]:
     """Compute the redacted status snapshot for a resolved config triple.
 
@@ -252,6 +253,9 @@ def _compute_status(
         policy_note = f"LLM calls are routed to a local provider ({provider}). No external network egress is required for the Explain path."
     else:
         policy_note = f"LLM calls are routed to {provider} at {host}. Outbound HTTP is required."
+
+    if policy_override:
+        policy_note = policy_override
 
     return {
         "provider": provider,
@@ -368,6 +372,16 @@ async def tenant_llm_status(
         env_base=env_base_url,
         env_model=env_model,
     )
+    if requires_explicit_base(cred.provider) and not (cred.base_url or "").strip():
+        return _compute_status(
+            base_url="",
+            model="",
+            key_set=False,
+            source="tenant",
+            policy_override=(
+                "Azure OpenAI requires an explicit base URL. The deployment endpoint was not used, and the stored key was not sent there."
+            ),
+        )
     tenant_contributed = tenant_base or tenant_model
     env_contributed = (not tenant_base and bool(env_base_url)) or (not tenant_model and bool(env_model))
     env_key_set = env_key_set and inherit_env_key

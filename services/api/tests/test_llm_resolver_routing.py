@@ -87,6 +87,25 @@ async def test_hosted_key_only_uses_provider_defaults(
 
 
 @pytest.mark.asyncio
+async def test_azure_without_base_does_not_attach_the_key_to_the_deployment(monkeypatch: pytest.MonkeyPatch) -> None:
+    decrypt_as(monkeypatch, "azure-secret-key")
+    db = database(credential(provider="azure-openai", base_url=None))
+    tenant_id = uuid.uuid4()
+    cfg = await llm_resolver.resolve_llm_config(db, tenant_id)
+    snap = await status_module.tenant_llm_status(db, tenant_id)
+    assert cfg.allowed is False
+    assert cfg.api_key is None
+    assert cfg.base_url == ""
+    assert "litellm" not in cfg.base_url
+    assert "base URL" in cfg.reason
+    assert snap["effective_path"] == "fallback"
+    assert snap["base_url"] == ""
+    assert "azure-secret-key" not in str(snap)
+    assert "gateway-test-key" not in str(snap)
+    assert "explicit base URL" in str(snap["policy_note"])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("vault_token", [None, "vault-test-token"])
 async def test_foreign_endpoint_never_inherits_gateway_key(monkeypatch: pytest.MonkeyPatch, vault_token: str | None) -> None:
     decrypt_as(monkeypatch, None)

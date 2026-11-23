@@ -2011,6 +2011,7 @@ const WRITABLE_PROVIDERS: readonly LlmWritableProvider[] = [
 ] as const;
 
 const PROVIDERS_REQUIRING_BASE_URL: ReadonlySet<LlmWritableProvider> = new Set([
+  'azure-openai',
   'local-ollama',
   'local-vllm',
   'local-litellm',
@@ -2050,8 +2051,8 @@ function providerHintFor(p: LlmWritableProvider): {
       };
     case 'azure-openai':
       return {
-        baseUrlPlaceholder: 'https://my-resource.openai.azure.com',
-        baseUrlHint: 'Optional override for your Azure OpenAI resource.',
+        baseUrlPlaceholder: 'https://my-resource.openai.azure.com/openai/v1',
+        baseUrlHint: 'Required. Azure has no default endpoint, and a blank base is refused.',
       };
     default:
       return {

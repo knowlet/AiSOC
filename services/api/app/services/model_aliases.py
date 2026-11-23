@@ -15,17 +15,13 @@ agents-side pins), or set a global ``LLM_MODEL`` at the call site.
 from __future__ import annotations
 
 import os
-import re
+from urllib.parse import urlsplit
 
 # Mirrors the roles in services/agents/app/llm/model_pins.py.
 ROLES = frozenset({"triage", "recon", "investigation", "copilot", "summary", "report", "nl", "hunt", "detection"})
 
 
 DEFAULT_OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
-
-#: A trailing OpenAI-compatible API version segment — `/v1`, and `/v2` etc. so
-#: the rule does not have to be revisited for a provider that moves on.
-_VERSION_SUFFIX = re.compile(r"/v\d+$")
 
 #: See :data:`services.agents.app.llm.routing.GATEWAY_ALIAS_PREFIX`.
 GATEWAY_ALIAS_PREFIX = "aisoc-"
@@ -159,15 +155,37 @@ def completions_url_for_base(base_url: str) -> str:
     that was running beside it.
 
     So the suffix is decided by what the base already carries rather than
-    assumed: a base that ends in a version segment takes ``/chat/completions``,
-    and a bare host takes ``/v1/chat/completions`` so a BYOK value like
-    ``https://api.openai.com`` still resolves.
+    assumed. A bare origin (``https://api.openai.com``, ``http://vllm:8000``)
+    takes ``/v1/chat/completions``. A path the operator already set — ``/v1``,
+    ``/api``, an Azure deployment path — is the API root, and the call is
+    ``{base}/chat/completions``. Inserting ``/v1`` under ``/api`` probes a
+    different URL than the runtime client, which posts ``/chat/completions``
+    onto that root.
+
+    This is the one builder. The credential probe, both explain paths, model
+    discovery and the agent factory's SDK base are derived from it.
     """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         return DEFAULT_OPENAI_CHAT_COMPLETIONS_URL
     if base.endswith("/chat/completions"):
         return base
-    if _VERSION_SUFFIX.search(base):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+    # urlsplit, not a suffix regex: a query string must not hide the path,
+    # and an existing path is not a bare origin.
+    if urlsplit(base).path in ("", "/"):
+        return f"{base}/v1/chat/completions"
+    return f"{base}/chat/completions"
+
+
+def sdk_base_for(base_url: str) -> str:
+    """Base URL the OpenAI SDK should receive so it posts to :func:`completions_url_for_base`.
+
+    The SDK appends ``/chat/completions`` and does not insert ``/v1``. Passing
+    it the parent of the shared completions URL is what makes a probe and a
+    runtime call hit the same path.
+    """
+    full = completions_url_for_base(base_url)
+    suffix = "/chat/completions"
+    if full.endswith(suffix):
+        return full[: -len(suffix)]
+    return (base_url or "").strip().rstrip("/")

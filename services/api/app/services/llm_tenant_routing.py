@@ -77,6 +77,15 @@ def airgap_host_allowed(hostname: str, allowlist: list[str]) -> bool:
     return False
 
 
+def requires_explicit_base(provider: str) -> bool:
+    """Azure OpenAI has no canonical endpoint.
+
+    OpenAI and Anthropic do. Substituting the deployment base for a blank
+    Azure credential sends that tenant's decrypted key to a different service.
+    """
+    return provider == "azure-openai"
+
+
 def tenant_route(
     *, provider: str, base_url: str | None, model: str | None, env_base: str, env_model: str
 ) -> tuple[str, str, bool, bool, bool]:
@@ -84,8 +93,13 @@ def tenant_route(
 
     A hosted provider with no explicit endpoint means that provider's default,
     not the bundled gateway. Its default model is likewise provider-specific.
+    Azure is not one of those providers: with no explicit base the route is
+    empty and must be refused, not pointed at the deployment endpoint.
     For other providers, preserve the existing explicit override semantics.
     """
+    named_model = (model or "").strip()
+    if requires_explicit_base(provider) and not (base_url or "").strip():
+        return "", named_model, False, bool(named_model), False
     default_base, default_model = PROVIDER_DEFAULTS.get(provider, ("", ""))
     tenant_base = base_url or default_base
     tenant_model = model or default_model

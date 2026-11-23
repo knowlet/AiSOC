@@ -69,6 +69,11 @@ class TestABareHostStillGetsOne:
 
 
 class TestOtherShapes:
+    def test_an_api_root_is_not_given_another_version_segment(self) -> None:
+        """``/api`` is the root the runtime posts onto. Inserting ``/v1`` probes elsewhere."""
+        assert completions_url_for_base("https://gateway.example/api") == "https://gateway.example/api/chat/completions"
+        assert completions_url_for_base("https://gateway.example/api/") == "https://gateway.example/api/chat/completions"
+
     def test_a_v2_base_is_treated_the_same_way(self) -> None:
         """Written as a rule rather than a literal, so a provider that moves
         on does not reintroduce the bug."""

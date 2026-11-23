@@ -27,7 +27,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
-import re
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlsplit
@@ -118,16 +117,13 @@ def chat_completions_url(model: str | None = None) -> str:
     return DEFAULT_OPENAI_CHAT_COMPLETIONS_URL
 
 
-#: A trailing OpenAI-compatible API version segment — `/v1`, and `/v2` etc. so
-#: the rule does not have to be revisited for a provider that moves on.
-_VERSION_SUFFIX = re.compile(r"/v\d+$")
-
-
 def completions_url_for_base(base_url: str) -> str:
     """Chat-completions URL for a base the *caller* resolved.
 
     Mirrors :func:`services.api.app.services.model_aliases.completions_url_for_base`;
-    see it for why the suffix is decided rather than assumed.
+    see it for why the suffix is decided rather than assumed. A bare origin
+    takes ``/v1``. An existing path (``/v1``, ``/api``, an Azure deployment
+    path) is the API root and only gains ``/chat/completions``.
 
     :func:`chat_completions_url` above reads the base out of the environment,
     which `/explain` cannot use — its config is layered per tenant, so a BYOK
@@ -142,9 +138,23 @@ def completions_url_for_base(base_url: str) -> str:
         return DEFAULT_OPENAI_CHAT_COMPLETIONS_URL
     if base.endswith("/chat/completions"):
         return base
-    if _VERSION_SUFFIX.search(base):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+    if urlsplit(base).path in ("", "/"):
+        return f"{base}/v1/chat/completions"
+    return f"{base}/chat/completions"
+
+
+def sdk_base_for(base_url: str) -> str:
+    """Base the OpenAI SDK should receive so it posts to :func:`completions_url_for_base`.
+
+    The SDK appends ``/chat/completions`` and does not insert ``/v1``. The
+    probe and explain paths call :func:`completions_url_for_base` directly;
+    this is the same builder, trimmed to the form the SDK expects.
+    """
+    full = completions_url_for_base(base_url)
+    suffix = "/chat/completions"
+    if full.endswith(suffix):
+        return full[: -len(suffix)]
+    return (base_url or "").strip().rstrip("/")
 
 
 def _needs_legacy_max_tokens(base_url: str | None) -> bool:
@@ -228,7 +238,10 @@ def make_chat_model(
         }
     assert_routable(model, base_url)
     if base_url:
-        params["base_url"] = base_url
+        # Same URL the probe and explain paths build. The SDK then appends
+        # /chat/completions and must not be handed a different root.
+        params["base_url"] = sdk_base_for(base_url)
+        base_url = params["base_url"]
     # Direct Anthropic supports max_completion_tokens without a legacy duplicate.
     if max_tokens is not None and not direct_anthropic and _needs_legacy_max_tokens(base_url):
         # langchain-openai 1.x renders the typed `max_tokens` field onto the

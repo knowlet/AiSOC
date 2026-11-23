@@ -77,7 +77,10 @@ async def test_a_breaching_prompt_never_reaches_the_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_clean_prompt_is_forwarded_with_the_normalised_messages() -> None:
+async def test_a_clean_prompt_is_forwarded_with_the_normalised_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fixture host does not resolve. The allowlist is the operator escape
+    # for a named host; this test is about the contract, not SSRF.
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "provider.test")
     recorder = _Recorder()
     body = await safe_chat_completions_request(
         api_key="k",

@@ -72,7 +72,7 @@ from app.services.audit import emit_audit
 from app.services.llm_credential_probe import ProbeResult, probe_credential
 from app.services.llm_model_discovery import Discovery, discover_chat_models
 from app.services.llm_resolver import _env_baseline
-from app.services.llm_tenant_routing import tenant_route
+from app.services.llm_tenant_routing import requires_explicit_base, tenant_route
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +94,11 @@ LlmProvider = Literal[
     "custom",
 ]
 
-# Providers that *require* a non-NULL ``base_url``. Hosted SaaS providers
-# default to a canonical endpoint and reject base-URL spoofing; local +
-# custom providers must tell us where to point.
-_PROVIDERS_REQUIRING_BASE_URL: frozenset[str] = frozenset({"local-ollama", "local-vllm", "local-litellm", "custom"})
+# Providers that *require* a non-NULL ``base_url``. OpenAI and Anthropic
+# have a canonical endpoint. Azure does not: a blank base used to fall
+# through to the deployment URL and send the tenant key there. Local and
+# custom providers must also name their host.
+_PROVIDERS_REQUIRING_BASE_URL: frozenset[str] = frozenset({"azure-openai", "local-ollama", "local-vllm", "local-litellm", "custom"})
 
 # Providers that require a non-NULL API key. Local providers without
 # auth (Ollama default install, vLLM behind an internal LB) legitimately
@@ -535,6 +536,12 @@ async def test_llm_credential(
         env_base=env_base,
         env_model=env_model,
     )
+    if requires_explicit_base(existing.provider) and not (existing.base_url or "").strip():
+        return LlmCredentialTestResult(
+            outcome="refused",
+            detail=("azure-openai requires an explicit base URL. The stored key was not sent to the deployment endpoint."),
+            provider=existing.provider,
+        )
     if api_key is None and inherit_env_key:
         api_key = env_key
 

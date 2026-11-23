@@ -9,6 +9,7 @@ import pytest
 from app.llm.factory import (
     UnroutableModelError,
     chat_completions_url,
+    completions_url_for_base,
     llm_override,
     make_chat_model,
     preflight_llm,
@@ -211,6 +212,24 @@ def test_make_chat_model_refuses_an_alias_with_no_gateway(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     with pytest.raises(UnroutableModelError, match="aisoc-triage"):
         make_chat_model("triage")
+
+
+def test_an_api_root_uses_the_same_completions_url_as_the_probe(monkeypatch):
+    """The SDK appends /chat/completions. The base it is given must already match the probe."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    base = "https://gateway.example/api"
+    with llm_override(base_url=base, model="tenant-model", api_key="sk-tenant"):
+        llm = make_chat_model("triage")
+    full = completions_url_for_base(base)
+    assert full == "https://gateway.example/api/chat/completions"
+    assert str(llm.openai_api_base).rstrip("/") + "/chat/completions" == full
+
+
+def test_a_bare_host_sdk_base_includes_the_version_segment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    with llm_override(base_url="https://gw.example.com", model="tenant-model", api_key="sk-tenant"):
+        llm = make_chat_model("triage")
+    assert str(llm.openai_api_base).rstrip("/") == "https://gw.example.com/v1"
 
 
 def test_byok_model_override_only_when_the_tenant_set_one(monkeypatch):

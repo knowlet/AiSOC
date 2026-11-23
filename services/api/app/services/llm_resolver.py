@@ -48,7 +48,7 @@ from app.core.airgap import is_host_allowed_for_airgap
 from app.core.config import settings
 from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
-from app.services.llm_tenant_routing import allows_unauthenticated, tenant_route
+from app.services.llm_tenant_routing import allows_unauthenticated, requires_explicit_base, tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
 
 logger = logging.getLogger(__name__)
@@ -235,6 +235,20 @@ async def resolve_llm_config(db: AsyncSession, tenant_id: uuid.UUID) -> LlmConfi
             env_base=env_base_url,
             env_model=env_model,
         )
+        if requires_explicit_base(cred.provider) and not (cred.base_url or "").strip():
+            # Do not decrypt, and do not fall through to the deployment or
+            # OpenAI default. Either one would carry this tenant's key.
+            return LlmConfig(
+                allowed=False,
+                base_url="",
+                model=model or "",
+                api_key=None,
+                source="tenant",
+                reason="azure-openai requires an explicit base URL; the stored key was not sent to the deployment endpoint",
+                model_from_tenant=tenant_contributed_model,
+                base_url_from_tenant=False,
+                api_key_from_tenant=False,
+            )
         if not inherit_env_key:
             # A tenant-controlled destination must never receive the bundled
             # gateway master key or a different provider's environment key.

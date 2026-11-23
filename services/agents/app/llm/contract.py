@@ -36,6 +36,7 @@ from langchain_core.messages import AIMessage
 
 from app.core.cost_telemetry import record_llm_call
 from app.llm.response_cache import ResponseCache
+from app.playbook.ssrf_guard import validate_outbound_url
 
 # Wave 1 — content-addressed response cache in the LLM hot path. Identical
 # (model + prompt + input) calls are served from cache instead of paid for
@@ -47,6 +48,40 @@ _RESPONSE_CACHE_ENABLED = os.getenv("AISOC_LLM_RESPONSE_CACHE", "1").lower() not
 
 def _model_name(llm: Any) -> str:
     return str(getattr(llm, "model", None) or getattr(llm, "model_name", None) or "")
+
+
+def llm_destination(llm: Any) -> str | None:
+    """Base URL a chat model will dial, including a tool-bound wrapper.
+
+    ``RunnableBinding`` keeps the model on ``bound``. A fake with no URL
+    returns ``None`` and is not an outbound call.
+    """
+    current: Any = llm
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for attr in ("openai_api_base", "base_url"):
+            raw = getattr(current, attr, None)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text and text.lower() not in {"none", "null"}:
+                return text
+        current = getattr(current, "bound", None)
+    return None
+
+
+def guard_llm_destination(url: str | None) -> None:
+    """Refuse loopback, link-local and metadata before a model call.
+
+    Same policy as the API credential probe: private hosts are allowed,
+    and a missing URL is not a destination to check. The check runs at
+    the call, so a route that was saved or probed under a different rule
+    still cannot be dialled from here.
+    """
+    if not url or not str(url).strip():
+        return
+    validate_outbound_url(str(url).strip(), allow_private=True)
 
 
 def _cache_parts(messages: list[Any]) -> tuple[str, str]:
@@ -178,6 +213,7 @@ async def safe_ainvoke(llm: Any, messages: Iterable[Any], **kwargs: Any) -> Any:
     """
     materialised = list(messages)
     LLMInputContract.validate(materialised)
+    guard_llm_destination(llm_destination(llm))
     materialised = _cap_prompt_bytes(materialised)
 
     model = _model_name(llm)
@@ -227,6 +263,7 @@ async def safe_astream(llm: Any, messages: Iterable[Any], **kwargs: Any):
     """Streaming variant of :func:`safe_ainvoke` that yields chunks."""
     materialised = list(messages)
     LLMInputContract.validate(materialised)
+    guard_llm_destination(llm_destination(llm))
     materialised = _cap_prompt_bytes(materialised)
     egress = egress_privacy.open_session(
         model=_model_name(llm),
@@ -302,6 +339,7 @@ async def safe_chat_completions_request(
 
     materialised = list(messages)
     LLMInputContract.validate(materialised)
+    guard_llm_destination(url)
     materialised = _cap_prompt_bytes(materialised)
 
     try:

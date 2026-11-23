@@ -28,6 +28,39 @@ class TenantRouteTests(unittest.TestCase):
     def test_services_use_identical_rules(self) -> None:
         self.assertEqual(AGENTS.read_bytes(), API.read_bytes())
 
+    def test_azure_without_base_does_not_adopt_the_deployment_endpoint(self) -> None:
+        route = routing.tenant_route(
+            provider="azure-openai",
+            base_url=None,
+            model=None,
+            env_base="http://litellm:4000/v1",
+            env_model="aisoc-summary",
+        )
+        self.assertEqual(route, ("", "", False, False, False))
+        route = routing.tenant_route(
+            provider="azure-openai",
+            base_url="   ",
+            model="gpt-4o",
+            env_base="http://litellm:4000/v1",
+            env_model="aisoc-summary",
+        )
+        self.assertEqual(route[0], "")
+        self.assertNotIn("litellm", route[0])
+        self.assertFalse(route[-1])
+
+    def test_azure_with_explicit_base_keeps_that_endpoint(self) -> None:
+        route = routing.tenant_route(
+            provider="azure-openai",
+            base_url="https://resource.openai.azure.com/openai/v1",
+            model="gpt-4o",
+            env_base="http://litellm:4000/v1",
+            env_model="aisoc-summary",
+        )
+        self.assertEqual(
+            route,
+            ("https://resource.openai.azure.com/openai/v1", "gpt-4o", True, True, False),
+        )
+
     def test_hosted_key_only_selects_provider_instead_of_gateway(self) -> None:
         for provider, expected in {
             "openai": ("https://api.openai.com/v1", "gpt-4o-mini"),

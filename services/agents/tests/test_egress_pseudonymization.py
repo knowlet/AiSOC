@@ -82,6 +82,12 @@ PROMPT = (
 ).format(**EVIDENCE, **PUBLIC_IOCS)
 
 
+@pytest.fixture(autouse=True)
+def _allow_fixture_model_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These hosts are the test's providers. They are not what the SSRF cases cover."""
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "api.openai.com,ollama,inference.example.net")
+
+
 @pytest.mark.asyncio
 class TestHostedEgress:
     async def test_no_raw_evidence_reaches_a_hosted_provider(self) -> None:

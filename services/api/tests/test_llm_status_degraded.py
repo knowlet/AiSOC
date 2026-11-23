@@ -45,6 +45,10 @@ def _clean(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
+    # The gateway name does not resolve in this process. The call is a mock
+    # transport; the allowlist keeps the outbound guard from treating that
+    # as a refused destination.
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "litellm")
     llm_health.reset()
     yield
     llm_health.reset()

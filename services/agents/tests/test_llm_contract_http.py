@@ -168,8 +168,10 @@ async def test_safe_chat_completions_request_merges_extra_headers(
 @pytest.mark.asyncio
 async def test_safe_chat_completions_request_honours_custom_url(
     contract_enforced,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Caller-provided URL overrides the default (for compatible endpoints)."""
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "api.example.test")
     client, _ = _mock_async_client({"choices": []})
     custom_url = "https://api.example.test/v1/chat/completions"
     with patch("httpx.AsyncClient", return_value=client):
