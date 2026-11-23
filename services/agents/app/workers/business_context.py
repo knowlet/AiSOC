@@ -146,13 +146,30 @@ class _UnknownOperator(ValueError):
         self.op = op
 
 
+class _Missing:
+    """Sentinel for a dotted path that does not exist in the alert."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debug only
+        return "<missing>"
+
+
+_MISSING = _Missing()
+
+
 def _dotted(alert: dict[str, Any], path: str) -> Any:
+    """Walk ``path`` into ``alert``; :data:`_MISSING` when a key is absent.
+
+    An absent key and a key whose value is null are different facts, and the
+    console's preview engine (``services/api/.../engine.py``) keeps them apart.
+    This used to return ``None`` for both, so ``exists`` on ``owner: null``
+    matched in the preview and not here. A mandatory escalation rule written
+    against that preview then never fired at triage.
+    """
     cur: Any = alert
     for part in path.split("."):
-        if isinstance(cur, dict):
-            cur = cur.get(part)
-        else:
-            return None
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
     return cur
 
 
@@ -173,17 +190,13 @@ def _cmp(op: str, actual: Any, expected: Any) -> bool:  # noqa: PLR0911
         if op == "contains":
             return expected in actual if actual is not None else False
         if op == "startswith":
-            return isinstance(actual, str) and actual.startswith(str(expected))
+            return isinstance(actual, str) and isinstance(expected, str) and actual.startswith(expected)
         if op == "endswith":
-            return isinstance(actual, str) and actual.endswith(str(expected))
+            return isinstance(actual, str) and isinstance(expected, str) and actual.endswith(expected)
         if op == "in":
-            return actual in expected if isinstance(expected, list) else False
+            return actual in expected if isinstance(expected, list | tuple | set) else False
         if op == "not_in":
-            return actual not in expected if isinstance(expected, list) else False
-        if op == "exists":
-            return actual is not None
-        if op == "not_exists":
-            return actual is None
+            return actual not in expected if isinstance(expected, list | tuple | set) else False
     except TypeError:
         return False
     return False
@@ -197,7 +210,16 @@ def evaluate_condition(cond: RuleCondition, alert: dict[str, Any]) -> bool:
     if cond.logical == "not":
         return not any(evaluate_condition(c, alert) for c in cond.children)
     if cond.field and cond.op:
-        return _cmp(cond.op, _dotted(alert, cond.field), cond.value)
+        actual = _dotted(alert, cond.field)
+        # Same order as the console engine: the unary operators ask about
+        # presence, and every other operator is false on an absent field.
+        if cond.op == "exists":
+            return actual is not _MISSING
+        if cond.op == "not_exists":
+            return actual is _MISSING
+        if actual is _MISSING:
+            return False
+        return _cmp(cond.op, actual, cond.value)
     return False
 
 
@@ -239,7 +261,19 @@ def _parse_condition(node: Any) -> RuleCondition:
         # from arbitrary aggregator depth, and a top-level-only check would
         # pass `{all: [{op: neq}]}` straight through.
         raise _UnknownOperator(str(op))
-    return RuleCondition(field=node.get("field"), op=op, value=node.get("value"))
+    value = node.get("value")
+    if op in {"in", "not_in"}:
+        # The console accepts a single string here and evaluates it as a
+        # one-element list, but it stores the YAML as written. Without the
+        # same coercion this side compared against a bare string and the rule
+        # never matched, so a preview that showed an escalation was not what
+        # triage did.
+        if isinstance(value, str | bytes):
+            value = [value]
+        if not isinstance(value, list | tuple) or not value:
+            raise ValueError(f"op={op!r} requires a non-empty list")
+        value = list(value)
+    return RuleCondition(field=node.get("field"), op=op, value=value)
 
 
 def load_rules_from_yaml(source: str) -> list[BusinessContextRule]:

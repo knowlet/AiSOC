@@ -387,3 +387,52 @@ async def test_agent_does_not_complete_mandatory_escalation(monkeypatch, authori
     assert result.status is not AgentStatus.COMPLETED
     assert result.verdict != "true_positive"
     assert any("business-context" in finding.lower() for finding in result.findings)
+
+
+#: ``(when, alert, console_matches)``. ``console_matches`` is what the console's
+#: preview engine returns for the same saved YAML; the API suite asserts the
+#: same table in ``test_mandatory_rule_preview_matches_worker_cases``.
+PREVIEW_PARITY_CASES = [
+    ({"field": "host", "op": "in", "value": "dc-01"}, {"host": "dc-01"}, True),
+    ({"field": "host", "op": "not_in", "value": "dc-01"}, {"host": "web-07"}, True),
+    ({"field": "host", "op": "not_in", "value": "dc-01"}, {}, False),
+    ({"field": "raw_event.owner", "op": "exists"}, {"raw_event": {"owner": None}}, True),
+    ({"field": "raw_event.owner", "op": "not_exists"}, {"raw_event": {"owner": None}}, False),
+    ({"field": "raw_event.owner", "op": "not_exists"}, {"raw_event": {}}, True),
+    ({"field": "raw_event.owner", "op": "ne", "value": "svc"}, {"raw_event": {}}, False),
+    ({"field": "raw_event.owner", "op": "eq", "value": None}, {"raw_event": {"owner": None}}, True),
+    ({"field": "port", "op": "startswith", "value": 44}, {"port": "443"}, False),
+]
+
+
+@pytest.mark.parametrize(("when", "alert", "console_matches"), PREVIEW_PARITY_CASES)
+def test_mandatory_rule_fires_at_triage_exactly_when_the_preview_shows_it(when, alert, console_matches):
+    """A mandatory rule the preview shows as escalating must escalate here.
+
+    The YAML is stored as the analyst wrote it, so this side has to read a
+    bare-string ``in`` operand and a present-but-null field the way the
+    console engine does. It used to compare against the bare string and to
+    treat null as absent, and the rule silently never fired at triage.
+    """
+    import yaml
+
+    rules = load_rules_from_yaml(yaml.safe_dump({"rules": [{"id": "mandatory", "when": when, "then": {"require_escalation": True}}]}))
+    assert [r.id for r in rules] == ["mandatory"]
+    result = apply_rules({"severity": "low", **alert}, rules)
+    assert result.require_escalation is console_matches
+    assert result.escalation_rule_ids == (["mandatory"] if console_matches else [])
+
+
+@pytest.mark.parametrize("value", [[], {}, 7])
+def test_an_in_rule_without_a_usable_list_is_skipped_like_the_console_rejects_it(value):
+    import yaml
+
+    source = yaml.safe_dump(
+        {
+            "rules": [
+                {"id": "bad", "when": {"field": "host", "op": "in", "value": value}, "then": {"require_escalation": True}},
+                {"id": "good", "when": {"field": "host", "op": "eq", "value": "dc-01"}, "then": {"tag": "dc"}},
+            ]
+        }
+    )
+    assert [r.id for r in load_rules_from_yaml(source)] == ["good"]

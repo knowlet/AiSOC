@@ -303,6 +303,32 @@ def _evaluate_escalation_rules(yaml_text: str, alert: dict[str, Any]) -> AlertEv
     return result
 
 
+#: Same table as ``PREVIEW_PARITY_CASES`` in
+#: ``services/agents/tests/test_business_context_escalation.py``. The worker
+#: re-implements this grammar, so each side asserts the decision the other
+#: must reproduce for the same saved YAML.
+PREVIEW_PARITY_CASES = [
+    ({"field": "host", "op": "in", "value": "dc-01"}, {"host": "dc-01"}, True),
+    ({"field": "host", "op": "not_in", "value": "dc-01"}, {"host": "web-07"}, True),
+    ({"field": "host", "op": "not_in", "value": "dc-01"}, {}, False),
+    ({"field": "raw_event.owner", "op": "exists"}, {"raw_event": {"owner": None}}, True),
+    ({"field": "raw_event.owner", "op": "not_exists"}, {"raw_event": {"owner": None}}, False),
+    ({"field": "raw_event.owner", "op": "not_exists"}, {"raw_event": {}}, True),
+    ({"field": "raw_event.owner", "op": "ne", "value": "svc"}, {"raw_event": {}}, False),
+    ({"field": "raw_event.owner", "op": "eq", "value": None}, {"raw_event": {"owner": None}}, True),
+    ({"field": "port", "op": "startswith", "value": 44}, {"port": "443"}, False),
+]
+
+
+@pytest.mark.parametrize(("when", "alert", "matches"), PREVIEW_PARITY_CASES)
+def test_mandatory_rule_preview_matches_worker_cases(when: dict[str, Any], alert: dict[str, Any], matches: bool) -> None:
+    import yaml
+
+    source = yaml.safe_dump({"rules": [{"id": "mandatory", "when": when, "then": {"require_escalation": True}}]})
+    result = _evaluate_escalation_rules(source, {"severity": "low", **alert})
+    assert result.require_escalation is matches
+
+
 class TestMandatoryEscalation:
     @pytest.mark.parametrize("suppression_priority", [1, 300])
     def test_escalation_vetoes_suppression_and_severity_downgrades(self, suppression_priority: int) -> None:
