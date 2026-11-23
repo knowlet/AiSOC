@@ -134,7 +134,7 @@ async def test_literal_loopback_link_local_and_metadata_are_not_called(recorder:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "address",
-    ["127.0.0.1", "::1", "169.254.169.254", "169.254.1.1", "fe80::1"],
+    ["127.0.0.1", "::1", "169.254.169.254", "169.254.1.1", "fe80::1", "fd00:ec2::254", "100.100.100.200"],
 )
 async def test_a_dns_name_resolving_to_a_blocked_address_is_not_called(
     monkeypatch: pytest.MonkeyPatch, recorder: list[str], address: str
@@ -232,7 +232,7 @@ def test_the_guard_is_inside_the_shared_request_function() -> None:
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "app/services/llm_safety.py").read_text(encoding="utf-8")
-    guard = source.index("guard_runtime_llm_url(url)")
+    guard = source.index("to_thread(guard_runtime_llm_url, url)")
     post = source.index(".post(")
     assert guard < post
     explain = (Path(__file__).resolve().parents[1] / "app/services/alert_explain.py").read_text(encoding="utf-8")
@@ -273,5 +273,19 @@ async def test_another_loopback_origin_is_refused_beside_a_loopback_deployment(
             model="local",
             messages=[{"role": "user", "content": "Explain this alert."}],
             url=url,
+        )
+    assert recorder == []
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_endpoint_name_resolving_to_metadata_is_not_called(monkeypatch: pytest.MonkeyPatch, recorder: list[str]) -> None:
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://models.internal:8000/v1")
+    _resolve_as(monkeypatch, "fd00:ec2::254")
+    with pytest.raises(SSRFError):
+        await safe_chat_completions_request(
+            api_key="aisoc-no-auth",
+            model="local",
+            messages=[{"role": "user", "content": "Explain this alert."}],
+            url="http://models.internal:8000/v1/chat/completions",
         )
     assert recorder == []

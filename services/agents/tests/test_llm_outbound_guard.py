@@ -58,7 +58,7 @@ async def test_langchain_calls_do_not_reach_a_blocked_base(base_url: str) -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "::1", "fe80::1"])
+@pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "::1", "fe80::1", "fd00:ec2::254", "100.100.100.200"])
 async def test_a_dns_name_resolving_to_a_blocked_address_is_refused(monkeypatch: pytest.MonkeyPatch, address: str) -> None:
     _resolve_as(monkeypatch, address)
     model = _Model("http://evil.example/v1")
@@ -151,3 +151,34 @@ def test_a_metadata_deployment_endpoint_is_still_refused(monkeypatch: pytest.Mon
     monkeypatch.setenv("OPENAI_BASE_URL", "http://169.254.169.254/v1")
     with pytest.raises(SSRFError):
         guard_runtime_llm_url("http://169.254.169.254/v1/chat/completions")
+
+
+@pytest.mark.parametrize("address", ["169.254.169.254", "fd00:ec2::254", "100.100.100.200"])
+def test_a_deployment_endpoint_name_resolving_to_metadata_is_refused(monkeypatch: pytest.MonkeyPatch, address: str) -> None:
+    # The exemption skips the shared classification, and with it the lookup.
+    # A configured name must still be resolved and checked for metadata.
+    monkeypatch.setenv("LLM_BASE_URL", "http://models.internal:8000/v1")
+    _resolve_as(monkeypatch, address)
+    with pytest.raises(SSRFError):
+        guard_runtime_llm_url("http://models.internal:8000/v1/chat/completions")
+
+
+@pytest.mark.asyncio
+async def test_the_guard_does_not_run_on_the_event_loop_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The guard calls getaddrinfo. On the loop thread a slow lookup stalls
+    # every other task on the worker until DNS answers.
+    import threading
+
+    from app.llm import contract
+
+    seen: list[int] = []
+
+    def record(url: str) -> str:
+        seen.append(threading.get_ident())
+        return url
+
+    monkeypatch.setattr(contract, "guard_runtime_llm_url", record)
+    model = _Model("http://10.0.0.5:8000/v1")
+    await safe_ainvoke(model, [HumanMessage(content="Explain this alert.")])
+    assert model.calls == 1
+    assert seen and threading.get_ident() not in seen

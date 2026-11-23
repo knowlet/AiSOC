@@ -27,6 +27,7 @@ in production this stays on by default.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import Iterable
@@ -193,6 +194,15 @@ def _guard_llm_destination(llm: Any) -> None:
         guard_runtime_llm_url(destination)
 
 
+async def _guard_off_loop(check: Any, *args: Any) -> None:
+    """Run a guard that may call ``getaddrinfo`` without stalling the loop.
+
+    The runtime guard resolves the destination name. A blocking lookup on the
+    event loop held every other task on this worker for as long as DNS took.
+    """
+    await asyncio.to_thread(check, *args)
+
+
 async def safe_ainvoke(llm: Any, messages: Iterable[Any], **kwargs: Any) -> Any:
     """Validate ``messages`` against the contract, then call ``llm.ainvoke``.
 
@@ -228,7 +238,7 @@ async def safe_ainvoke(llm: Any, messages: Iterable[Any], **kwargs: Any) -> Any:
         tenant_setting=getattr(llm, "aisoc_pseudonymize", None),
     )
     outbound = egress.redact_messages(materialised)
-    _guard_llm_destination(llm)
+    await _guard_off_loop(_guard_llm_destination, llm)
 
     t0 = time.monotonic()
     result = await llm.ainvoke(outbound, **kwargs)
@@ -259,7 +269,7 @@ async def safe_astream(llm: Any, messages: Iterable[Any], **kwargs: Any):
         tenant_id=str(getattr(llm, "aisoc_tenant_id", "") or ""),
         tenant_setting=getattr(llm, "aisoc_pseudonymize", None),
     )
-    _guard_llm_destination(llm)
+    await _guard_off_loop(_guard_llm_destination, llm)
     async for chunk in llm.astream(egress.redact_messages(materialised), **kwargs):
         # Restored per chunk. A token-by-token stream can split a token
         # across chunks, so this restores what it can see and the rest
@@ -331,7 +341,7 @@ async def safe_chat_completions_request(
     materialised = _cap_prompt_bytes(materialised)
     # Same choke point as the API service's wrapper: the outbound guard runs
     # before the socket, for every raw-HTTP completion.
-    guard_runtime_llm_url(url)
+    await _guard_off_loop(guard_runtime_llm_url, url)
 
     try:
         import httpx
