@@ -21,6 +21,8 @@ data is the defect in a different costume.
 
 from __future__ import annotations
 
+import socket
+
 import httpx
 import pytest
 from app.api.v1.endpoints.llm_status import llm_status
@@ -28,6 +30,16 @@ from app.services import llm_health
 from app.services.llm_safety import safe_chat_completions_request
 
 _MESSAGES = [{"role": "user", "content": "Summarise this alert for an analyst."}]
+
+
+@pytest.fixture(autouse=True)
+def _public_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtime guard resolves the gateway name before the mock transport runs."""
+
+    def fake(host: str, *_args: object, **_kwargs: object) -> list:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
+
+    monkeypatch.setattr("app._vendor.ssrf_guard.socket.getaddrinfo", fake)
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +57,10 @@ def _clean(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
+    # The gateway name does not resolve in this process. The call is a mock
+    # transport; the allowlist keeps the outbound guard from treating that
+    # as a refused destination.
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "litellm")
     llm_health.reset()
     yield
     llm_health.reset()

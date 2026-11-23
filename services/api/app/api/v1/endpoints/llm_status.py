@@ -178,6 +178,7 @@ def _compute_status(
     key_set: bool,
     source: str,
     allows_no_auth: bool = False,
+    policy_override: str | None = None,
 ) -> dict[str, object]:
     """Compute the redacted status snapshot for a resolved config triple.
 
@@ -252,6 +253,9 @@ def _compute_status(
         policy_note = f"LLM calls are routed to a local provider ({provider}). No external network egress is required for the Explain path."
     else:
         policy_note = f"LLM calls are routed to {provider} at {host}. Outbound HTTP is required."
+
+    if policy_override:
+        policy_note = policy_override
 
     return {
         "provider": provider,
@@ -368,6 +372,21 @@ async def tenant_llm_status(
         env_base=env_base_url,
         env_model=env_model,
     )
+    if cred.provider == "azure-openai" and not (base_url or "").strip():
+        snap = _compute_status(
+            base_url="",
+            model=model or "",
+            key_set=bool(cred.api_key_vault),
+            source="tenant",
+            allows_no_auth=False,
+        )
+        snap["provider"] = "azure-openai"
+        snap["effective_path"] = "fallback"
+        snap["policy_note"] = (
+            "Azure OpenAI has no base URL. The stored key is not sent to the deployment default. Set the resource endpoint before using it."
+        )
+        return snap
+
     tenant_contributed = tenant_base or tenant_model
     env_contributed = (not tenant_base and bool(env_base_url)) or (not tenant_model and bool(env_model))
     env_key_set = env_key_set and inherit_env_key

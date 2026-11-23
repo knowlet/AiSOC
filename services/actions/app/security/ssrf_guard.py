@@ -139,6 +139,11 @@ def _is_disallowed_address(ip: ipaddress._BaseAddress, *, allow_private: bool) -
         return True, "multicast address"
     if ip.is_reserved:
         return True, "reserved address"
+    # Some metadata endpoints are neither link-local nor public: AWS's IPv6
+    # one is in the ULA band and Alibaba's is in shared address space, so
+    # ``allow_private`` alone let a name that resolves to them through.
+    if str(ip) in _METADATA_ADDRESSES:
+        return True, "cloud metadata address"
     # Block IPv4-mapped/IPv4-compatible IPv6 against private v4 ranges.
     if isinstance(ip, ipaddress.IPv6Address):
         mapped = getattr(ip, "ipv4_mapped", None)
@@ -267,4 +272,111 @@ def validate_outbound_url(url: str, *, allow_private: bool | None = None) -> str
     return url
 
 
-__all__ = ["SSRFError", "validate_outbound_url"]
+# Addresses that are cloud metadata even when they are not link-local.
+# 169.254.169.254 is both; the others are the ECS and Alibaba endpoints.
+_METADATA_ADDRESSES: frozenset[str] = frozenset(
+    {
+        "169.254.169.254",
+        "169.254.170.2",
+        "100.100.100.200",
+        "fd00:ec2::254",
+    }
+)
+
+
+# The deployment's own LLM endpoints. These come from the process
+# environment, which only an operator controls, so they are configuration
+# rather than a destination a tenant chose. The bundled Ollama smoke run and
+# local model servers live on loopback and are reached through these.
+_OPERATOR_LLM_BASE_ENV: tuple[str, ...] = ("OPENAI_BASE_URL", "LLM_BASE_URL", "LLM_GATEWAY_URL")
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` for ``url``, or ``None`` when it has none."""
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").strip().lower()
+    if not scheme or not host:
+        return None
+    if port is None:
+        port = _DEFAULT_PORTS.get(scheme)
+    if port is None:
+        return None
+    return scheme, host, port
+
+
+def _operator_llm_origins() -> frozenset[tuple[str, str, int]]:
+    """Origins of the LLM endpoints the operator configured in the environment."""
+    origins: set[tuple[str, str, int]] = set()
+    for name in _OPERATOR_LLM_BASE_ENV:
+        raw = (os.getenv(name, "") or "").strip()
+        if not raw:
+            continue
+        origin = _origin(raw)
+        if origin is not None:
+            origins.add(origin)
+    return frozenset(origins)
+
+
+def guard_runtime_llm_url(url: str) -> str:
+    """Validate a URL before a runtime LLM call.
+
+    Private LAN hosts stay reachable (``allow_private=True``), which is what
+    local model servers need. Loopback, link-local and metadata destinations
+    are refused. An operator allow-list can still name an exact loopback host
+    for a tunnel; it cannot re-open link-local or metadata, including a DNS
+    name that resolves to one of those addresses.
+
+    The deployment's own endpoint (``OPENAI_BASE_URL``, ``LLM_BASE_URL`` or
+    ``LLM_GATEWAY_URL``) is exempt from the loopback refusal when the URL has
+    the same scheme, host and port. Those values are operator configuration,
+    and a local Ollama or recorded gateway on ``127.0.0.1`` is the supported
+    way to run without a hosted provider. The guard exists for destinations
+    a tenant saved; any other loopback origin is still refused, and
+    link-local and metadata stay blocked for every destination.
+    """
+    origin = _origin(url)
+    operator_endpoint = origin is not None and origin in _operator_llm_origins()
+    if not operator_endpoint:
+        validate_outbound_url(url, allow_private=True)
+    # The operator exemption skips ``validate_outbound_url`` and so skips its
+    # lookup; a name there has to be resolved here instead.
+    _reject_link_local_and_metadata(url, resolve_names=operator_endpoint)
+    return url
+
+
+def _reject_link_local_and_metadata(url: str, *, resolve_names: bool = False) -> None:
+    """Refuse link-local and metadata even when the allow-list skipped classification.
+
+    ``validate_outbound_url`` already rejects those addresses for a host it
+    classifies. ``AISOC_SSRF_ALLOW_HOSTS`` returns before that classification,
+    which is the escape hatch for a tunneled loopback appliance. A name on
+    that list that resolves to a metadata address must still be refused.
+    """
+    host = (urlsplit(url.strip()).hostname or "").strip().lower()
+    if not host:
+        raise SSRFError("URL has no hostname")
+
+    literal = _coerce_ip(host)
+    # A name the shared guard already resolved is not looked up again. The
+    # allow-list, the operator endpoint and IP literals are the paths that
+    # skipped that lookup.
+    if literal is None and not resolve_names and host not in _allowed_hosts():
+        return
+
+    raw = [literal] if isinstance(literal, ipaddress.IPv4Address | ipaddress.IPv6Address) else _resolve_host_addresses(host)
+    for ip in raw:
+        if not isinstance(ip, ipaddress.IPv4Address | ipaddress.IPv6Address):
+            continue
+        mapped = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None else ip
+        if mapped.is_link_local or str(mapped) in _METADATA_ADDRESSES:
+            raise SSRFError(f"host {host!r} is blocked: link-local or metadata address {mapped}")
+
+
+__all__ = ["SSRFError", "guard_runtime_llm_url", "validate_outbound_url"]

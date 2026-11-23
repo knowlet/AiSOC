@@ -220,6 +220,10 @@ async def test_tenant_endpoint_keeps_resolved_auth_through_worker_and_http(monke
     monkeypatch.setenv("LLM_GATEWAY_URL", "http://other-gateway:4000/v1")
     monkeypatch.setenv("AISOC_AIRGAPPED", "false")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    # The fake tenant endpoint listens on loopback, which the runtime
+    # outbound guard refuses for a tenant route. The operator allow-list is
+    # the supported way to admit one exact host; this test is about auth.
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "127.0.0.1")
     monkeypatch.setattr(
         worker_mod,
         "get_governor",

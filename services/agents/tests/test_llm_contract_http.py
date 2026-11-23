@@ -13,6 +13,7 @@ These tests ensure the helper:
 from __future__ import annotations
 
 import json
+import socket
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +25,16 @@ from app.llm.contract import (
     safe_chat_completions_request,
     set_contract_enforcement,
 )
+
+
+@pytest.fixture(autouse=True)
+def _public_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtime guard resolves the completions host before the mock client runs."""
+
+    def fake(host: str, *_args: object, **_kwargs: object) -> list:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
+
+    monkeypatch.setattr("app.playbook.ssrf_guard.socket.getaddrinfo", fake)
 
 
 @pytest.fixture
@@ -168,8 +179,10 @@ async def test_safe_chat_completions_request_merges_extra_headers(
 @pytest.mark.asyncio
 async def test_safe_chat_completions_request_honours_custom_url(
     contract_enforced,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Caller-provided URL overrides the default (for compatible endpoints)."""
+    monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "api.example.test")
     client, _ = _mock_async_client({"choices": []})
     custom_url = "https://api.example.test/v1/chat/completions"
     with patch("httpx.AsyncClient", return_value=client):

@@ -794,6 +794,33 @@ class TestGatewayTenantRouting:
         assert cfg.allowed is True  # explicit no-key custom endpoints are supported
         assert cfg.api_key == ("gateway-test-key" if same_destination else None)
 
+    @pytest.mark.asyncio
+    async def test_azure_without_a_base_does_not_receive_the_deployment_route(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+        monkeypatch.setenv("LITELLM_MASTER_KEY", "gateway-test-key")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://deployment.example/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "deployment-provider-key")
+        _set_vault_key(monkeypatch)
+        from app.security.credential_vault import get_vault
+
+        vault = get_vault()
+        assert vault is not None
+        row: dict[str, Any] = {
+            "provider": "azure-openai",
+            "base_url": None,
+            "model": "gpt-4o",
+            "api_key_vault": vault.encrypt("azure-stored-key"),
+            "settings": {},
+            "enabled": True,
+        }
+        _stub_ledger(monkeypatch, _make_pool_with_row(row))
+        cfg = await _import_resolver().resolve_llm_config("tenant-a")
+        assert cfg.allowed is False
+        assert cfg.api_key is None
+        assert cfg.base_url == ""
+        assert "azure-stored-key" not in cfg.reason
+        assert "deployment.example" not in cfg.base_url
+
 
 @pytest.mark.parametrize("hostname", ["api.anthropic.com", "API.ANTHROPIC.COM", "sub.api.anthropic.com", "api.anthropic.com."])
 def test_airgap_blocks_anthropic_default(monkeypatch: pytest.MonkeyPatch, hostname: str) -> None:

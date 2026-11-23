@@ -55,7 +55,8 @@ def completion_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, li
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 }
             ).encode()
-            self.send_response(200 if self.path == "/v1/chat/completions" else 404)
+            accepted = self.path in {"/v1/chat/completions", "/api/chat/completions"}
+            self.send_response(200 if accepted else 404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
@@ -84,7 +85,7 @@ def completion_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, li
 
 class TestProbeUsesRuntimeChatCompletionsTransport:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("base_path", ["", "/v1"])
+    @pytest.mark.parametrize("base_path", ["", "/v1", "/api"])
     @pytest.mark.parametrize(
         ("provider", "api_key", "expected_model", "expected_bearer"),
         [
@@ -115,7 +116,7 @@ class TestProbeUsesRuntimeChatCompletionsTransport:
         assert result.model == expected_model
         assert len(requests) == 1
         request = requests[0]
-        assert request["path"] == "/v1/chat/completions"
+        assert request["path"] == ("/api/chat/completions" if base_path == "/api" else "/v1/chat/completions")
         headers = {name.lower(): value for name, value in request["headers"].items()}
         assert headers["authorization"] == f"Bearer {expected_bearer}"
         assert "x-api-key" not in headers
@@ -123,6 +124,24 @@ class TestProbeUsesRuntimeChatCompletionsTransport:
         assert request["body"] == {"model": expected_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}
         assert "environment-provider-test" not in str(request)
         assert "environment-gateway-test" not in str(request)
+
+    @pytest.mark.asyncio
+    async def test_an_api_base_is_probed_on_the_path_runtime_calls(
+        self,
+        completion_server: tuple[str, list[dict[str, Any]]],
+    ) -> None:
+        """``/api`` is an API root. Inserting ``/v1`` probes a different path than the SDK."""
+        from app.services.llm_credential_probe import probe_credential
+        from app.services.model_aliases import completions_url_for_base, sdk_base_url_for
+
+        base, requests = completion_server
+        api_base = base + "/api"
+        result = await probe_credential(provider="custom", base_url=api_base, model="m", api_key="k")
+
+        assert result.outcome == "ok", result.detail
+        assert requests[0]["path"] == "/api/chat/completions"
+        assert completions_url_for_base(api_base) == api_base + "/chat/completions"
+        assert sdk_base_url_for(api_base) == api_base
 
 
 class TestTheGuardAllowsLocalProvidersAndStillBlocksMetadata:

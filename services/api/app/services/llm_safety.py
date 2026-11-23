@@ -39,6 +39,7 @@ whichever path the traffic did not take.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from typing import Any
 
@@ -66,6 +67,7 @@ from app._vendor.llm_contract_rules import (
 from app._vendor.llm_contract_rules import (
     validate_messages as validate_messages,
 )
+from app._vendor.ssrf_guard import guard_runtime_llm_url
 from app.services import llm_health
 
 # These names are re-exports: callers do
@@ -82,9 +84,11 @@ __all__ = [
     "LLMInputContract",
     "classify_message",
     "is_contract_enforced",
+    "guard_runtime_llm_url",
     "safe_chat_completions_request",
     "validate_messages",
 ]
+
 
 DEFAULT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -121,6 +125,12 @@ async def safe_chat_completions_request(
     than the provider failing to answer.
     """
     validated = LLMInputContract.validate(messages)
+    # Every runtime completion passes through this function, so the outbound
+    # guard lives here rather than at each caller. A tenant route the probe
+    # would refuse must not be posted to from explain, triage or any other
+    # caller that already holds a resolved URL. It resolves the host, so it
+    # runs in a thread: a slow lookup must not stall every request on the loop.
+    await asyncio.to_thread(guard_runtime_llm_url, url)
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:

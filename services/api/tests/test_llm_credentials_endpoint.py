@@ -57,6 +57,9 @@ from app.api.v1.endpoints.llm_credentials import (
     get_llm_credential,
     upsert_llm_credential,
 )
+from app.api.v1.endpoints.llm_credentials import (
+    test_llm_credential as run_credential_test,
+)
 from app.security.credential_vault import (
     _CIPHER_PREFIX,
     CredentialVault,
@@ -329,16 +332,26 @@ def test_enforce_invariants_requires_base_url_for_local_and_custom(
     assert "requires base_url" in exc.value.detail
 
 
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "azure-openai"])
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("openai", None),
+        ("anthropic", None),
+        ("azure-openai", "https://resource.openai.azure.com/openai/v1"),
+    ],
+)
 def test_enforce_invariants_requires_api_key_for_hosted_when_no_existing(
     provider: str,
+    base_url: str | None,
 ) -> None:
     """Hosted SaaS providers require a key on the *first* write.
 
     A subsequent rotation-only PUT (``api_key=None`` on an existing
     row that already has a ciphertext) is fine — see the next test.
+    Azure also requires a base URL, supplied here so this case still
+    measures the key rule.
     """
-    payload = LlmCredentialUpsert(provider=provider, api_key=None)
+    payload = LlmCredentialUpsert(provider=provider, api_key=None, base_url=base_url)
     with pytest.raises(HTTPException) as exc:
         _enforce_provider_invariants(payload, existing=None)
     assert exc.value.status_code == 422
@@ -356,6 +369,48 @@ def test_enforce_invariants_allows_rotation_only_put_for_hosted() -> None:
     payload = LlmCredentialUpsert(provider="openai", api_key=None)
     # Should not raise.
     _enforce_provider_invariants(payload, existing=existing)
+
+
+def test_azure_without_base_url_is_refused_even_with_a_key() -> None:
+    """Azure has no canonical endpoint. Saving a key alone is not a route."""
+    payload = LlmCredentialUpsert(provider="azure-openai", api_key="sk-azure", base_url=None)
+    with pytest.raises(HTTPException) as exc:
+        _enforce_provider_invariants(payload, existing=None)
+    assert exc.value.status_code == 422
+    assert "requires base_url" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_azure_without_base_url_does_not_send_the_key_to_the_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connection test must refuse rather than POST the Azure key at the gateway."""
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "gateway-secret")
+    user = _build_user()
+    existing = _llm_row(
+        tenant_id=user.tenant_id,
+        provider="azure-openai",
+        base_url=None,
+        api_key_vault="vault:v1:azure",
+    )
+    db = _mock_db_with_existing(existing)
+    vault = MagicMock()
+    vault.decrypt.return_value = "azure-plaintext-key"
+
+    async def _probe_must_not_run(**kwargs: object) -> None:
+        raise AssertionError(f"probe was called: {kwargs}")
+
+    monkeypatch.setattr("app.api.v1.endpoints.llm_credentials.get_vault", lambda: vault)
+    monkeypatch.setattr("app.api.v1.endpoints.llm_credentials.probe_credential", _probe_must_not_run)
+
+    result = await run_credential_test(current_user=user, db=db)
+
+    assert result.outcome == "refused"
+    assert "base URL" in result.detail
+    assert "azure-plaintext-key" not in result.detail
+    assert "gateway-secret" not in result.detail
+    assert "litellm" not in result.detail
 
 
 def test_enforce_invariants_local_with_no_key_is_allowed() -> None:
@@ -612,7 +667,11 @@ async def test_put_records_provider_transition_in_audit_changes() -> None:
     db = _mock_db_with_existing(existing)
     request = _build_request()
 
-    payload = LlmCredentialUpsert(provider="azure-openai", api_key="sk-azure")
+    payload = LlmCredentialUpsert(
+        provider="azure-openai",
+        api_key="sk-azure",
+        base_url="https://resource.openai.azure.com/openai/v1",
+    )
 
     with patch(
         "app.api.v1.endpoints.llm_credentials.emit_audit",

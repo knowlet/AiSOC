@@ -18,6 +18,8 @@ control from an unwired one; a test that inspects the outbound payload can.
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 from app.llm import egress_privacy
 from app.llm.contract import safe_ainvoke
@@ -80,6 +82,17 @@ PROMPT = (
     "{c2_ip} resolving {c2_domain}. Internal source {internal_ip}. "
     "The account's address is {email} and it opened {path}."
 ).format(**EVIDENCE, **PUBLIC_IOCS)
+
+
+@pytest.fixture(autouse=True)
+def _resolve_fixture_model_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtime guard resolves the model host. These names are not on the public DNS."""
+
+    def fake(host: str, *_args: object, **_kwargs: object) -> list[object]:
+        ip = "10.0.0.8" if host == "ollama" else "1.1.1.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    monkeypatch.setattr("app.playbook.ssrf_guard.socket.getaddrinfo", fake)
 
 
 @pytest.mark.asyncio
