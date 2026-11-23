@@ -18,7 +18,7 @@ If your tool isn't in the catalog, see [Universal capture](/docs/connectors/univ
 
 ## Catalog
 
-The catalog ships with **91 connectors** out of the box, registered in [`services/connectors/app/connectors/__init__.py`](https://github.com/beenuar/AiSOC/blob/main/services/connectors/app/connectors/__init__.py). The list below is grouped by category; only a subset has dedicated walkthrough pages today (linked entries) — the rest follow the same schema-driven wizard described under [Adding a connector](#adding-a-connector).
+The catalog ships with **97 connectors** out of the box, registered in [`services/connectors/app/connectors/__init__.py`](https://github.com/beenuar/AiSOC/blob/main/services/connectors/app/connectors/__init__.py). The list below is grouped by category; only a subset has dedicated walkthrough pages today (linked entries) — the rest follow the same schema-driven wizard described under [Adding a connector](#adding-a-connector).
 
 ### Identity
 
@@ -121,6 +121,32 @@ The catalog ships with **91 connectors** out of the box, registered in [`service
 3. Fill in the required fields. Secret fields (tokens, client secrets, service-account JSON) are obscured.
 4. Click **Test connection**. The pre-save test is stateless — credentials are sent once over TLS, the target API is called, and **nothing is persisted** unless the test passes and you click **Save**.
 5. On save, the credentials are encrypted in the vault, the instance is stored with `is_enabled=true`, and the scheduler picks it up on the next reload (within 30 seconds).
+
+## Editing a connector
+
+Click **Configure** on a connector's card to rename it, change its settings or
+rotate a credential. The form is the same schema-driven one the wizard uses,
+with the instance's stored settings filled in.
+
+- **Credential fields start blank, and blank keeps the stored value.** A
+  credential is never sent back to the browser, so there is nothing to show.
+  Type a new value only into the credential you are rotating; the others are
+  left as they are.
+- **Only the fields you change are saved.** Clearing an optional setting
+  removes it. Everything else the instance keeps in its configuration — the
+  scheduler's `checkpoint` and any `filter_rules` — is untouched, so the next
+  poll resumes where the last one ended instead of re-reading the lookback.
+- The next poll reads the new values; every poll re-reads the row, and a
+  changed poll interval is picked up on the next reload (within 30 seconds).
+  Use **Test** on the card afterwards to check rotated credentials.
+
+Editing keeps the instance's id, event counters and push ingest token, which
+deleting and re-adding the connector does not.
+
+The API call behind it is `PATCH /api/v1/connectors/{id}`. Its `auth_config`
+and `connector_config` are merged into what is stored one top-level key at a
+time: a key you send replaces the stored value, a key sent as `null` is
+removed, and a key you leave out is kept.
 
 ### Where the catalog grid comes from
 

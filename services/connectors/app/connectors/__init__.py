@@ -34,6 +34,7 @@ from app.connectors.base import BaseConnector, ConnectorSchema, Field, OAuthHint
 from app.connectors.box import BoxConnector
 from app.connectors.carbon_black import CarbonBlackConnector
 from app.connectors.chronicle import ChronicleConnector
+from app.connectors.cisco_secure_endpoint import CiscoSecureEndpointConnector
 from app.connectors.cisco_umbrella import CiscoUmbrellaConnector
 from app.connectors.cloudflare import CloudflareConnector
 from app.connectors.cloudflare_zt import CloudflareZTConnector
@@ -49,6 +50,7 @@ from app.connectors.dropbox import DropboxConnector
 from app.connectors.duo_security import DuoSecurityConnector
 from app.connectors.elastic import ElasticConnector
 from app.connectors.email_inbox import EmailInboxConnector
+from app.connectors.eset_protect import ESETProtectConnector
 from app.connectors.exabeam import ExabeamConnector
 from app.connectors.extrahop import ExtraHopConnector
 from app.connectors.falco import FalcoConnector
@@ -60,6 +62,7 @@ from app.connectors.github import GitHubConnector
 from app.connectors.gitlab import GitLabConnector
 from app.connectors.google_workspace import GoogleWorkspaceConnector
 from app.connectors.greynoise import GreyNoiseConnector
+from app.connectors.huntress import HuntressConnector
 from app.connectors.imperva import ImpervaConnector
 from app.connectors.jira_connector import JiraConnector
 from app.connectors.jumpcloud import JumpCloudConnector
@@ -91,6 +94,7 @@ from app.connectors.servicenow import ServiceNowConnector
 from app.connectors.slack_audit import SlackAuditConnector
 from app.connectors.snowflake import SnowflakeConnector
 from app.connectors.snyk import SnykConnector
+from app.connectors.sophos_central import SophosCentralConnector
 from app.connectors.splunk import SplunkConnector
 from app.connectors.sublime_security import SublimeSecurityConnector
 from app.connectors.sumo_logic import SumoLogicConnector
@@ -103,8 +107,10 @@ from app.connectors.torq import TorqConnector
 from app.connectors.trellix_helix import TrellixHelixConnector
 from app.connectors.trend_vision_one import TrendVisionOneConnector
 from app.connectors.vault import VaultConnector
+from app.connectors.vectra_ai import VectraAIConnector
 from app.connectors.wazuh import WazuhConnector
 from app.connectors.windows_event import WindowsEventConnector
+from app.connectors.withsecure_elements import WithSecureElementsConnector
 from app.connectors.wiz import WizConnector
 from app.connectors.zeek_suricata import ZeekSuricataConnector
 from app.connectors.zscaler import ZscalerConnector
@@ -135,6 +141,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     BoxConnector,
     CarbonBlackConnector,
     ChronicleConnector,
+    CiscoSecureEndpointConnector,
     CiscoUmbrellaConnector,
     CloudflareConnector,
     CloudflareZTConnector,
@@ -150,6 +157,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     DuoSecurityConnector,
     ElasticConnector,
     EmailInboxConnector,
+    ESETProtectConnector,
     ExabeamConnector,
     FalcoConnector,
     FleetDMConnector,
@@ -160,6 +168,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     GitLabConnector,
     GoogleWorkspaceConnector,
     GreyNoiseConnector,
+    HuntressConnector,
     ImpervaConnector,
     JiraConnector,
     JumpCloudConnector,
@@ -190,6 +199,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     SlackAuditConnector,
     SnowflakeConnector,
     SnykConnector,
+    SophosCentralConnector,
     SplunkConnector,
     SublimeSecurityConnector,
     SumoLogicConnector,
@@ -202,8 +212,10 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     TrellixHelixConnector,
     TrendVisionOneConnector,
     VaultConnector,
+    VectraAIConnector,
     WazuhConnector,
     WindowsEventConnector,
+    WithSecureElementsConnector,
     WizConnector,
     ZeekSuricataConnector,
     ZscalerConnector,
@@ -266,6 +278,7 @@ __all__ = [
     "CONNECTOR_REGISTRY",
     "CarbonBlackConnector",
     "ChronicleConnector",
+    "CiscoSecureEndpointConnector",
     "CiscoUmbrellaConnector",
     "CloudflareConnector",
     "CloudflareZTConnector",
@@ -280,6 +293,7 @@ __all__ = [
     "DuoSecurityConnector",
     "ElasticConnector",
     "EmailInboxConnector",
+    "ESETProtectConnector",
     "FalcoConnector",
     "Field",
     "FleetDMConnector",
@@ -287,6 +301,7 @@ __all__ = [
     "GCPSCCConnector",
     "GitHubConnector",
     "GoogleWorkspaceConnector",
+    "HuntressConnector",
     "JiraConnector",
     "KubernetesAuditConnector",
     "LaceworkConnector",
@@ -310,6 +325,7 @@ __all__ = [
     "SlackAuditConnector",
     "SnowflakeConnector",
     "SnykConnector",
+    "SophosCentralConnector",
     "SplunkConnector",
     "SublimeSecurityConnector",
     "SumoLogicConnector",
@@ -321,7 +337,9 @@ __all__ = [
     "TrellixHelixConnector",
     "TrendVisionOneConnector",
     "VaultConnector",
+    "VectraAIConnector",
     "WazuhConnector",
+    "WithSecureElementsConnector",
     "WizConnector",
     "ZscalerConnector",
     "get_connector_class",

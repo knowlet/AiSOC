@@ -215,6 +215,43 @@ var connectorOCSFClass = map[string]connectorClass{
 	// so, and a class two files assert and this table omits is the drift
 	// this table exists to catch.
 	"extrahop": {classUID: classSecurityFinding},
+	// vectra_ai is network-shaped for the same reason and is a finding for
+	// the same reason: it reads /api/v3.4/events/detections, each record a
+	// detection Vectra's models raised against a host or account, not a
+	// flow. It carries no severity (Vectra no longer scores individual
+	// detections), so 2001 is what promotes it at all; 4001 would archive
+	// every one of them to the lake and alert on none.
+	"vectra_ai": {classUID: classSecurityFinding},
+	// sophos_central reads /siem/v1/alerts, the alert half of the SIEM
+	// Integration API and not /siem/v1/events: every record is an alert
+	// Sophos itself raised against a device — a threat, a blocked exploit, a
+	// protection failure — so it is a finding. Named rather than left to
+	// the default for the reason extrahop's is, and so the connector arrives
+	// with a decision instead of raising the count of connectors on the
+	// generic mapping.
+	"sophos_central": {classUID: classSecurityFinding},
+	// cisco_secure_endpoint reads /v1/events but returns only the events
+	// Cisco rates with a severity — detections, quarantines, exploit and
+	// behavioural protection, indicators of compromise, threat hunting
+	// incidents. Policy updates, scans and installs carry no severity and
+	// are dropped in the connector, so what reaches ingest is a finding.
+	"cisco_secure_endpoint": {classUID: classSecurityFinding},
+	// huntress reads /v1/incident_reports: each record is an incident a
+	// Huntress SOC analyst confirmed and delivered — a foothold, a tripped
+	// ransomware canary, a malicious process — and undelivered reports are
+	// dropped in the connector, so what reaches ingest is a finding.
+	"huntress": {classUID: classSecurityFinding},
+	// eset_protect reads the ESET Connect /v1/detections list: every record
+	// is a detection ESET's endpoint protection raised on a device — an
+	// antivirus or HIPS hit, a blocked network intrusion, an ESET Inspect
+	// rule match — not a telemetry event, so it is a finding.
+	"eset_protect": {classUID: classSecurityFinding},
+	// withsecure_elements reads the Elements /incidents/v1/incidents list:
+	// every record is a Broad Context Detection, Elements EDR's correlation
+	// of detections into one suspected attack, and the BCDs WithSecure closed
+	// itself as merged or suppressed are dropped in the connector, so what
+	// reaches ingest is a finding.
+	"withsecure_elements": {classUID: classSecurityFinding},
 	// Sublime reads /v1/messages, which is every message rather than only
 	// the flagged ones, and defaults an unrecognised verdict to info.
 	"sublime_security": {classUID: classEmailActivity},

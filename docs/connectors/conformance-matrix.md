@@ -6,7 +6,7 @@
 > async coroutines, valid capabilities, secret fields marked `secret`).
 > Live-vendor sandbox smoke is a separate wave; this gates the contract.
 
-**91 / 91 connectors conform** to the runtime contract.
+**97 / 97 connectors conform** to the runtime contract.
 
 | connector | category | fields | vaulted | caps | test_connection | fetch_alerts | normalize |
 |-----------|----------|-------:|--------:|-----:|:---------------:|:------------:|:---------:|
@@ -21,12 +21,13 @@
 | aws_vpc_flow | cloud | 6 | 1 | 2 | ✅ | ✅ | ✅ |
 | azure_activity | cloud | 4 | 1 | 1 | ✅ | ✅ | ✅ |
 | azure_defender | edr | 3 | 1 | 5 | ✅ | ✅ | ✅ |
-| azure_entra | iam | 3 | 1 | 2 | ✅ | ✅ | ✅ |
+| azure_entra | iam | 6 | 3 | 2 | ✅ | ✅ | ✅ |
 | azure_event_hubs | cloud | 6 | 1 | 2 | ✅ | ✅ | ✅ |
 | bamboohr | hr | 3 | 1 | 1 | ✅ | ✅ | — |
 | box | saas | 1 | 1 | 3 | ✅ | ✅ | ✅ |
 | carbon_black | edr | 4 | 1 | 6 | ✅ | ✅ | ✅ |
 | chronicle | siem | 4 | 1 | 5 | ✅ | ✅ | ✅ |
+| cisco_secure_endpoint | edr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | cisco_umbrella | network | 3 | 2 | 5 | ✅ | ✅ | ✅ |
 | cloudflare | saas | 2 | 1 | 1 | ✅ | ✅ | ✅ |
 | cloudflare_zt | network | 4 | 1 | 3 | ✅ | ✅ | ✅ |
@@ -42,6 +43,7 @@
 | duo_security | iam | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | elastic | siem | 6 | 2 | 5 | ✅ | ✅ | ✅ |
 | email_inbox | saas | 7 | 1 | 1 | ✅ | ✅ | ✅ |
+| eset_protect | edr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | exabeam | siem | 4 | 2 | 2 | ✅ | ✅ | ✅ |
 | extrahop | ndr | 4 | 1 | 1 | ✅ | ✅ | ✅ |
 | falco | siem | 3 | 1 | 2 | ✅ | ✅ | ✅ |
@@ -53,13 +55,14 @@
 | gitlab | vcs | 3 | 1 | 2 | ✅ | ✅ | ✅ |
 | google_workspace | saas | 2 | 1 | 1 | ✅ | ✅ | ✅ |
 | greynoise | saas | 2 | 1 | 2 | ✅ | ✅ | ✅ |
+| huntress | edr | 2 | 2 | 1 | ✅ | ✅ | ✅ |
 | imperva | network | 3 | 1 | 3 | ✅ | ✅ | ✅ |
 | jira | saas | 3 | 1 | 3 | ✅ | ✅ | ✅ |
 | jumpcloud | iam | 1 | 1 | 2 | ✅ | ✅ | ✅ |
 | kubernetes_audit | cloud | 5 | 1 | 2 | ✅ | ✅ | ✅ |
 | lacework | cloud | 4 | 1 | 5 | ✅ | ✅ | ✅ |
 | llm_usage | saas | 4 | 1 | 2 | ✅ | ✅ | ✅ |
-| m365_audit | saas | 3 | 1 | 1 | ✅ | ✅ | ✅ |
+| m365_audit | saas | 6 | 3 | 1 | ✅ | ✅ | ✅ |
 | microsoft_intune | mdm | 3 | 1 | 1 | ✅ | ✅ | — |
 | microsoft_sentinel | siem | 6 | 1 | 2 | ✅ | ✅ | ✅ |
 | mimecast | saas | 3 | 1 | 4 | ✅ | ✅ | ✅ |
@@ -84,6 +87,7 @@
 | slack_audit | saas | 1 | 1 | 3 | ✅ | ✅ | ✅ |
 | snowflake | saas | 5 | 1 | 4 | ✅ | ✅ | ✅ |
 | snyk | vcs | 3 | 1 | 1 | ✅ | ✅ | ✅ |
+| sophos_central | edr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | splunk | siem | 5 | 1 | 4 | ✅ | ✅ | ✅ |
 | sublime_security | saas | 2 | 1 | 3 | ✅ | ✅ | ✅ |
 | sumo_logic | siem | 3 | 1 | 4 | ✅ | ✅ | ✅ |
@@ -96,8 +100,10 @@
 | trellix_helix | siem | 3 | 1 | 4 | ✅ | ✅ | ✅ |
 | trend_vision_one | edr | 2 | 1 | 5 | ✅ | ✅ | ✅ |
 | vault | iam | 4 | 1 | 2 | ✅ | ✅ | ✅ |
+| vectra_ai | ndr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | wazuh | siem | 7 | 1 | 5 | ✅ | ✅ | ✅ |
 | windows_event | edr | 3 | 1 | 3 | ✅ | ✅ | ✅ |
+| withsecure_elements | edr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | wiz | cloud | 7 | 1 | 2 | ✅ | ✅ | ✅ |
 | zeek_suricata | ndr | 4 | 1 | 2 | ✅ | ✅ | ✅ |
 | zscaler | network | 4 | 2 | 1 | ✅ | ✅ | ✅ |

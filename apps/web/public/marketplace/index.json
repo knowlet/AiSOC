@@ -1,7 +1,7 @@
 {
   "$schema": "https://example.com/schemas/marketplace/v1.json",
   "version": "1.0.0",
-  "generated": "2026-11-10T12:34:13Z",
+  "generated": "2026-11-15T11:43:04Z",
   "categories": [
     {
       "id": "playbooks",
@@ -20,29 +20,29 @@
     }
   ],
   "stats": {
-    "total": 7582,
+    "total": 7588,
     "playbooks": 89,
     "playbook_packs": 64,
     "detections": 7408,
-    "plugins": 85,
-    "verified": 1460,
+    "plugins": 91,
+    "verified": 1466,
     "community": 2,
     "by_tier": {
       "beta": 7,
       "community": 2,
       "imported": 6113,
-      "stable": 1460
+      "stable": 1466
     },
     "detections_by_tier": {
       "community": 2,
       "imported": 6113,
       "stable": 1293
     },
-    "executable": 3140,
+    "executable": 3146,
     "quarantined": 4442,
     "executable_detections": 2966,
     "reference_only_detections": 4442,
-    "not_a_detection": 174
+    "not_a_detection": 180
   },
   "mitre_coverage": {
     "unique_techniques": 395,
@@ -254466,6 +254466,33 @@
       "sha256": "ee9fbc6c8ee4e73b811cc3796ff2371062600b0005b05932a3ffc48aab821bbc"
     },
     {
+      "id": "cisco-secure-endpoint",
+      "type": "plugin",
+      "name": "Cisco Secure Endpoint Connector",
+      "description": "Cisco Secure Endpoint (formerly AMP for Endpoints) detections via the v1 events API: threats, quarantines, exploit prevention, behavioural protection, indicators of compromise and threat hunting incidents. The region is chosen from Cisco's three clouds, so the API key is only ever sent to a Cisco host. Operational events Cisco leaves unrated \u2014 policy updates, scans, installs \u2014 are not ingested, and Cisco's Critical stays critical. Read-only; nothing here changes an endpoint.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "edr",
+        "endpoint",
+        "cisco",
+        "secure-endpoint",
+        "amp",
+        "detections"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/cisco_secure_endpoint.py",
+      "min_aisoc_version": "23.3.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/cisco-secure-endpoint/plugin.yaml",
+      "sha256": "08966b02655b5b0acad12a18af183aeeac27f9cb2df888c4fa7f0f5927efd0fb"
+    },
+    {
       "id": "cisco-umbrella",
       "type": "plugin",
       "name": "Cisco Umbrella DNS Connector",
@@ -254780,6 +254807,32 @@
       "sha256": "2f45d17b4eb4f0a806af3c767a34aeffa24058876f48e95d4a91de7a22fc6be0"
     },
     {
+      "id": "eset_protect",
+      "type": "plugin",
+      "name": "ESET PROTECT Connector",
+      "description": "ESET PROTECT detections via the ESET Connect API: antivirus, HIPS, firewall, network intrusion, web access and ESET Inspect rule hits. Each detection is raised once, with its device looked up for the hostname, addresses and operating system. The region is a fixed choice, so the credential is only ever sent to ESET. ESET's severity ladder stops at high, so no detection is raised as critical. Read-only; nothing here changes a device or a detection.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "edr",
+        "endpoint",
+        "eset",
+        "eset-protect",
+        "detections"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/eset_protect.py",
+      "min_aisoc_version": "23.5.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/eset-protect/plugin.yaml",
+      "sha256": "e08d476832d82b1df08533f9bef18dc1cb889541c1d5ae0ac4c6c1caccae5957"
+    },
+    {
       "id": "exabeam",
       "type": "plugin",
       "name": "Exabeam Connector",
@@ -255076,6 +255129,32 @@
       "tier": "stable",
       "path": "plugins/google-workspace/plugin.yaml",
       "sha256": "ef396b2caec623dc0a3375a3763f02514acee37c0ca4a1e2eb60a3cf8d7d59c0"
+    },
+    {
+      "id": "huntress",
+      "type": "plugin",
+      "name": "Huntress Connector",
+      "description": "Huntress Managed EDR incident reports via the v1 REST API: footholds, ransomware canaries, process, antivirus, identity and SIEM detections a Huntress SOC analyst has confirmed and delivered. Each report is raised once, when it is delivered, and its host is resolved from its agent. The API host is fixed, so the credential is only ever sent to Huntress, and Huntress's critical stays critical. Read-only; nothing here changes an endpoint.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "edr",
+        "endpoint",
+        "huntress",
+        "managed-edr",
+        "incident-reports"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/huntress.py",
+      "min_aisoc_version": "23.4.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/huntress/plugin.yaml",
+      "sha256": "6c19e9da49b15f2c889165aaa57cc0b37f6d6cda812be45413e25086a3e87758"
     },
     {
       "id": "jamf-mdm",
@@ -255829,6 +255908,32 @@
       "sha256": "1b87c80577a4e7c40a581eecd04dca52df7894b79f8b60eed8101c65335f7a3d"
     },
     {
+      "id": "sophos-central",
+      "type": "plugin",
+      "name": "Sophos Central Connector",
+      "description": "Sophos Central alerts via the SIEM Integration API: endpoint and server threats, exploit and ransomware protection and intrusion prevention. The tenant and its data region are discovered from the API credential, and a partner or organization credential reads the one tenant it is pointed at. Sophos publishes LOW, MEDIUM and HIGH and no fourth tier, so no alert is ever promoted to critical. Read-only; nothing here changes an alert.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "edr",
+        "endpoint",
+        "sophos",
+        "sophos-central",
+        "alerts"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/sophos_central.py",
+      "min_aisoc_version": "23.2.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/sophos-central/plugin.yaml",
+      "sha256": "24008d2e76eb3569fca1b9c2ffc88d56598f6653cb0f29f248256107d7916d67"
+    },
+    {
       "id": "sublime_security",
       "type": "plugin",
       "name": "Sublime Security Connector",
@@ -256146,6 +256251,32 @@
       "sha256": "dab3c5e1e99fae40c1bd643d0c678705acc1b6e792905a142a6273dbc0c788b5"
     },
     {
+      "id": "vectra_ai",
+      "type": "plugin",
+      "name": "Vectra AI Platform Connector",
+      "description": "Network, identity and cloud detections from the Vectra AI Platform via the v3.4 detection events API, with OAuth2 client credentials. One alert per detection, carrying its host or account and ATT&CK techniques; detections a customer triage rule has marked are not raised. Vectra no longer scores individual detections, so none is given a severity the vendor did not publish. Read-only; nothing here closes, tags or triages a detection.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "ndr",
+        "network",
+        "detections",
+        "vectra",
+        "vectra-ai"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/vectra_ai.py",
+      "min_aisoc_version": "23.5.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/vectra-ai/plugin.yaml",
+      "sha256": "fc8eda17878db9d8c1f7d685be3362d782d4dca81a2eb3f512faa489aa16359a"
+    },
+    {
       "id": "wazuh",
       "type": "plugin",
       "name": "Wazuh Connector",
@@ -256197,6 +256328,33 @@
       "tier": "stable",
       "path": "plugins/windows-event/plugin.yaml",
       "sha256": "cb5bebf4a904eea77be25d30e1b918a954ee1953c0937ef935a97c6e6b3d5738"
+    },
+    {
+      "id": "withsecure_elements",
+      "type": "plugin",
+      "name": "WithSecure Elements Connector",
+      "description": "WithSecure Elements EDR Broad Context Detections via the Elements API. Each BCD is raised once, when it is created, with the host, user, process, command line, hash and MITRE ATT&CK techniques of its detections. The host is fixed, so the client credential is only ever sent to WithSecure, and only the read-only scope is requested. Severity keeps WithSecure's five tiers, critical included. Read-only; nothing here changes a device or a BCD.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "edr",
+        "xdr",
+        "endpoint",
+        "withsecure",
+        "withsecure-elements",
+        "broad-context-detections"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/withsecure_elements.py",
+      "min_aisoc_version": "23.5.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/withsecure-elements/plugin.yaml",
+      "sha256": "0e91bb60bacef70a030d90273d251cb7c89ebb0607c0c9996cfa707b01f22413"
     },
     {
       "id": "wiz",

@@ -146,6 +146,34 @@ class TestAdoptionIsCountedNotAssumed:
     EXPECTED = {
         "splunk": (("_time", "event_time"), ("event_id", "_cd")),
         "okta": (("published",), ("uuid",)),
+        # Issue #1860: the Wazuh indexer can run hours behind its manager
+        # while every poll succeeds on an empty window, so this cursor is
+        # also what *opens* the request window (checkpointed_since_seconds)
+        # — the first connector where the watermark widens the read rather
+        # than only de-duplicating it. The declared fields are the cursor's
+        # vocabulary; the connector overrides the row accessors because the
+        # indexer nests `@timestamp` under `_source`.
+        "wazuh": (("@timestamp",), ("_id",)),
+        # Issue #1890, same mechanism as Wazuh one row up: ESET filters on
+        # occurTime, an offline endpoint uploads its backlog late with the
+        # original stamps, and only a window opened at the cursor ever
+        # requests it. Both fields sit top-level on every detection, so the
+        # base accessors read them without overrides.
+        "eset_protect": (("occurTime",), ("uuid",)),
+        # Same mechanism again. WithSecure's BCD list is read oldest first
+        # by createdTimestamp, so the cursor rests on the newest BCD raised
+        # and the next window opens there: a poll the page bound cut short,
+        # or a run of failed polls, is caught up rather than slid past.
+        "withsecure_elements": (("createdTimestamp",), ("incidentId",)),
+        # Issue #1971, same mechanism again: Huntress, Cisco Secure
+        # Endpoint and Sophos Central each read a clock window with no
+        # persisted cursor, so a poll the scheduler skipped left a gap no
+        # later poll ever requested. All three now declare a cursor on the
+        # row's event time and open their window at it (plus one interval
+        # of overlap for a single skipped run with no cursor yet).
+        "huntress": (("sent_at",), ("id",)),
+        "cisco_secure_endpoint": (("date",), ("id",)),
+        "sophos_central": (("created_at", "when"), ("id",)),
         "m365_audit": (("CreationTime",), ("Id",)),
         "aws_cloudtrail": (("EventTime",), ("EventId",)),
         "azure_activity": (("eventTimestamp",), ("eventDataId", "id")),

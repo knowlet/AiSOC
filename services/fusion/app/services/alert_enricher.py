@@ -23,6 +23,7 @@ Honesty + robustness:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -32,6 +33,25 @@ from app.models.alert import RawAlert
 from app.services.ioc_match import TenantIocMatcher
 
 logger = structlog.get_logger()
+
+
+def _service_headers(tenant_id: str) -> dict[str, str]:
+    """Headers for a service call to the enrichment service.
+
+    Client-side mirror of its token resolution — per-service override first,
+    then the platform token — the same pattern the API's DLQ gateway uses
+    toward this service. The tenant header is the platform convention
+    (GHSA-qf6m-hgwv-65f9): enrichment refuses a service token that does not
+    declare which tenant it acts for.
+    """
+    headers: dict[str, str] = {}
+    token = (os.getenv("AISOC_ENRICHMENT_SERVICE_TOKEN") or os.getenv("AISOC_SERVICE_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if tenant_id.strip():
+        headers["X-AiSOC-Tenant-ID"] = tenant_id.strip()
+    return headers
+
 
 # Alert IOC field -> enrichment ioc_type.
 _IOC_FIELDS: tuple[tuple[str, str], ...] = (
@@ -96,6 +116,14 @@ class AlertEnricher:
         if not items:
             return {}
 
+        # The enrichment service's threatintel feed-lookup provider must declare
+        # a tenant to authenticate its service call, and the enrichment cache is
+        # tenant-scoped, so carry the alert's tenant on every bulk item.
+        alert_tenant = str(getattr(alert, "tenant_id", "") or "")
+        if alert_tenant:
+            for item in items:
+                item["tenant_id"] = alert_tenant
+
         # The tenant's own store first, because it works without the
         # `full` profile. Its result is merged under the external one when
         # both answer, so a deployment that runs enrichment is unaffected.
@@ -108,7 +136,15 @@ class AlertEnricher:
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(f"{self._base_url}/enrich/bulk", json={"items": items})
+                resp = await client.post(
+                    f"{self._base_url}/enrich/bulk",
+                    json={"items": items},
+                    # The enrichment service authenticates callers
+                    # (GHSA-qf6m-hgwv-65f9): the service token plus the
+                    # alert's own tenant, declared on the platform header.
+                    # Every item in this batch carries that same tenant.
+                    headers=_service_headers(alert_tenant),
+                )
                 resp.raise_for_status()
                 results = resp.json().get("results", [])
         except Exception as exc:  # noqa: BLE001 — best-effort; never block fusion

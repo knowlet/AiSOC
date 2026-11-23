@@ -411,6 +411,13 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_dev_secret}
       OPENSEARCH_URL: http://opensearch:9200
       QDRANT_URL: http://qdrant:6333
+      # Where the /api/v1/fusion/* gateway proxies entity-risk (RBA) reads.
+      # Fusion is a core service listening on 8003, but nothing set this, so
+      # the gateway's "forward if configured" branch never fired and the
+      # console's Alerts → Entities view answered 503 on every stock Compose
+      # install (#1931). The gateway adapts fusion's wire shape to the
+      # console contract; see services/api/app/api/v1/endpoints/fusion.py.
+      FUSION_SERVICE_URL: ${FUSION_SERVICE_URL:-http://fusion:8003}
       # The API owns the vault write path; the connectors service reads with
       # the same key. Passing it to one and not the other means a credential
       # saved in the console can never be decrypted at poll time.
@@ -698,6 +705,25 @@ services:
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
       GREYNOISE_API_KEY: ${GREYNOISE_API_KEY:-}
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      URLSCAN_API_KEY: ${URLSCAN_API_KEY:-}
+      IPINFO_API_KEY: ${IPINFO_API_KEY:-}
+      # Cyble Vision: config.go gates the provider on CYBLE_API_KEY and the
+      # enricher is built unconditionally, so without these the credential set
+      # in .env never reaches the container and boot logs cyble=false.
+      CYBLE_API_KEY: ${CYBLE_API_KEY:-}
+      CYBLE_BASE_URL: ${CYBLE_BASE_URL:-}
+      THREATINTEL_SERVICE_URL: ${THREATINTEL_SERVICE_URL:-http://threatintel:8005}
+      AISOC_SERVICE_TOKEN: ${AISOC_SERVICE_TOKEN:-}
+      # /enrich and /enrich/bulk authenticate their callers
+      # (GHSA-qf6m-hgwv-65f9): SECRET_KEY verifies console sessions, the
+      # service token above authenticates fusion/agents, and the dev-bypass
+      # trio matches what fusion, connectors and threatintel already carry.
+      SECRET_KEY: ${SECRET_KEY:-}
+      AISOC_DEV_MODE: ${AISOC_DEV_MODE:-0}
+      # What this deployment published, so the service can refuse the
+      # anonymous auth shim on an address someone else can reach. It binds
+      # 0.0.0.0 inside the container and cannot tell otherwise.
+      AISOC_PUBLISHED_BIND_ADDRS: ${AISOC_BIND_ADDR:-127.0.0.1}
     networks:
       - aisoc
     restart: unless-stopped
@@ -772,8 +798,27 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8001:8084"
     environment:
+      # Opt-in: 0/off/false spends the token ceiling on answer tokens instead
+      # of hidden reasoning (thinking-tier models). Unset = provider default.
+      AISOC_LLM_THINKING: ${AISOC_LLM_THINKING:-}
       REALTIME_URL: ${REALTIME_URL:-http://realtime:4000}
+      # The investigation agent sends this when it asks threatintel for actor
+      # attribution; threatintel's gate fails closed, so the caller must hold
+      # the same generated value the enforcer holds.
+      AISOC_THREATINTEL_SERVICE_TOKEN: ${AISOC_THREATINTEL_SERVICE_TOKEN:-}
+      # Where the context bundle reads per-entity behavioural baselines.
+      # UEBA listens on 8004 inside the network (published as 8007); the
+      # code default used to name :8086 and every lookup failed silently
+      # (#1929). UEBA is a `full`-profile service: on a core-profile
+      # deployment this hostname does not resolve and the bundle logs one
+      # warning, which is the honest state rather than a defect.
+      AISOC_UEBA_URL: ${AISOC_UEBA_URL:-http://ueba:8004}
       AISOC_INVESTIGATION_MAX_SECONDS: ${AISOC_INVESTIGATION_MAX_SECONDS:-120}
+      # The agents :15002/metrics gate compares against this token exactly as
+      # the api service's does; without it in this environment every scrape
+      # answered 401 outside development and the triage counters were
+      # unreachable on a default deployment (#1822).
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       DATABASE_URL: postgresql+asyncpg://aisoc_app:${AISOC_APP_DB_PASSWORD:-aisoc_app_dev_secret}@postgres:5432/aisoc
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_dev_secret}@redis:6379/4
       CORE_API_URL: http://api:8000
@@ -865,6 +910,22 @@ services:
       CLICKHOUSE_DATABASE: "${CLICKHOUSE_DATABASE:-aisoc}"
       CLICKHOUSE_USER: "${CLICKHOUSE_USER:-aisoc}"
       CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-aisoc_dev_secret}"
+    # /readyz goes 503 while the triage subscription is detached (and
+    # recovers on its own once supervision re-attaches, #1930) — this was
+    # the one Kafka-consuming Python service with no healthcheck, so a
+    # dead subscription was invisible to `docker compose ps` and `make
+    # _wait`. Compose does not restart an unhealthy container (the
+    # in-process supervision is what recovers); the healthcheck is the
+    # honest status surface, and on Kubernetes the chart's readiness
+    # probe reads the same endpoint.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "python -c \"import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8084/readyz',timeout=2); sys.exit(0 if r.status==200 else 1)\" || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
     networks:
       - aisoc
     restart: unless-stopped
@@ -874,9 +935,8 @@ services:
   # alias (aisoc-triage, aisoc-investigation, …); the mapping alias → real model
   # lives entirely in infra/litellm/config.yaml, so operators swap local/hosted
   # models without touching AiSOC. Per-task latency/tokens/cost/errors are
-  # exported on /metrics (scraped as job `aisoc-litellm`). Lightweight and inert
-  # unless a service is pointed at it via OPENAI_BASE_URL — see the note on the
-  # `agents` service above.
+  # exported on /metrics (scraped as job `aisoc-litellm`). The api and agents
+  # services use LLM_GATEWAY_URL to route task aliases here by default.
   ollama:
     # CORE — the model behind the gateway.
     #
@@ -1046,9 +1106,11 @@ services:
     # `llmGateway.image.tag` in lockstep when bumping.
     image: ghcr.io/berriai/litellm:v1.102.1
     container_name: aisoc-litellm
+    entrypoint: ["python", "/etc/litellm/start.py"]
     command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
     volumes:
       - ./infra/litellm/config.yaml:/etc/litellm/config.yaml:ro
+      - ./infra/litellm/start.py:/etc/litellm/start.py:ro
     #
     # Deliberately no `depends_on`. This used to read
     #
@@ -1087,12 +1149,28 @@ services:
       AISOC_LLM_MODEL_DEEP: ${AISOC_LLM_MODEL_DEEP:-ollama_chat/llama3.2:3b-instruct-q4_K_M}
       # `-` and not `:-`, deliberately: an operator moving to a hosted provider
       # sets AISOC_LLM_API_BASE= (empty) in .env, and `:-` would helpfully undo
-      # that by substituting the Ollama address back in.
+      # that by substituting the Ollama address back in. start.py unsets a
+      # blank value so LiteLLM receives None and uses the provider default.
       AISOC_LLM_API_BASE: ${AISOC_LLM_API_BASE-http://ollama:11434}
-      # Upstream provider keys the aliases resolve against (os.environ/... in the
-      # config). Empty is fine — the local model answers instead.
+      # Provider-native credentials. The startup wrapper removes blank AWS
+      # values so the SDK can use its default chain (including an EC2 role).
+      # These are gateway-only; a tenant's BYOK remains separate.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_PROFILE_NAME: ${AWS_PROFILE_NAME:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_REGION_NAME: ${AWS_REGION_NAME:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_CONFIG_FILE: ${AWS_CONFIG_FILE:-}
+      AWS_SHARED_CREDENTIALS_FILE: ${AWS_SHARED_CREDENTIALS_FILE:-}
+      # Leave IMDS enabled for EC2 instance-role authentication. Bearer/profile
+      # users may explicitly disable it without disabling other credentials.
+      AWS_EC2_METADATA_DISABLED: ${AWS_EC2_METADATA_DISABLED:-false}
       # How long the gateway waits on one generation before giving up, in
       # seconds. 60 was a bare literal inside the mounted config, so a
       # deployment whose model needs longer — CPU-only inference on a larger
@@ -1382,6 +1460,11 @@ services:
       # Same credential the API presents when it proxies /threat-intel/indicators.
       SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production}
       AISOC_SERVICE_TOKEN: ${AISOC_SERVICE_TOKEN:-}
+      # The actor-attribution gate fails closed on this value. ensure_env
+      # generates it; this service *enforces* it, so a deployment where the
+      # generated value never reaches this container serves 503 for every
+      # /api/v1/actors/* call — which is exactly what v23.5.0 shipped.
+      AISOC_THREATINTEL_SERVICE_TOKEN: ${AISOC_THREATINTEL_SERVICE_TOKEN:-}
       AISOC_DEV_MODE: ${AISOC_DEV_MODE:-0}
       # What this deployment published, so the service can refuse the
       # anonymous auth shim on an address someone else can reach. It
@@ -1416,6 +1499,12 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8007:8004"
     environment:
+      # Tracing is quiet by default (issue #1848): the exporter used to point
+      # at localhost:4317 — this container itself — so the batch processor
+      # retried a refused connection every few seconds. Set
+      # OTEL_EXPORTER=otlp alongside `--profile monitoring` to trace.
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       # Two roles, the same split the api service uses. This service manages
       # its own schema through alembic, so it needs the owner to apply DDL and
       # must not serve requests as it. The marker on the second line below is
@@ -1503,6 +1592,12 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8008:8005"
     environment:
+      # Tracing is quiet by default (issue #1848): the exporter used to point
+      # at localhost:4317 — this container itself — so the batch processor
+      # retried a refused connection every few seconds. Set
+      # OTEL_EXPORTER=otlp alongside `--profile monitoring` to trace.
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       # Two roles, the same split the api service uses. This service manages
       # its own schema through alembic, so it needs the owner to apply DDL and
       # must not serve requests as it. The marker on the second line below is
@@ -1560,6 +1655,12 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8006:8006"
     environment:
+      # Tracing is quiet by default (issue #1848): the exporter used to point
+      # at localhost:4317 — this container itself — so the batch processor
+      # retried a refused connection every few seconds. Set
+      # OTEL_EXPORTER=otlp alongside `--profile monitoring` to trace.
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       # Two roles, the same split the api service uses. This service manages
       # its own schema through alembic, so it needs the owner to apply DDL and
       # must not serve requests as it. The marker on the second line below is
@@ -1841,6 +1942,28 @@ services:
     container_name: aisoc-prometheus
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:9091:9090"
+    environment:
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+    # The api, ingest and agents /metrics endpoints refuse scrapes without
+    # `Authorization: Bearer $METRICS_TOKEN` once the token is set (#1823),
+    # so every secured deployment watched those scrapes 401 (#1876, #1881).
+    # Prometheus cannot read environment variables from scrape configs; it
+    # reads a `credentials_file`. Nothing in the repo is a sensible home for
+    # that file (a committed one would be a secret in the tree, an unmounted
+    # path broke the default stack in the declined #1876), so the entrypoint
+    # materialises it from the environment at boot — into /prometheus, the
+    # TSDB volume, which is the one path the image's non-root user is
+    # guaranteed to write. An empty token writes an empty file: the scrape
+    # then presents an empty bearer, which every gated endpoint ignores in
+    # the token-unset posture (dev allows, production refuses the scrape
+    # with its own 401 naming METRICS_TOKEN) — so the default stack stays
+    # exactly as green as it was. `"$0" "$@"` hands the image's own CMD
+    # (config path, storage flags) through untouched.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'printf "%s" "$$METRICS_TOKEN" > /prometheus/metrics_token && exec "$$0" "$$@"'
+      - /bin/prometheus
     volumes:
       - ./infra/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       # Phase 2.4 — alert rules mounted as a directory so adding a

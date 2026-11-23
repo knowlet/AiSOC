@@ -6,7 +6,7 @@
 
 **An open-source, self-hostable AI Security Operations Center.** It ingests your security telemetry, detects and correlates threats, investigates them with AI agents whose reasoning is fully auditable, and proposes responses a human approves.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg?style=flat-square)](https://opensource.org/licenses/MIT) [![Version](https://img.shields.io/badge/version-23.1.0-f59e0b?style=flat-square)](CHANGELOG.md) [![CI](https://img.shields.io/github/actions/workflow/status/beenuar/AiSOC/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/beenuar/AiSOC/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg?style=flat-square)](https://opensource.org/licenses/MIT) [![Version](https://img.shields.io/badge/version-23.5.3-f59e0b?style=flat-square)](CHANGELOG.md) [![CI](https://img.shields.io/github/actions/workflow/status/beenuar/AiSOC/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/beenuar/AiSOC/actions/workflows/ci.yml)
 [![CodeQL](https://img.shields.io/github/actions/workflow/status/beenuar/AiSOC/codeql.yml?branch=main&label=CodeQL&style=flat-square)](https://github.com/beenuar/AiSOC/actions/workflows/codeql.yml) [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/beenuar/AiSOC/badge)](https://securityscorecards.dev/viewer/?uri=github.com/beenuar/AiSOC) [![Technical Guide](https://img.shields.io/badge/Technical%20Guide-28%20page%20PDF-dc2626?style=flat-square)](https://raw.githubusercontent.com/beenuar/AiSOC/main/apps/web/public/papers/aisoc-technical-guide.pdf)
 
 **[Technical Guide (PDF)](https://raw.githubusercontent.com/beenuar/AiSOC/main/apps/web/public/papers/aisoc-technical-guide.pdf)** · [Docs](https://beenuar.github.io/AiSOC/) · [Architecture](docs/architecture/README.md) · [What actually works](docs/audit/REPOSITORY_REALITY.md) · [Discussions](https://github.com/beenuar/AiSOC/discussions)
@@ -24,12 +24,9 @@ history you already collected, and a human approves before anything reaches a ve
 
 ## What it looks like running
 
-<a href="apps/web/public/demo/demo.mp4"><img src="apps/web/public/demo/hero.gif" alt="AiSOC on one host: make up brings the stack up and prints the sign-in address, the console shows real CISA KEV rows, a pushed event becomes an alert, and the cost dashboard reports the tokens triage spent" /></a>
+<a href="apps/web/public/demo/demo.mp4"><img src="apps/web/public/demo/hero.gif" alt="AiSOC on one host: the alert queue filled by the pipeline, a local-model triage verdict in the investigation rail, and the risk-based entity queue naming the hosts each entity was seen on" /></a>
 
-**[Watch the full three minutes](apps/web/public/demo/demo.mp4)** — install to AI verdict on one
-server against the published images, terminal waits shortened and the recording saying so on screen.
-The stills below are from a v20.1.0 run under the same rules — the recording is older than they are.
-([step by step](apps/docs/docs/deployment/walkthrough.mdx) · [what is real](apps/web/public/screenshots/README.md))
+**[Watch the full walkthrough](apps/web/public/demo/demo.mp4)** — install to AI verdict on one server against the published images, terminal waits shortened and the recording saying so on screen. The recording and the stills below are both from a v23.5.0 run. ([step by step](apps/docs/docs/deployment/walkthrough.mdx) · [what is real](apps/web/public/screenshots/README.md))
 
 | | |
 |---|---|
@@ -37,6 +34,8 @@ The stills below are from a v20.1.0 run under the same rules — the recording i
 | **Alerts** — each attributed to the connector that fed it. | **Automated triage** — the bundled local model's verdict, confidence and rationale, verbatim. |
 | <img src="apps/web/public/screenshots/threat-intel-kev.png" alt="Threat intelligence page showing CISA KEV entries" /> | <img src="apps/web/public/screenshots/soc-operations.png" alt="SOC operations dashboard with honest empty states" /> |
 | **Threat intelligence** — the real CISA KEV catalog, minutes after boot, with no API key. | **SOC operations** — with nothing connected yet, and it says so rather than showing a placeholder. |
+| <img src="apps/web/public/screenshots/entity-risk-queue.png" alt="Entity-risk queue showing the hosts each entity was seen on" /> | <img src="apps/web/public/screenshots/attack-graph.png" alt="The entity attack graph over real ingested telemetry with Neo4j running" /> |
+| **Risk-based alerting** — alerts rolled up per entity, each row naming the hosts it was seen on. | **Attack graph** — identities, assets and IPs over real ingested telemetry, with Neo4j live. |
 
 ## Quick start
 
@@ -51,7 +50,7 @@ The [Technical Guide](https://raw.githubusercontent.com/beenuar/AiSOC/main/apps/
 
 Needs Docker Compose v2 with **8 GB memory and 20 GB free disk in the Docker VM**, plus `python3` (3.9+) and `bash`; `make doctor` checks all of it and [Installation](https://beenuar.github.io/AiSOC/docs/installation#requirements) says what each number was measured against. The first run downloads a ~2 GB model into a volume only `make clean` clears.
 
-`make up` also creates `.env` and generates the **fifteen** secrets in it — the credential vault, the
+`make up` also creates `.env` and generates the **sixteen** secrets in it — the credential vault, the
 session signing key, five service-to-service credentials and four datastore passwords — then creates an
 administrator and prints its password, generated on your machine, shown once and stored nowhere. Lost
 it? `make bootstrap ARGS=--reset-password` mints another.
@@ -90,7 +89,7 @@ curl -X POST http://localhost:8081/v1/ingest/batch \
        "title":"Encoded PowerShell from Office","host":"WIN-FIN-01"}]}'
 ```
 
-Or pull, by configuring one of **91 click-and-connect data connectors** in **Settings → Connectors**
+Or pull, by configuring one of **97 click-and-connect data connectors** in **Settings → Connectors**
 — Splunk, Sentinel, Elastic, CrowdStrike, Okta, AWS and Kubernetes audit among those with
 vendor-specific normalization and setup docs
 ([coverage](https://beenuar.github.io/AiSOC/docs/connectors/api-coverage)). Without a vendor profile

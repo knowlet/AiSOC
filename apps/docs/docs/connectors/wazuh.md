@@ -101,6 +101,28 @@ must not be used in production.
   truncated; for very noisy environments the right answer is usually a higher
   threshold rather than a larger page size.
 
+## Repeated alerts
+
+Each Wazuh alert document has its own event identity: `external_id` uses the
+indexer document `_id`, while `rule_id` keeps the detection rule number.
+Fusion can fold several documents with the same alert fingerprint into one
+AiSOC alert. Each new document increments its occurrence count, including a
+repeat received after the Redis deduplication and correlation windows expire.
+Replaying the same document keeps the count unchanged while its event ID is
+still retained in the bounded occurrence window.
+
+`first_seen` and `last_seen` describe the event-time range of those occurrences.
+The alert's original `event_time` and `created_at` stay unchanged. Changing the
+Redis windows controls caching and incident grouping; it does not repair event
+identity or recover previously missed occurrences.
+
+Older connector versions used the rule number as `external_id`, so distinct
+documents from one rule could share an event ID and leave the count stuck at
+two. Updating the connector and fusion service lets future documents update
+the existing alert. Historical counts cannot be reconstructed from that
+collapsed rollup alone; they require reconciliation with the original source
+documents. This fix does not backfill them automatically.
+
 ## Severity mapping
 
 Wazuh emits a 0-15 numeric `rule.level`. AiSOC collapses that ladder onto its
@@ -150,6 +172,35 @@ override `index_pattern` to match.
 **TLS handshake errors** — set `verify_tls: false` only when you are deliberately
 running a self-signed lab cluster. In production, install the root CA so the
 connector trusts the indexer's certificate.
+
+## Backfill after a source-side outage
+
+The alert stream resumes from a **durable cursor**, not from the clock. The
+poll window opens at the last event ingest accepted, so when the indexer runs
+behind the manager — a full disk, a flood-stage watermark blocking filebeat,
+an index rotation hiccup — the connector's successful-but-empty polls hold
+the window's left edge in place. When the backlog drains (carrying its
+original timestamps, hours inside windows that were already polled), the next
+poll requests the whole gap and reads it to the end; rows the overlap re-reads
+are dropped by the cursor before they are re-submitted.
+
+Two bounds to know:
+
+- **Lookback cap.** One poll widens at most 7 days past the cursor
+  (`connector.checkpoint.lookback_capped` is logged at warning when the cap
+  binds). A source behind for longer loses what is older, deliberately —
+  an unbounded backlog query is its own outage.
+- **Manual backfill.** The cursor lives at `connector_config.checkpoint` on
+  the connector instance. To re-read a window deliberately — the operator
+  action asked for in issue #1860 — patch `checkpoint.time` back to where the
+  re-read should start (`PATCH /api/v1/connectors/{id}` merges config keys,
+  so send only `{"connector_config": {"checkpoint": {"time": "...", "id": ""}}}`).
+  The next poll opens there; duplicates are collapsed by fusion's
+  deduplication downstream.
+
+The vulnerability stream (`vuln_mode: inventory`) deliberately stays on the
+clock window: one connector instance persists one cursor, and its CVE
+findings are reconciled state that re-converges on later polls.
 
 ## Related
 

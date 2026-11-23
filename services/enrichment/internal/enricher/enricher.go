@@ -26,9 +26,12 @@ type Enricher struct {
 	cache *cache.Client
 
 	// Open-source / freemium clients
-	vtClient    *VirusTotalClient
-	abuseClient *AbuseIPDBClient
-	gnClient    *GreyNoiseClient
+	vtClient      *VirusTotalClient
+	abuseClient   *AbuseIPDBClient
+	gnClient      *GreyNoiseClient
+	shodanClient  *ShodanClient
+	ipinfoClient  *IPInfoClient
+	urlscanClient *URLScanClient
 
 	// Commercial clients
 	cybleClient       *CybleClient
@@ -41,6 +44,9 @@ type Enricher struct {
 	domainToolsClient *DomainToolsClient
 	riskIQClient      *RiskIQClient
 	csIntelClient     *CrowdstrikeIntelClient
+
+	// Internal: the platform's own threat-intel feed store (services/threatintel)
+	tiClient *ThreatIntelClient
 }
 
 // Config holds Enricher dependency configuration.
@@ -51,6 +57,9 @@ type Config struct {
 	VirusTotalAPIKey string
 	AbuseIPDBAPIKey  string
 	GreyNoiseAPIKey  string
+	ShodanAPIKey     string
+	IPInfoAPIKey     string
+	URLScanAPIKey    string
 
 	// Commercial
 	CybleAPIKey            string
@@ -72,15 +81,24 @@ type Config struct {
 	RiskIQAPIKey           string
 	CrowdstrikeIntelID     string
 	CrowdstrikeIntelSecret string
+
+	// Platform threat-intel feed lookup (services/threatintel): the per-IOC
+	// bridge to the OTX / MISP / TAXII / KEV feeds. Needs the in-cluster URL
+	// and a service token to authenticate.
+	ThreatIntelURL string
+	ServiceToken   string
 }
 
 // New creates a new Enricher with all configured data sources.
 func New(cfg Config) *Enricher {
 	return &Enricher{
-		cache:       cfg.Cache,
-		vtClient:    NewVirusTotalClient(cfg.VirusTotalAPIKey),
-		abuseClient: NewAbuseIPDBClient(cfg.AbuseIPDBAPIKey),
-		gnClient:    NewGreyNoiseClient(cfg.GreyNoiseAPIKey),
+		cache:         cfg.Cache,
+		vtClient:      NewVirusTotalClient(cfg.VirusTotalAPIKey),
+		abuseClient:   NewAbuseIPDBClient(cfg.AbuseIPDBAPIKey),
+		gnClient:      NewGreyNoiseClient(cfg.GreyNoiseAPIKey),
+		shodanClient:  NewShodanClient(cfg.ShodanAPIKey),
+		ipinfoClient:  NewIPInfoClient(cfg.IPInfoAPIKey),
+		urlscanClient: NewURLScanClient(cfg.URLScanAPIKey),
 
 		cybleClient: NewCybleClient(CybleConfig{
 			APIKey:  cfg.CybleAPIKey,
@@ -99,6 +117,7 @@ func New(cfg Config) *Enricher {
 		domainToolsClient: NewDomainToolsClient(cfg.DomainToolsUsername, cfg.DomainToolsAPIKey),
 		riskIQClient:      NewRiskIQClient(cfg.RiskIQUsername, cfg.RiskIQAPIKey),
 		csIntelClient:     NewCrowdstrikeIntelClient(cfg.CrowdstrikeIntelID, cfg.CrowdstrikeIntelSecret),
+		tiClient:          NewThreatIntelClient(cfg.ThreatIntelURL, cfg.ServiceToken),
 	}
 }
 
@@ -110,6 +129,10 @@ func (e *Enricher) Enrich(ctx context.Context, req EnrichRequest) (*EnrichmentRe
 	// for the other. A shared key would serve tenant A's verdict from a
 	// provider tenant B switched off straight to tenant B.
 	cacheKey := cache.MakeTenantKey(req.TenantID, string(req.IOCType), req.Value)
+
+	// Carry the tenant through the fan-out so the threatintel feed lookup can
+	// declare it on its service call (it rejects a tenant-less service token).
+	ctx = WithTenant(ctx, req.TenantID)
 
 	if !req.Force && e.cache != nil {
 		var cached EnrichmentResult
@@ -202,6 +225,8 @@ func (e *Enricher) enrichIP(ctx context.Context, ip string) (*EnrichmentResult, 
 		{"virustotal", func() (*EnrichmentResult, error) { return e.vtClient.EnrichIP(ctx, ip) }},
 		{"abuseipdb", func() (*EnrichmentResult, error) { return e.abuseClient.EnrichIP(ctx, ip) }},
 		{"greynoise", func() (*EnrichmentResult, error) { return e.gnClient.EnrichIP(ctx, ip) }},
+		{"shodan", func() (*EnrichmentResult, error) { return e.shodanClient.EnrichIP(ctx, ip) }},
+		{"ipinfo", func() (*EnrichmentResult, error) { return e.ipinfoClient.EnrichIP(ctx, ip) }},
 		{"cyble", func() (*EnrichmentResult, error) { return e.cybleClient.EnrichIP(ctx, ip) }},
 		{"recorded-future", func() (*EnrichmentResult, error) { return e.rfClient.EnrichIP(ctx, ip) }},
 		{"mandiant", func() (*EnrichmentResult, error) { return e.mandiantClient.EnrichIP(ctx, ip) }},
@@ -211,6 +236,7 @@ func (e *Enricher) enrichIP(ctx context.Context, ip string) (*EnrichmentResult, 
 		{"intel471", func() (*EnrichmentResult, error) { return e.intel471Client.EnrichIP(ctx, ip) }},
 		{"riskiq", func() (*EnrichmentResult, error) { return e.riskIQClient.EnrichIP(ctx, ip) }},
 		{"crowdstrike-intel", func() (*EnrichmentResult, error) { return e.csIntelClient.EnrichIP(ctx, ip) }},
+		{"threatintel", func() (*EnrichmentResult, error) { return e.tiClient.EnrichIP(ctx, ip) }},
 	}
 	return mergeResults(IOCTypeIP, ip, runFanOut(ctx, ip, tasks)), nil
 }
@@ -218,6 +244,7 @@ func (e *Enricher) enrichIP(ctx context.Context, ip string) (*EnrichmentResult, 
 func (e *Enricher) enrichDomain(ctx context.Context, domain string) (*EnrichmentResult, error) {
 	tasks := []fanOutTask{
 		{"virustotal", func() (*EnrichmentResult, error) { return e.vtClient.EnrichDomain(ctx, domain) }},
+		{"urlscan", func() (*EnrichmentResult, error) { return e.urlscanClient.EnrichDomain(ctx, domain) }},
 		{"cyble", func() (*EnrichmentResult, error) { return e.cybleClient.EnrichDomain(ctx, domain) }},
 		{"recorded-future", func() (*EnrichmentResult, error) { return e.rfClient.EnrichDomain(ctx, domain) }},
 		{"mandiant", func() (*EnrichmentResult, error) { return e.mandiantClient.EnrichDomain(ctx, domain) }},
@@ -228,6 +255,7 @@ func (e *Enricher) enrichDomain(ctx context.Context, domain string) (*Enrichment
 		{"domaintools", func() (*EnrichmentResult, error) { return e.domainToolsClient.EnrichDomain(ctx, domain) }},
 		{"riskiq", func() (*EnrichmentResult, error) { return e.riskIQClient.EnrichDomain(ctx, domain) }},
 		{"crowdstrike-intel", func() (*EnrichmentResult, error) { return e.csIntelClient.EnrichDomain(ctx, domain) }},
+		{"threatintel", func() (*EnrichmentResult, error) { return e.tiClient.EnrichDomain(ctx, domain) }},
 	}
 	return mergeResults(IOCTypeDomain, domain, runFanOut(ctx, domain, tasks)), nil
 }
@@ -241,6 +269,7 @@ func (e *Enricher) enrichHash(ctx context.Context, hash string) (*EnrichmentResu
 		{"flashpoint", func() (*EnrichmentResult, error) { return e.flashpointClient.EnrichHash(ctx, hash) }},
 		{"intel471", func() (*EnrichmentResult, error) { return e.intel471Client.EnrichHash(ctx, hash) }},
 		{"crowdstrike-intel", func() (*EnrichmentResult, error) { return e.csIntelClient.EnrichHash(ctx, hash) }},
+		{"threatintel", func() (*EnrichmentResult, error) { return e.tiClient.EnrichHash(ctx, hash) }},
 	}
 	return mergeResults(IOCTypeHash, hash, runFanOut(ctx, hash, tasks)), nil
 }
@@ -248,9 +277,11 @@ func (e *Enricher) enrichHash(ctx context.Context, hash string) (*EnrichmentResu
 func (e *Enricher) enrichURL(ctx context.Context, rawURL string) (*EnrichmentResult, error) {
 	tasks := []fanOutTask{
 		{"virustotal", func() (*EnrichmentResult, error) { return e.vtClient.EnrichURL(ctx, rawURL) }},
+		{"urlscan", func() (*EnrichmentResult, error) { return e.urlscanClient.EnrichURL(ctx, rawURL) }},
 		{"cyble", func() (*EnrichmentResult, error) { return e.cybleClient.EnrichURL(ctx, rawURL) }},
 		{"recorded-future", func() (*EnrichmentResult, error) { return e.rfClient.EnrichURL(ctx, rawURL) }},
 		{"mandiant", func() (*EnrichmentResult, error) { return e.mandiantClient.EnrichURL(ctx, rawURL) }},
+		{"threatintel", func() (*EnrichmentResult, error) { return e.tiClient.EnrichURL(ctx, rawURL) }},
 	}
 	return mergeResults(IOCTypeURL, rawURL, runFanOut(ctx, rawURL, tasks)), nil
 }

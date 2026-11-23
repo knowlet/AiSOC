@@ -91,11 +91,6 @@ _SEVERITY_BANDS: tuple[tuple[int, str], ...] = (
 #: every real detection that landed in the same window.
 _VULN_RULE_GROUPS: tuple[str, ...] = ("vulnerability-detector", "vulnerability")
 
-#: Hits requested per inventory page. The indexer applies this before
-#: :func:`is_vulnerability_source`, so a full page is not the end of the
-#: window. ``DEFAULT_MAX_PAGES`` bounds the ``search_after`` walk.
-_FINDINGS_PAGE_SIZE = 1000
-
 
 def is_vulnerability_source(source: dict[str, Any]) -> bool:
     """True if an indexer ``_source`` document is a vulnerability-detector event.
@@ -174,6 +169,27 @@ class WazuhConnector(BaseConnector):
     connector_id = "wazuh"
     connector_name = "Wazuh"
     connector_category = "siem"
+
+    #: Event-time watermark over the alert stream (issue #1860). The indexer
+    #: can run hours behind the manager — a flood-stage watermark blocks
+    #: filebeat while the connector's polls keep succeeding on empty windows —
+    #: and a clock-derived window never re-requests what drains late. The
+    #: cursor advances only on rows ingest accepted, so an empty poll holds
+    #: the window's left edge and the gap is re-read when the backlog lands.
+    #: The declared names are documentation of *which* values the cursor
+    #: carries; the accessors below read them from where the indexer actually
+    #: puts them (``@timestamp`` lives under ``_source``, the id at top level).
+    checkpoint_time_field = ("@timestamp",)
+    checkpoint_id_field = ("_id",)
+
+    def _row_time(self, row: dict[str, Any]) -> str:
+        source = row.get("_source")
+        value = (source or {}).get("@timestamp") if isinstance(source, dict) else None
+        return str(value) if value not in (None, "") else ""
+
+    def _row_id(self, row: dict[str, Any]) -> str:
+        value = row.get("_id")
+        return str(value) if value not in (None, "") else ""
 
     @classmethod
     def capabilities(cls) -> tuple[Capability, ...]:
@@ -344,9 +360,12 @@ class WazuhConnector(BaseConnector):
 
         Uses the OpenSearch ``_search`` API on ``wazuh-alerts-*`` with a
         time-window filter so we never re-pull historical events.
-        Pagination is bounded to 1000 hits per poll because anything
-        larger means the operator should drop the polling interval, not
-        chase a single huge batch.
+        1000 is the page size, not a cap: the window is read to the end
+        through ``search_after`` (see :meth:`_search`). It used to be a
+        hard bound justified as "drop the polling interval instead" — but
+        the cut was silent, and because the next poll's window opens where
+        this one closed, the overflow was never re-requested by anything
+        (#1820).
 
         In ``vuln_mode=inventory`` (the default) vulnerability-detector hits
         are excluded here and returned by
@@ -355,7 +374,19 @@ class WazuhConnector(BaseConnector):
         scheduler's ``filter_rules`` are tenant-controlled and evaluated
         after normalization, so dropping here is the only place the two
         streams provably cannot both claim the same event.
+
+        The window opens at the persisted cursor, not at ``now - since``
+        (issue #1860): the indexer can be hours behind the manager while
+        every poll here succeeds on an empty window, and a clock-derived
+        left edge never re-requests what filebeat drains late. The cursor
+        advances only on accepted rows, so the gap is re-read when the
+        backlog becomes queryable; :meth:`apply_checkpoint` drops what the
+        overlap re-reads. An operator can rewind further than the lookback
+        cap by patching ``connector_config.checkpoint.time`` back — the
+        manual backfill the issue asked for, through a knob that already
+        exists.
         """
+        effective_since = self.checkpointed_since_seconds(since_seconds)
         query: dict[str, Any] = {
             "size": 1000,
             "sort": [{"@timestamp": {"order": "asc"}}],
@@ -365,7 +396,7 @@ class WazuhConnector(BaseConnector):
                         {
                             "range": {
                                 "@timestamp": {
-                                    "gte": f"now-{max(int(since_seconds), 0)}s",
+                                    "gte": f"now-{max(int(effective_since), 0)}s",
                                     "lte": "now",
                                 }
                             }
@@ -384,16 +415,28 @@ class WazuhConnector(BaseConnector):
                 {"terms": {"rule.groups": list(_VULN_RULE_GROUPS)}},
             ]
 
-        hits = await self._search(query)
+        hits = await self._search(query, feed="wazuh.alerts")
+        # Dedup against the cursor and stage its advance *before* the vuln
+        # filter: a row the filter drops was read and deliberately excluded,
+        # which is not the same as never requested, so the cursor may move
+        # past it.
+        fresh = self.apply_checkpoint([hit for hit in hits if isinstance(hit, dict)])
         if self._vuln_mode != "inventory":
-            return [self.normalize(hit) for hit in hits if isinstance(hit, dict)]
+            return [self.normalize(hit) for hit in fresh]
         # belt-and-braces: the must_not above misses custom rule packs that
         # re-home detector events under a different group, so re-check the
         # document shape itself before anything reaches the alert stream.
-        return [self.normalize(hit) for hit in hits if isinstance(hit, dict) and not is_vulnerability_source(hit.get("_source") or {})]
+        return [self.normalize(hit) for hit in fresh if not is_vulnerability_source(hit.get("_source") or {})]
 
     async def fetch_vulnerability_findings(self, since_seconds: int = 3600) -> list[dict[str, Any]]:
         """Pull recent vulnerability-detector events as inventory findings.
+
+        Deliberately *not* on the alert stream's cursor (#1860): a connector
+        instance persists one checkpoint, and splitting it across two streams
+        would let whichever read last drag the other's left edge forward.
+        This stream keeps the clock window; its CVE findings are reconciled
+        state whose lifecycle re-converges on later polls, where a missed
+        alert is simply gone.
 
         Called by the scheduler's vulnerability-sync gate (it detects this
         method's presence), which feeds :func:`app.vulnerabilities.sync_findings`
@@ -402,19 +445,19 @@ class WazuhConnector(BaseConnector):
         ``(tenant, asset, cve, source)`` so repeat scans touch ``last_found``
         instead of multiplying rows.
 
-        The window is wider than the alert poll (1h vs 5min). The detector's
-        scan interval is hourly, so a narrow window would drop findings
-        between polls if the connector was down. Re-scans are idempotent on
-        ``(tenant, asset, cve, source)``.
+        The window is wider than the alert poll (1h vs 5min) and read to
+        the end through :meth:`_search`, the same ``search_after`` loop the
+        alert poll uses, 1000 hits per page. The detector's own scan
+        interval is hourly, so a narrow window would drop findings between
+        polls if the connector was down, and re-scans are idempotent anyway.
 
-        The indexer applies ``size`` before :func:`is_vulnerability_source`.
-        The selector is wider than that classifier: an empty
+        The selector is wider than :func:`is_vulnerability_source`. An empty
         ``data.vulnerability`` object is not indexed, so the CVE has to be
         selected at ``data.cve``, and exploit alerts carry that same leaf.
-        One oldest-first page of those alerts used to be the whole read, and
-        a window of older ``data.cve`` alerts returned no findings. Pages
-        walk newest-first via ``search_after`` until a short page or
-        ``DEFAULT_MAX_PAGES``.
+        The classifier runs on the rows the shared reader returned. A page
+        of those alerts is not the end of the window: stopping after
+        ``size`` hits, before classification, dropped every finding once
+        1,000 older ``data.cve`` alerts filled the page.
 
         In ``vuln_mode=alerts`` this returns nothing: that mode puts
         detector events in the alert stream (legacy behaviour), and the
@@ -423,96 +466,9 @@ class WazuhConnector(BaseConnector):
         """
         if self._vuln_mode != "inventory":
             return []
-
-        findings: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        search_after: list[Any] | None = None
-        tiebreak = True
-        fetched = 0
-        pages = 0
-        while pages < DEFAULT_MAX_PAGES:
-            hits, status = await self._search_result(self._vulnerability_query(since_seconds, search_after, tiebreak=tiebreak))
-            # Stock Wazuh maps alert ``id`` as keyword. A text mapping rejects
-            # the tiebreak with 400; drop it and read the first page again.
-            # A later page keeps the sort that produced its cursor.
-            if status == 400 and tiebreak and search_after is None:
-                tiebreak = False
-                continue
-            if status != 200:
-                break
-
-            pages += 1
-            if not hits:
-                break
-
-            fresh = False
-            for hit in hits:
-                if not isinstance(hit, dict):
-                    continue
-                doc_id = hit.get("_id")
-                if isinstance(doc_id, str):
-                    if doc_id in seen:
-                        continue
-                    seen.add(doc_id)
-                fresh = True
-                fetched += 1
-                if not is_vulnerability_source(hit.get("_source") or {}):
-                    continue
-                finding = self.normalize_vulnerability(hit)
-                if finding is not None:
-                    findings.append(finding)
-
-            if not fresh or len(hits) < _FINDINGS_PAGE_SIZE:
-                break
-            cursor = hits[-1].get("sort") if isinstance(hits[-1], dict) else None
-            if not isinstance(cursor, list) or not cursor or cursor == search_after:
-                logger.warning(
-                    "wazuh.vulnerability_findings.cursor_stuck",
-                    pages=pages,
-                    findings=len(findings),
-                )
-                break
-            search_after = cursor
-        else:
-            logger.warning(
-                "wazuh.vulnerability_findings.page_cap_reached",
-                pages=DEFAULT_MAX_PAGES,
-                fetched=fetched,
-                findings=len(findings),
-                detail="the window was not read to the end; rows beyond this point are not re-requested by a later poll",
-            )
-
-        logger.info(
-            "wazuh.vulnerability_findings",
-            fetched=fetched,
-            findings=len(findings),
-            pages=pages,
-            window_seconds=since_seconds,
-        )
-        return findings
-
-    def _vulnerability_query(self, since_seconds: int, search_after: list[Any] | None, *, tiebreak: bool) -> dict[str, Any]:
-        """One inventory page, newest relevant candidate first.
-
-        ``data.cve`` stays in the selector. An empty ``data.vulnerability``
-        object has no indexed field, and custom detectors put the CVE on
-        that leaf; dropping the clause would lose them, and exploit alerts
-        that share the leaf are rejected by :func:`is_vulnerability_source`
-        after the page comes back. The page is not the whole read — see
-        :meth:`fetch_vulnerability_findings`.
-
-        ``id`` is the alert id Wazuh's template maps as keyword. It is the
-        tiebreak ``search_after`` needs: without one, documents that share
-        ``@timestamp`` have no order and the next page skips them. ``_id``
-        is not used — it has no doc values, and it is unique only inside a
-        single index while the pattern spans ``wazuh-alerts-*``.
-        """
-        sort: list[dict[str, Any]] = [{"@timestamp": {"order": "desc"}}]
-        if tiebreak:
-            sort.append({"id": {"order": "asc", "missing": "_last", "unmapped_type": "keyword"}})
-        query: dict[str, Any] = {
-            "size": _FINDINGS_PAGE_SIZE,
-            "sort": sort,
+        query = {
+            "size": 1000,
+            "sort": [{"@timestamp": {"order": "asc"}}],
             "query": {
                 "bool": {
                     "must": [
@@ -524,13 +480,10 @@ class WazuhConnector(BaseConnector):
                                 }
                             }
                         },
-                        # Include both known groups and custom detector payloads.
-                        # Query indexed CVE leaves, not the object itself: an
-                        # empty vulnerability object may use data.cve instead.
-                        # This is a candidate superset; is_vulnerability_source
-                        # keeps exploit alerts carrying data.cve out of inventory.
-                        # The superset is paged, not truncated at the first
-                        # 1000 hits, or those exploits fill the page.
+                        # Recognized groups and indexed CVE leaves. data.cve is a
+                        # candidate superset; is_vulnerability_source below keeps
+                        # exploit alerts that carry it out of inventory. Paging
+                        # is _search, not a second loop.
                         {
                             "bool": {
                                 "should": [
@@ -545,54 +498,122 @@ class WazuhConnector(BaseConnector):
                 }
             },
         }
-        if search_after is not None:
-            query["search_after"] = search_after
-        return query
 
-    async def _search(self, query: dict[str, Any]) -> list[dict[str, Any]]:
-        """POST an OpenSearch DSL query at the alert index; return raw hits.
+        hits = await self._search(query, feed="wazuh.vulnerability_findings")
+        findings: list[dict[str, Any]] = []
+        for hit in hits:
+            if not isinstance(hit, dict) or not is_vulnerability_source(hit.get("_source") or {}):
+                continue
+            finding = self.normalize_vulnerability(hit)
+            if finding is not None:
+                findings.append(finding)
+        logger.info(
+            "wazuh.vulnerability_findings",
+            fetched=len(hits),
+            findings=len(findings),
+            window_seconds=since_seconds,
+        )
+        return findings
+
+    async def _search(self, query: dict[str, Any], *, feed: str) -> list[dict[str, Any]]:
+        """POST an OpenSearch DSL query at the alert index; read it to the end.
 
         Shared by both fetch paths so auth, error handling and the
-        never-raise contract live once: a failed search returns ``[]`` and
-        logs, because the scheduler's failure recorder must see a fetch
-        return, not an exception escaping into the poll loop.
-        """
-        hits, _status = await self._search_result(query)
-        return hits
+        never-raise contract live once: a failed opening search returns
+        ``[]`` and logs, because the scheduler's failure recorder must see a
+        fetch return, not an exception escaping into the poll loop.
 
-    async def _search_result(self, query: dict[str, Any]) -> tuple[list[dict[str, Any]], int | None]:
-        """``(hits, status)``. Status is ``None`` when no HTTP response arrived.
-
-        A 200 with no hits is ``([], 200)``, which is not the same as a
-        rejected query. The inventory reader retries a 400 that names the
-        tiebreak field; every other caller uses :meth:`_search`.
+        The read follows ``search_after`` to the end of the window. Both
+        callers sort ascending on ``@timestamp``; a ``_doc`` tiebreaker is
+        appended here because ``search_after`` needs a total order — on
+        equal timestamps a timestamp-only sort can skip or repeat rows
+        between pages. ``size`` is the page size, not a cap: a page shorter
+        than ``size`` ends the window, a failed later page keeps what was
+        already read, and the page bound announces itself when it binds.
+        Before this, anything past the first page was silently gone, and
+        because the next poll's window opens where this one closed, nothing
+        ever asked for the overflow again (#1820).
         """
+        body = dict(query)
+        sort = [entry for entry in (body.get("sort") or []) if isinstance(entry, dict)]
+        if not any("_doc" in entry for entry in sort):
+            sort.append({"_doc": {"order": "asc"}})
+        body["sort"] = sort
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=self._verify_tls) as client:
-                resp = await client.post(
-                    f"{self._base_url}/{self._index_pattern}/_search",
-                    headers=self._headers(),
-                    json=query,
-                )
-        except httpx.RequestError as exc:
-            logger.warning("wazuh.fetch_exception", error=str(exc))
-            return [], None
+            page_size = int(body.get("size") or 0)
+        except (TypeError, ValueError):
+            page_size = 0
+        page_size = page_size or 1000
 
-        if resp.status_code != 200:
+        hits: list[dict[str, Any]] = []
+        page: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_tls) as client:
+            for page_number in range(DEFAULT_MAX_PAGES):
+                try:
+                    resp = await client.post(
+                        f"{self._base_url}/{self._index_pattern}/_search",
+                        headers=self._headers(),
+                        json=body,
+                    )
+                except httpx.RequestError as exc:
+                    if page_number == 0:
+                        logger.warning("wazuh.fetch_exception", error=str(exc))
+                        return []
+                    # Keep what was read; a failure part-way is not a reason
+                    # to discard the pages that succeeded.
+                    logger.warning("connector.paging.next_page_error", feed=feed, rows=len(hits), error=str(exc))
+                    return hits
+
+                if resp.status_code != 200:
+                    if page_number == 0:
+                        logger.warning(
+                            "wazuh.search_failed",
+                            status=resp.status_code,
+                            body=resp.text[:300],
+                        )
+                        return []
+                    logger.warning(
+                        "connector.paging.next_page_failed",
+                        feed=feed,
+                        status=resp.status_code,
+                        rows=len(hits),
+                        body=resp.text[:300],
+                    )
+                    return hits
+
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    if page_number == 0:
+                        logger.warning("wazuh.search_returned_non_json")
+                        return []
+                    logger.warning("connector.paging.next_page_unparseable", feed=feed, rows=len(hits))
+                    return hits
+
+                page = (payload.get("hits") or {}).get("hits") or []
+                hits.extend(page)
+                if len(page) < page_size:
+                    return hits
+
+                last = page[-1] if isinstance(page[-1], dict) else {}
+                last_sort = last.get("sort")
+                if not isinstance(last_sort, list) or not last_sort:
+                    # A full page whose last hit carries no sort values cannot
+                    # be continued safely; keep what was read and say so
+                    # rather than re-reading page one forever.
+                    logger.warning("connector.paging.no_continuation_values", feed=feed, rows=len(hits))
+                    return hits
+                body = {**body, "search_after": last_sort}
+
+        if len(page) >= page_size:
             logger.warning(
-                "wazuh.search_failed",
-                status=resp.status_code,
-                body=resp.text[:300],
+                "connector.paging.page_cap_reached",
+                feed=feed,
+                pages=DEFAULT_MAX_PAGES,
+                rows=len(hits),
+                detail="the window was not read to the end; rows beyond this point are not re-requested by a later poll",
             )
-            return [], resp.status_code
-
-        try:
-            payload = resp.json()
-        except ValueError:
-            logger.warning("wazuh.search_returned_non_json")
-            return [], None
-
-        return (payload.get("hits") or {}).get("hits") or [], resp.status_code
+        return hits
 
     def normalize_vulnerability(self, hit: dict[str, Any]) -> dict[str, Any] | None:
         """Project a detector hit into the ``sync_findings`` finding shape.
@@ -681,7 +702,10 @@ class WazuhConnector(BaseConnector):
             "title": rule_desc,
             "description": (source.get("full_log") or rule_desc)[:1000],
             "alert_id": alert_id,
-            "external_id": rule_id,
+            # Ingest derives the replay-stable source event UUID from this
+            # field. A rule id would collapse distinct hits into one payload
+            # id and make fusion's occurrence guard discard real repeats.
+            "external_id": alert_id,
             "rule_level": rule_level,
             "rule_id": rule_id,
             "rule_groups": rule.get("groups") or [],

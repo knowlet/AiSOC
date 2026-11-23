@@ -19,9 +19,11 @@ for ``"secret"``) is caught at import time, not at form-render time.
 from __future__ import annotations
 
 import hashlib
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -31,6 +33,31 @@ if TYPE_CHECKING:
     from app.federated.query import UnifiedQuery
 
 logger = structlog.get_logger()
+
+
+def _parse_checkpoint_time(value: str) -> datetime | None:
+    """An ISO 8601 timestamp as the aware UTC instant it names, or None.
+
+    A naive value is read as UTC, matching :meth:`BaseConnector.checkpointed_since_seconds`.
+    Anything ``fromisoformat`` cannot read returns None so the caller can fall
+    back to the previous text comparison instead of guessing where a row
+    belongs: an unparseable time is never a reason to drop a row.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+#: Sort placeholder for a row whose time does not parse. It sorts before every
+#: real instant, so the staged cursor comes from the newest parseable row
+#: rather than naming a row no later poll can place.
+_MIN_CHECKPOINT_TIME = datetime.min.replace(tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +759,20 @@ class BaseConnector(ABC):
     #: the default) regardless of what the source calls things.
     max_dedup_identities: int = 10_000
 
+    #: Ceiling on how far back the persisted cursor may widen one poll's
+    #: request window (issue #1860). A source that has been behind for longer
+    #: than this loses whatever is older — the cap binding is logged at
+    #: warning, because a capped backfill is a data-loss decision an operator
+    #: should get to see. A week covers every outage anyone has reported
+    #: while keeping the worst-case backlog query bounded.
+    max_checkpoint_lookback_seconds: int = 7 * 24 * 3600
+
+    #: Clock-skew cushion added when the window opens at the cursor: the
+    #: cursor time was minted by the *source*, and the window is computed
+    #: against this host's clock. Re-reading one extra minute costs only
+    #: rows :meth:`apply_checkpoint` already drops.
+    checkpoint_overlap_seconds: int = 60
+
     #: Staged by :meth:`apply_checkpoint`, read by the scheduler after ingest
     #: accepts the batch. Declared here so it has one type rather than being
     #: introduced inside a branch.
@@ -811,6 +852,82 @@ class BaseConnector(ABC):
         advances it.
         """
         return self._next_checkpoint
+
+    def checkpointed_since_seconds(self, since_seconds: int, *, now: datetime | None = None) -> int:
+        """The lookback this poll should request, opened at the cursor.
+
+        The sliding window ``[now - since, now]`` permanently loses whatever
+        the source publishes *late*: a poll during a source-side outage
+        succeeds and returns nothing, the next window opens where the clock
+        says, and the backlog that drains afterwards — carrying original
+        timestamps inside windows already polled — is never requested again.
+        Issue #1860 proved it end to end with canary events against a Wazuh
+        indexer that spent eight hours behind a flood-stage watermark: every
+        poll green, every canary lost, no backfill fired, because the
+        backfill worker keys on the *connector's* failures and the connector
+        never failed.
+
+        A connector that declares an event-time watermark can instead open
+        its window at the persisted cursor. The cursor advances only when
+        ingest accepts rows (see :meth:`apply_checkpoint` and the
+        scheduler's persistence ordering), so successful-but-empty polls
+        hold the left edge in place and the window *grows over the gap*
+        instead of sliding past it — the late backlog is requested the
+        moment it becomes queryable, and :meth:`apply_checkpoint` drops the
+        rows the overlap re-reads.
+
+        Growth is bounded by ``max_checkpoint_lookback_seconds``; the cap
+        binding is logged at warning because it is the point where this
+        protection stops and real loss resumes. With no usable cursor —
+        first poll, a connector that does not checkpoint, or an unparseable
+        stored time — the answer is ``since_seconds`` unchanged, which is
+        exactly today's behaviour.
+        """
+        cursor = self._incoming_checkpoint or {}
+        raw_time = str(cursor.get("time") or "")
+        if not raw_time:
+            return since_seconds
+        cursor_time = _parse_checkpoint_time(raw_time)
+        if cursor_time is None:
+            logger.debug(
+                "connector.checkpoint.unparseable_time",
+                connector=self.connector_id,
+                time=raw_time[:64],
+            )
+            return since_seconds
+
+        current = now or datetime.now(UTC)
+        gap = math.ceil((current - cursor_time).total_seconds()) + self.checkpoint_overlap_seconds
+        if gap <= since_seconds:
+            return since_seconds
+        if gap > self.max_checkpoint_lookback_seconds:
+            logger.warning(
+                "connector.checkpoint.lookback_capped",
+                connector=self.connector_id,
+                cursor_age_seconds=gap,
+                cap_seconds=self.max_checkpoint_lookback_seconds,
+                detail=(
+                    "events older than the cap are not requested; rewind connector_config.checkpoint deliberately to reach further back"
+                ),
+            )
+            return self.max_checkpoint_lookback_seconds
+        return gap
+
+    def contiguous_since_seconds(self, since_seconds: int, *, now: datetime | None = None) -> int:
+        """The lookback that keeps consecutive polls contiguous (#1971).
+
+        The clock window ``[now - since, now]`` loses the interval between
+        two polls whenever the scheduler skips one: a poll that overruns its
+        interval has its next run dropped (``max_instances=1``,
+        ``coalesce=True``), and the poll after it opens one interval later.
+        Asking for two intervals instead covers exactly one skipped run,
+        with no cursor needed, and the persisted cursor covers anything
+        longer through :meth:`checkpointed_since_seconds`. The overlap
+        re-reads rows :meth:`apply_checkpoint` already drops, so the extra
+        read costs a re-request, never a lost row.
+        """
+        lookback = max(1, int(since_seconds))
+        return max(2 * lookback, self.checkpointed_since_seconds(lookback, now=now))
 
     # ----------------------------- acknowledgement (phase 3) -----------------
     #
@@ -924,6 +1041,20 @@ class BaseConnector(ABC):
     def _row_identity(self, row: dict[str, Any]) -> str:
         return self._first_present(row, self.dedup_identity_field)
 
+    def _checkpoint_order(self, row: dict[str, Any]) -> tuple[int, datetime, str, str]:
+        """Sort position of a row under the cursor: instant, then id.
+
+        A row whose time parses sorts by the instant it names, with the id
+        breaking ties within one instant. A row whose time does not parse
+        sorts before every real instant, ordered by its raw text, so the
+        staged cursor comes from the newest parseable row rather than naming
+        a row no later poll can place.
+        """
+        instant = _parse_checkpoint_time(self._row_time(row))
+        if instant is None:
+            return (0, _MIN_CHECKPOINT_TIME, self._row_time(row), self._row_id(row))
+        return (1, instant, "", self._row_id(row))
+
     def apply_checkpoint(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """De-duplicate against the cursor and stage the advance.
 
@@ -931,20 +1062,35 @@ class BaseConnector(ABC):
         it is safe to call unconditionally from ``fetch_alerts``. Dispatches
         on which cursor the connector declared: an event-time watermark for an
         ordered poll, a bounded identity set for an unordered queue.
+
+        Rows are ordered and compared by the instant their time names, not
+        by the text the vendor sent (#1970): ``...10:00:00.500Z`` is half a
+        second after ``...10:00:00Z`` but sorts before it as text, and
+        ``...11:00:00+05:00`` (06:00Z) sorts after ``...10:00:00Z``. The id
+        breaks ties within one instant. A time that does not parse keeps the
+        old text comparison, so a vendor that stops sending ISO timestamps
+        degrades to the previous behaviour instead of dropping rows a parse
+        failure cannot place.
         """
         if self.dedup_identity_field:
             return self._apply_identity_dedup(rows)
         if not self.checkpoints():
             return rows
 
-        ordered = sorted(rows, key=lambda r: (self._row_time(r), self._row_id(r)))
+        ordered = sorted(rows, key=self._checkpoint_order)
         cursor = self._incoming_checkpoint or {}
+        cursor_time = _parse_checkpoint_time(str(cursor.get("time") or ""))
         cursor_key = (str(cursor.get("time") or ""), str(cursor.get("id") or ""))
 
         fresh: list[dict[str, Any]] = []
         for row in ordered:
-            if cursor_key[0] and (self._row_time(row), self._row_id(row)) <= cursor_key:
-                continue
+            if cursor_key[0]:
+                row_time = _parse_checkpoint_time(self._row_time(row))
+                if row_time is not None and cursor_time is not None:
+                    if (row_time, self._row_id(row)) <= (cursor_time, cursor_key[1]):
+                        continue
+                elif (self._row_time(row), self._row_id(row)) <= cursor_key:
+                    continue
             fresh.append(row)
 
         # Staged, never persisted here. Advancing on read rather than on

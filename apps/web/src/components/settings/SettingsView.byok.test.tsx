@@ -16,6 +16,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { NavigationTestProvider } from '@/test/NavigationTestProvider';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SWR mock — keyed cache so we can return per-call data
@@ -173,7 +174,8 @@ async function renderDeploymentTab(options: {
     swrErrors.delete(CRED_KEY);
   }
 
-  render(<SettingsView />);
+  window.history.replaceState(null, '', '/settings');
+  render(<SettingsView />, { wrapper: NavigationTestProvider });
 
   // Navigate to the Deployment & AI tab
   const deploymentTab = await screen.findByRole('button', {
@@ -296,7 +298,7 @@ describe('WS-H2 — BYOKCard: edit/create form', () => {
     const apiKeyInput = await screen.findByLabelText(/api key/i);
     await userEvent.type(apiKeyInput, 'sk-test-key-123');
 
-    const modelInput = screen.getByPlaceholderText('provider default');
+    const modelInput = screen.getByRole('textbox', { name: /^model\b/i });
     await userEvent.type(modelInput, 'gpt-4o');
 
     const saveBtn = screen.getByRole('button', { name: /save credential/i });
@@ -313,6 +315,38 @@ describe('WS-H2 — BYOKCard: edit/create form', () => {
       ),
     );
     expect(mockToastSuccess).toHaveBeenCalledWith('BYOK credential saved.');
+  });
+
+  it('distinguishes provider defaults from endpoint-defined model names', async () => {
+    await renderDeploymentTab({ credential: null });
+    await userEvent.click(
+      await screen.findByRole('button', { name: /configure byok/i }),
+    );
+
+    const providerSelect = screen.getByRole('combobox', { name: /provider/i });
+    const defaultHint = /leave blank for the selected provider default/i;
+    const endpointHint =
+      /enter the model served by this endpoint.*deployment name.*gateway alias/i;
+
+    for (const provider of ['anthropic', 'openai']) {
+      await userEvent.selectOptions(providerSelect, provider);
+      expect(screen.getByRole('textbox', { name: /^model\b/i })).toBeInTheDocument();
+      expect(screen.getByText(defaultHint)).toBeInTheDocument();
+      expect(screen.queryByText(endpointHint)).not.toBeInTheDocument();
+    }
+
+    for (const provider of [
+      'azure-openai',
+      'local-ollama',
+      'local-vllm',
+      'local-litellm',
+      'custom',
+    ]) {
+      await userEvent.selectOptions(providerSelect, provider);
+      expect(screen.getByRole('textbox', { name: /^model\b/i })).toBeInTheDocument();
+      expect(screen.getByText(endpointHint)).toBeInTheDocument();
+      expect(screen.queryByText(defaultHint)).not.toBeInTheDocument();
+    }
   });
 
   it('shows inline validation error when openai API key is missing', async () => {
@@ -547,7 +581,7 @@ describe('BYOKCard: model discovery for the custom provider', () => {
     );
 
     await userEvent.selectOptions(picker, 'acme/chat-small');
-    expect(screen.getByPlaceholderText('provider default')).toHaveValue(
+    expect(screen.getByRole('textbox', { name: /^model\b/i })).toHaveValue(
       'acme/chat-small',
     );
 
@@ -588,7 +622,7 @@ describe('BYOKCard: model discovery for the custom provider', () => {
     ).not.toBeInTheDocument();
 
     await userEvent.type(
-      screen.getByPlaceholderText('provider default'),
+      screen.getByRole('textbox', { name: /^model\b/i }),
       'hand-typed-model',
     );
     await userEvent.click(

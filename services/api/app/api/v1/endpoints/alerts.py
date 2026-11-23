@@ -8,8 +8,9 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, func, select, update
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import String as SAString
+from sqlalchemy import and_, cast, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.deps import AuthUser, DBSession, require_permission
@@ -801,12 +802,27 @@ async def list_alerts(
     ),
     severity: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    unresolved_only: bool = Query(
+        default=False,
+        description="Restrict to unresolved alerts (alert_status.unresolved_filter: any "
+        "status that is not terminal). Dashboard tiles deep-link with this so the "
+        "clicked number and the resulting list answer the same question.",
+    ),
+    disposition: str | None = Query(
+        default=None,
+        description="Exact-match on the triage disposition (e.g. 'needs_review'). "
+        "Composable with `status`; the operator queue uses status-less + "
+        "disposition=needs_review to span new+triaged escalated rows.",
+    ),
     category: str | None = Query(default=None),
     assigned_to_me: bool = Query(default=False),
     search: str | None = Query(default=None),
     min_confidence: int | None = Query(default=None, ge=0, le=100),
     confidence_label: str | None = Query(default=None),
     sort: Literal["newest", "priority"] = Query(default="newest"),
+    event_since: Annotated[AwareDatetime | None, Query(description="Inclusive event_time lower bound")] = None,
+    event_until: Annotated[AwareDatetime | None, Query(description="Exclusive event_time upper bound")] = None,
+    hostname: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
 ) -> AlertListResponse:
     """List alerts for the current tenant with filtering and pagination.
 
@@ -854,14 +870,44 @@ async def list_alerts(
 
     filters = [Alert.tenant_id == current_user.tenant_id]
 
+    if event_since is not None and event_until is not None and event_since >= event_until:
+        raise HTTPException(status_code=400, detail="event_since must precede event_until")
+    if event_since is not None:
+        filters.append(Alert.event_time >= event_since)
+    if event_until is not None:
+        filters.append(Alert.event_time < event_until)
+    if hostname is not None:
+        # Production fusion writes entities; older imports may use affected_hosts.
+        filters.append(or_(Alert.entities.contains([{"type": "host", "value": hostname}]), Alert.affected_hosts.contains([hostname])))
+
     if severity:
         filters.append(Alert.severity == severity)
     if status:
         filters.append(Alert.status == status)
+    if unresolved_only:
+        filters.append(unresolved_filter(Alert.status))
+    if disposition:
+        filters.append(Alert.disposition == disposition)
     if category:
         filters.append(Alert.category == category)
     if assigned_to_me:
         filters.append(Alert.assigned_to_id == current_user.user_id)
+    if search:
+        # Free-text over the columns an analyst pastes into search: alert id,
+        # title, rule name/id, entity-ish fields. ILIKE so case never bites;
+        # `%` wrapped for substring matching. Cast id to text because the box
+        # accepts pasted UUIDs.
+        pattern = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                Alert.title.ilike(pattern),
+                Alert.description.ilike(pattern),
+                Alert.rule_name.ilike(pattern),
+                Alert.rule_id.ilike(pattern),
+                Alert.category.ilike(pattern),
+                cast(Alert.id, SAString).ilike(pattern),
+            )
+        )
     if min_confidence is not None:
         filters.append(Alert.confidence >= min_confidence)
     if confidence_label is not None:
@@ -897,7 +943,7 @@ async def list_alerts(
 
     # Fetch. `created_at` is always the final key so the order is total and
     # paging cannot repeat or skip a row.
-    order_by = [Alert.created_at.desc()]
+    order_by = [Alert.created_at.desc(), Alert.id.desc()]
     if sort == "priority":
         order_by.insert(0, severity_rank_expr().asc())
 

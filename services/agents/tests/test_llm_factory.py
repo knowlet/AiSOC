@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+
+import httpx
 import pytest
 from app.llm.factory import (
     UnroutableModelError,
@@ -32,6 +35,7 @@ def _clean_llm_env(monkeypatch):
         "OPENAI_MODEL",
         "LLM_MODEL",
         "AISOC_LLM_MODEL",
+        "AISOC_LLM_THINKING",
         *(f"AISOC_MODEL_PIN_{role.upper()}" for role in all_roles()),
     ):
         monkeypatch.delenv(var, raising=False)
@@ -161,6 +165,48 @@ def test_make_chat_model_reaches_the_gateway_from_compose_alone(monkeypatch):
     assert llm.openai_api_key.get_secret_value() == "sk-aisoc-local"
 
 
+def test_thinking_env_unset_changes_nothing(monkeypatch):
+    """The knob is opt-in: unset, the request carries no `enable_thinking`."""
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-aisoc-local")
+    llm = make_chat_model("triage", max_tokens=256)
+    assert "enable_thinking" not in (llm.extra_body or {})
+
+
+def test_thinking_off_composes_with_the_legacy_max_tokens_merge(monkeypatch):
+    """`enable_thinking: false` must survive the non-OpenAI extra_body merge.
+
+    The gateway deployment is exactly where the knob matters (a thinking-tier
+    model burned 4093 of 4096 completion tokens on reasoning), and it is also
+    exactly where `_needs_legacy_max_tokens` rewrites extra_body — a plain
+    assignment there dropped the knob on the deployments it exists for.
+    """
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-aisoc-local")
+    monkeypatch.setenv("AISOC_LLM_THINKING", "0")
+    llm = make_chat_model("investigation", max_tokens=4096)
+    body = llm.extra_body or {}
+    assert body.get("enable_thinking") is False, f"knob lost in the legacy merge: {body}"
+    assert body.get("max_tokens") == 4096, f"legacy max_tokens lost to the knob: {body}"
+
+
+def test_thinking_off_without_max_tokens(monkeypatch):
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-aisoc-local")
+    monkeypatch.setenv("AISOC_LLM_THINKING", "off")
+    llm = make_chat_model("triage")
+    assert (llm.extra_body or {}).get("enable_thinking") is False
+
+
+def test_thinking_truthy_value_changes_nothing(monkeypatch):
+    """Only 0/off/false disable; any other value leaves the provider default."""
+    monkeypatch.setenv("LLM_GATEWAY_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "sk-aisoc-local")
+    monkeypatch.setenv("AISOC_LLM_THINKING", "1")
+    llm = make_chat_model("triage", max_tokens=64)
+    assert "enable_thinking" not in (llm.extra_body or {})
+
+
 def test_make_chat_model_refuses_an_alias_with_no_gateway(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     with pytest.raises(UnroutableModelError, match="aisoc-triage"):
@@ -179,6 +225,52 @@ def test_byok_model_override_only_when_the_tenant_set_one(monkeypatch):
         llm = make_chat_model("triage")
     assert llm.model_name == "tenant-model"
     assert str(llm.openai_api_base).rstrip("/") == "http://tenant:1/v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", ["https://api.anthropic.com/v1", "https://API.ANTHROPIC.COM/v1/"])
+async def test_direct_anthropic_uses_compatible_request_parameters(monkeypatch, base):
+    monkeypatch.setenv("OPENAI_API_KEY", "deployment-provider-key")
+    seen = []
+
+    def respond(request):
+        seen.append(request)
+        body = json.loads(request.content)
+        # Model the documented compatibility contract at the HTTP boundary.
+        if "response_format" in body or "temperature" in body:
+            return httpx.Response(400, json={"error": {"message": "unsupported parameter"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-transport-test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": body["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": '{"verdict":"escalate"}'}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with llm_override(api_key="tenant-anthropic-key", base_url=base, model="claude-haiku-4-5-20251001"):
+            model = make_chat_model("triage", json_output=True, temperature=0.0, max_tokens=256, http_async_client=client, max_retries=0)
+            response = await model.ainvoke("Return a JSON verdict.")
+
+    assert json.loads(response.content) == {"verdict": "escalate"}
+    assert len(seen) == 1
+    assert seen[0].url.path == "/v1/chat/completions"
+    assert seen[0].headers["authorization"] == "Bearer tenant-anthropic-key"
+    payload = json.loads(seen[0].content)
+    assert payload["max_completion_tokens"] == 256
+    assert "max_tokens" not in payload
+    assert "deployment-provider-key" not in str(seen[0].headers)
+
+
+def test_anthropic_parameter_handling_does_not_apply_to_other_hosts():
+    with llm_override(api_key="tenant-key", base_url="https://api.anthropic.com.example/v1", model="tenant-model"):
+        model = make_chat_model("triage", json_output=True, temperature=0.0)
+    assert model.temperature == 0.0
+    assert model.model_kwargs["response_format"] == {"type": "json_object"}
 
 
 # ── preflight_llm ────────────────────────────────────────────────────────────

@@ -490,9 +490,31 @@
         "type": "string"
       },
       {
+        "help_text": "Leave empty when using a certificate (recommended). Exactly one of secret or certificate is required.",
         "label": "Client Secret",
         "name": "client_secret",
-        "required": true,
+        "required": false,
+        "type": "secret"
+      },
+      {
+        "help_text": "Recommended over a client secret. Paste a PEM containing the PRIVATE KEY (and optionally the CERTIFICATE) for the certificate whose public .cer you uploaded under Entra portal > App registrations > your app > Certificates & secrets.",
+        "label": "Certificate PEM (private key)",
+        "name": "certificate_pem",
+        "required": false,
+        "type": "secret"
+      },
+      {
+        "help_text": "SHA-1 thumbprint shown next to the certificate under App registrations > Certificates & secrets. Optional when the PEM above also contains the certificate.",
+        "label": "Certificate Thumbprint",
+        "name": "certificate_thumbprint",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "help_text": "Only if the private key in the PEM is encrypted.",
+        "label": "Private Key Password",
+        "name": "private_key_password",
+        "required": false,
         "type": "secret"
       }
     ],
@@ -757,6 +779,52 @@
         "help_text": "Paste the entire service-account JSON key.",
         "label": "Service Account JSON",
         "name": "service_account_json",
+        "required": true,
+        "type": "secret"
+      }
+    ]
+  },
+  {
+    "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "cisco_secure_endpoint",
+    "connector_name": "Cisco Secure Endpoint",
+    "description": "Cisco Secure Endpoint (formerly AMP for Endpoints) detections \u2014 threats, quarantines, exploit prevention, behavioural protection, indicators of compromise and threat hunting incidents \u2014 via the v1 events API. Read-only.",
+    "docs_url": "/docs/connectors/cisco-secure-endpoint",
+    "fields": [
+      {
+        "help_text": "The Secure Endpoint cloud the console and the API credential live in.",
+        "label": "Region",
+        "name": "region",
+        "options": [
+          {
+            "label": "North America (api.amp.cisco.com)",
+            "value": "nam"
+          },
+          {
+            "label": "Europe (api.eu.amp.cisco.com)",
+            "value": "eu"
+          },
+          {
+            "label": "Asia Pacific, Japan and China (api.apjc.amp.cisco.com)",
+            "value": "apjc"
+          }
+        ],
+        "required": true,
+        "type": "select"
+      },
+      {
+        "label": "API client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Created in the Secure Endpoint console under Accounts \u2192 API Credentials. Read-only scope is enough.",
+        "label": "API key",
+        "name": "api_key",
         "required": true,
         "type": "secret"
       }
@@ -1422,6 +1490,60 @@
   },
   {
     "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "eset_protect",
+    "connector_name": "ESET PROTECT",
+    "description": "ESET PROTECT detections \u2014 antivirus, HIPS, firewall, network intrusion, web access and ESET Inspect rule hits \u2014 via the ESET Connect API, with the affected device resolved for its hostname, addresses and operating system. Read-only.",
+    "docs_url": "/docs/connectors/eset-protect",
+    "fields": [
+      {
+        "help_text": "The ESET data region your ESET PROTECT Hub or ESET Business Account lives in.",
+        "label": "Region",
+        "name": "region",
+        "options": [
+          {
+            "label": "Europe (eu)",
+            "value": "eu"
+          },
+          {
+            "label": "Germany (de)",
+            "value": "de"
+          },
+          {
+            "label": "United States (us)",
+            "value": "us"
+          },
+          {
+            "label": "Canada (ca)",
+            "value": "ca"
+          },
+          {
+            "label": "Japan (jpn)",
+            "value": "jpn"
+          }
+        ],
+        "required": true,
+        "type": "select"
+      },
+      {
+        "help_text": "A dedicated user with the Integrations toggle on. It must have signed in once before the API accepts it.",
+        "label": "API user email",
+        "name": "username",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "label": "API user password",
+        "name": "password",
+        "required": true,
+        "type": "secret"
+      }
+    ]
+  },
+  {
+    "capabilities": [
       "pull_alerts",
       "pivot_user"
     ],
@@ -1881,6 +2003,32 @@
   },
   {
     "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "huntress",
+    "connector_name": "Huntress",
+    "description": "Huntress Managed EDR incident reports \u2014 footholds, ransomware canaries, process, antivirus, identity and SIEM detections a Huntress SOC analyst has confirmed and delivered \u2014 via the v1 REST API, with the affected host resolved from its agent. Read-only.",
+    "docs_url": "/docs/connectors/huntress",
+    "fields": [
+      {
+        "help_text": "The public half of a Huntress API credential. It is half of the credential, so the vault encrypts it too.",
+        "label": "API key",
+        "name": "api_key",
+        "required": true,
+        "type": "secret"
+      },
+      {
+        "help_text": "Generated with the API key at <your subdomain>.huntress.io under API Credentials.",
+        "label": "API secret key",
+        "name": "api_secret",
+        "required": true,
+        "type": "secret"
+      }
+    ]
+  },
+  {
+    "capabilities": [
       "pull_alerts",
       "pivot_ip",
       "block_ip"
@@ -2170,9 +2318,31 @@
         "type": "string"
       },
       {
+        "help_text": "Leave empty when using a certificate (recommended). Exactly one of secret or certificate is required.",
         "label": "Client Secret",
         "name": "client_secret",
-        "required": true,
+        "required": false,
+        "type": "secret"
+      },
+      {
+        "help_text": "Recommended over a client secret. Paste a PEM containing the PRIVATE KEY (and optionally the CERTIFICATE) for the certificate whose public .cer you uploaded under Entra portal > App registrations > your app > Certificates & secrets.",
+        "label": "Certificate PEM (private key)",
+        "name": "certificate_pem",
+        "required": false,
+        "type": "secret"
+      },
+      {
+        "help_text": "SHA-1 thumbprint shown next to the certificate under App registrations > Certificates & secrets. Optional when the PEM above also contains the certificate.",
+        "label": "Certificate Thumbprint",
+        "name": "certificate_thumbprint",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "help_text": "Only if the private key in the PEM is encrypted.",
+        "label": "Private Key Password",
+        "name": "private_key_password",
+        "required": false,
         "type": "secret"
       }
     ],
@@ -3155,6 +3325,39 @@
   },
   {
     "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "sophos_central",
+    "connector_name": "Sophos Central",
+    "description": "Sophos Central alerts \u2014 endpoint and server threats, exploit and ransomware protection, intrusion prevention \u2014 via the SIEM Integration API, with the data region discovered from the credential. Read-only.",
+    "docs_url": "/docs/connectors/sophos-central",
+    "fields": [
+      {
+        "label": "Client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Created in Sophos Central under Global Settings \u2192 API Credentials Management.",
+        "label": "Client secret",
+        "name": "client_secret",
+        "required": true,
+        "type": "secret"
+      },
+      {
+        "help_text": "Leave blank for a credential created inside the tenant. Required for a partner or organization credential, which can see many tenants: the ID of the tenant whose alerts this connector reads.",
+        "label": "Tenant ID",
+        "name": "tenant_id",
+        "placeholder": "57ca9a6b-885f-4e36-95ec-290548c26059",
+        "required": false,
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "capabilities": [
       "pull_alerts",
       "query_logs",
       "search_siem",
@@ -3690,6 +3893,40 @@
   },
   {
     "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "ndr",
+    "connector_id": "vectra_ai",
+    "connector_name": "Vectra AI Platform",
+    "description": "Network, identity and cloud detections from the Vectra AI Platform via the v3.4 detection events API, one alert per detection with its host or account. Read-only: nothing here closes, tags or triages a detection.",
+    "docs_url": "/docs/connectors/vectra-ai",
+    "fields": [
+      {
+        "help_text": "The address of your Vectra AI Platform console. HTTPS only.",
+        "label": "Portal URL",
+        "name": "base_url",
+        "placeholder": "https://123456789012.uw2.portal.vectra.ai",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Created under Configuration > Access > API Clients, with a role that can read detections.",
+        "label": "API client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Shown once, when the API client is created.",
+        "label": "API client secret key",
+        "name": "client_secret",
+        "required": true,
+        "type": "secret"
+      }
+    ]
+  },
+  {
+    "capabilities": [
       "pull_alerts",
       "pull_vulnerabilities",
       "query_logs",
@@ -3798,6 +4035,39 @@
         "name": "verify_tls",
         "required": false,
         "type": "boolean"
+      }
+    ]
+  },
+  {
+    "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "withsecure_elements",
+    "connector_name": "WithSecure Elements",
+    "description": "WithSecure Elements EDR Broad Context Detections via the Elements API, each raised once with the host, user, process and MITRE ATT&CK techniques of its detections. Read-only.",
+    "docs_url": "/docs/connectors/withsecure-elements",
+    "fields": [
+      {
+        "help_text": "From an API client created in Elements Security Center under Management > Organization Settings > API clients.",
+        "label": "Client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "label": "Client secret",
+        "name": "client_secret",
+        "required": true,
+        "type": "secret"
+      },
+      {
+        "help_text": "The UUID of the organization to read. Leave empty to read the API client's own organization; a partner account sets the customer organization here.",
+        "label": "Organization ID",
+        "name": "organization_id",
+        "placeholder": "ec8a0100-d313-4896-b3cb-02188e060bf3",
+        "required": false,
+        "type": "string"
       }
     ]
   },

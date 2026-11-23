@@ -353,9 +353,9 @@ class TestTheStreamSplit:
         assert {"terms": {"rule.groups": ["vulnerability-detector", "vulnerability"]}} in selector["should"]
         assert {"exists": {"field": "data.vulnerability.cve"}} in selector["should"]
         assert {"exists": {"field": "data.cve"}} in selector["should"]
-        # Newest candidate first. An oldest-first page is what let older
-        # non-matches hide every finding.
-        assert query["sort"][0]["@timestamp"]["order"] == "desc"
+        # The shared reader sorts oldest-first and adds the _doc tiebreak.
+        assert query["sort"][0] == {"@timestamp": {"order": "asc"}}
+        assert {"_doc": {"order": "asc"}} in query["sort"]
 
     @pytest.mark.asyncio
     @respx.mock
@@ -384,47 +384,31 @@ class TestTheStreamSplit:
         assert [item["external_id"] for item in findings] == ["finding"]
         assert findings[0]["cve_id"] == "CVE-2024-9999"
         bodies = [json.loads(call.request.content) for call in route.calls]
-        assert bodies
-        assert all(body["sort"][0]["@timestamp"]["order"] == "desc" for body in bodies)
+        assert len(bodies) >= 2
+        assert all(body["sort"][0] == {"@timestamp": {"order": "asc"}} for body in bodies)
+        assert all({"_doc": {"order": "asc"}} in body["sort"] for body in bodies)
+        assert "search_after" not in bodies[0]
+        assert "search_after" in bodies[1]
         selector = bodies[0]["query"]["bool"]["must"][1]["bool"]["should"]
-        paged = any("search_after" in body for body in bodies)
-        bare_cve = {"exists": {"field": "data.cve"}} in selector
-        # Either the query no longer admits exploit ``data.cve`` hits, or
-        # the read continued past the first page of them.
-        assert paged or not bare_cve
+        assert {"exists": {"field": "data.cve"}} in selector
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_the_findings_walk_stops_at_the_page_cap(self, monkeypatch):
         monkeypatch.setattr("app.connectors.wazuh.DEFAULT_MAX_PAGES", 2)
-        finding = _cve_page_hit("finding", _page_timestamp(6, 0), finding=True)
-        newer = [_cve_page_hit(f"new-{i:04d}", _page_timestamp(18, i), finding=False) for i in range(2000)]
-        corpus = [*newer, finding]
+        # Oldest-first: two full pages of older non-matches hide the finding,
+        # and the shared reader's cap stops the walk there.
+        older = [_cve_page_hit(f"old-{i:04d}", _page_timestamp(6, i), finding=False) for i in range(2000)]
+        finding = _cve_page_hit("finding", _page_timestamp(18, 0), finding=True)
+        corpus = [*older, finding]
         respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(side_effect=lambda request: _page_response(corpus, request))
 
         with structlog.testing.capture_logs() as logs:
             findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
 
         assert findings == []
-        assert [log["event"] for log in logs].count("wazuh.vulnerability_findings.page_cap_reached") == 1
-
-    @pytest.mark.asyncio
-    @respx.mock
-    async def test_findings_sort_falls_back_when_the_id_tiebreak_is_rejected(self):
-        def respond(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            fields = [next(iter(item)) for item in body["sort"]]
-            if "id" in fields:
-                return httpx.Response(400, json={"error": {"type": "illegal_argument_exception"}})
-            return _hits_response([_detector_hit(cve="CVE-2021-44228", host="dev-tmc-01")])
-
-        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(side_effect=respond)
-        findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
-
-        assert [item["cve_id"] for item in findings] == ["CVE-2021-44228"]
-        last = json.loads(route.calls.last.request.content)
-        assert [next(iter(item)) for item in last["sort"]] == ["@timestamp"]
-        assert "search_after" not in last
+        capped = [log for log in logs if log["event"] == "connector.paging.page_cap_reached"]
+        assert [log.get("feed") for log in capped] == ["wazuh.vulnerability_findings"]
 
     @pytest.mark.asyncio
     @respx.mock

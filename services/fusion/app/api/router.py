@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
 from pydantic import BaseModel, Field
 
 from app.models.alert import AnalystFeedback, FusedAlert, FusionDecision, RawAlert
@@ -20,6 +24,46 @@ from app.workers.consumer import FusionWorker
 #: establish the tenant from the caller's credential rather than from a query
 #: parameter. See app/security/tenant_scope.py.
 ScopedPrincipal = Annotated[TenantPrincipal, Depends(require_console_or_service_auth)]
+
+#: Roles that may write alert state through this service, mirroring the
+#: holders of ``alerts:write`` in ``ROLE_PERMISSIONS``
+#: (services/api/app/core/security.py). A mirror rather than an import for
+#: the reason every vendored module here is: this service is built from its
+#: own Docker context and cannot import the API's package.
+#: ``tests/test_process_tenant_scope.py::test_the_role_mirror_matches_the_api``
+#: parses that file and fails if the two drift — a second permission model
+#: that can silently disagree with the first is what this repository refuses.
+_MAY_WRITE_ALERTS: frozenset[str] = frozenset({"admin", "platform_admin", "tenant_admin", "soc_lead", "soc_analyst"})
+
+
+def _require_role(
+    principal: TenantPrincipal,
+    allowed: frozenset[str],
+    *,
+    verb: str,
+    permission: str,
+) -> None:
+    """Refuse a console caller whose role does not carry ``permission``.
+
+    A **service** principal passes. It authenticated with a shared secret,
+    declared its tenant on ``X-AiSOC-Tenant-ID`` and carries no human role,
+    so there is no role to check — refusing it would break the agents
+    service's own synchronous fusion calls while protecting nothing.
+
+    Same shape as the agents service's playbook router (GHSA-8cpf-mchw-jpf2,
+    F15): the vendored principal carries the ``role`` claim precisely so a
+    service without the API's permission engine can still tell a viewer from
+    an analyst.
+    """
+    if principal.delegated:
+        return
+    if principal.role in allowed:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(f"{verb} requires '{permission}'. Your role ({principal.role or 'unknown'}) does not carry it."),
+    )
+
 
 router = APIRouter()
 
@@ -62,6 +106,123 @@ async def metrics():
     return body
 
 
+class _ScrapeSnapshot:
+    """One scrape's worth of samples, collected before registration.
+
+    Prometheus collectors are synchronous, and two of this service's sources
+    (`consumer_lag`, `pending_notifications`) are async — so the route below
+    awaits everything first and this object only renders what it was handed.
+    A fresh instance per scrape also means an unreadable source simply has
+    **no sample this scrape**: the honest-absence rule (`None` is "could not
+    be read", never zero) survives the format change, because a gauge that
+    lingered in a shared registry would keep reporting its last value
+    through an outage.
+    """
+
+    def __init__(
+        self,
+        counters: dict[str, int],
+        lag: int | None,
+        pending: int | None,
+        oldest_seconds: float | None,
+        by_tenant: dict[str, int],
+        lake: dict[str, int] | None,
+        lake_degraded: bool | None,
+    ) -> None:
+        self._counters = counters
+        self._lag = lag
+        self._pending = pending
+        self._oldest_seconds = oldest_seconds
+        self._by_tenant = by_tenant
+        self._lake = lake
+        self._lake_degraded = lake_degraded
+
+    def collect(self) -> Iterable[Metric]:
+        for name, value in sorted(self._counters.items()):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            yield CounterMetricFamily(
+                f"aisoc_fusion_consumer_{name}",
+                f"Cumulative consumer count `{name}` since process start.",
+                value=float(value),
+            )
+        if self._lag is not None:
+            yield GaugeMetricFamily(
+                "aisoc_fusion_consumer_lag",
+                "Backlog across this replica's assigned partitions. Absent when unreadable.",
+                value=float(self._lag),
+            )
+        if self._pending is not None:
+            yield GaugeMetricFamily(
+                "aisoc_fusion_notifications_pending",
+                "Undelivered alert notifications in the journal. Absent when the journal cannot be read.",
+                value=float(self._pending),
+            )
+        if self._oldest_seconds is not None:
+            yield GaugeMetricFamily(
+                "aisoc_fusion_notifications_oldest_seconds",
+                "Age of the oldest undelivered notification.",
+                value=float(self._oldest_seconds),
+            )
+        if self._by_tenant:
+            per_tenant = GaugeMetricFamily(
+                "aisoc_fusion_notifications_pending_by_tenant",
+                "Undelivered notifications per tenant.",
+                labels=["tenant_id"],
+            )
+            for tenant_id, count in sorted(self._by_tenant.items()):
+                per_tenant.add_metric([str(tenant_id)], float(count))
+            yield per_tenant
+        if self._lake is not None:
+            for name, value in sorted(self._lake.items()):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                # Spool/backlog figures are levels, not cumulative counts.
+                family = GaugeMetricFamily if name in ("buffered", "spool_rows", "spool_bytes", "quarantined_rows") else CounterMetricFamily
+                yield family(
+                    f"aisoc_fusion_lake_{name}",
+                    f"Lake writer `{name}`.",
+                    value=float(value),
+                )
+        if self._lake_degraded is not None:
+            yield GaugeMetricFamily(
+                "aisoc_fusion_lake_degraded",
+                "1 when the archive leg is degraded, 0 when healthy.",
+                value=1.0 if self._lake_degraded else 0.0,
+            )
+
+
+@router.get("/metrics/prometheus")
+async def metrics_prometheus() -> Response:
+    """The same figures as `/metrics`, in Prometheus exposition format.
+
+    The JSON `/metrics` predates the bundled Prometheus and answers a shape
+    its scrape job could never parse, so the `aisoc-fusion` job had never
+    recorded a sample (#1881). Both endpoints read the same sources, so they
+    cannot drift; this one renders text format. Worker not started, or a
+    source unreadable, means the corresponding samples are **absent** —
+    never zero — which is the JSON endpoint's `None` rule carried over.
+    Unauthenticated for the same reason `/metrics` is: a scaler scrapes.
+    """
+    registry = CollectorRegistry()
+    worker = _worker_ref
+    if worker is not None:
+        lake = worker.lake
+        pending, oldest_seconds, by_tenant = await worker.pending_notifications()
+        registry.register(
+            _ScrapeSnapshot(
+                counters=worker.get_metrics(),
+                lag=await worker.consumer_lag(),
+                pending=pending,
+                oldest_seconds=oldest_seconds,
+                by_tenant=by_tenant,
+                lake=lake.metrics() if lake is not None else None,
+                lake_degraded=lake.archive_degraded if lake is not None else None,
+            )
+        )
+    return Response(content=generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+
 @router.get("/scale-hint")
 async def scale_hint():
     """Lag-based autoscaling signal (parity 6.9 / depth 4.4).
@@ -94,18 +255,45 @@ async def ml_status(principal: ScopedPrincipal):
 
 @router.post("/ml/feedback")
 async def submit_feedback(feedback: AnalystFeedback, principal: ScopedPrincipal):
-    """Submit analyst feedback to improve ML ranker."""
+    """Submit analyst feedback to improve ML ranker.
+
+    Same contract as ``/process`` (GHSA-qfvv-rf5p-6h69): the body's
+    ``tenant_id`` is validated against the credential, because feedback
+    retrains the ranker — accepting another tenant's id would let any
+    authenticated user poison that tenant's priority model. And it is a
+    write, so ``viewer`` is refused.
+    """
     if _worker_ref is None or _worker_ref.engine is None:
         raise HTTPException(status_code=503, detail="Fusion worker not ready")
+    _require_role(
+        principal,
+        _MAY_WRITE_ALERTS,
+        verb="submitting analyst feedback",
+        permission="alerts:write",
+    )
+    feedback.tenant_id = scoped_tenant_or_403(principal, feedback.tenant_id)
     await _worker_ref.engine.ml_scorer.record_feedback(feedback)
     return {"status": "accepted", "alert_id": str(feedback.alert_id)}
 
 
 @router.post("/ml/retrain")
 async def trigger_retrain(principal: ScopedPrincipal):
-    """Manually trigger ML model retraining."""
+    """Manually trigger ML model retraining.
+
+    Gated on the ``alerts:write`` role set: retraining is an ML-ops action
+    on the models that rank every tenant's queue, and the engine already
+    retrains itself on a sample threshold (``_maybe_retrain``), so the
+    manual trigger is an operator convenience — not something a ``viewer``
+    session should be able to invoke in a loop.
+    """
     if _worker_ref is None or _worker_ref.engine is None:
         raise HTTPException(status_code=503, detail="Fusion worker not ready")
+    _require_role(
+        principal,
+        _MAY_WRITE_ALERTS,
+        verb="triggering ML retraining",
+        permission="alerts:write",
+    )
     result = await _worker_ref.engine.ml_scorer.retrain()
     return result
 
@@ -131,9 +319,33 @@ async def process_alert(alert: RawAlert, principal: ScopedPrincipal) -> FusedAle
     narrative generation all run with the same state as the live
     consumer. A duplicate alert returns a ``FusionDecision.DUPLICATE``
     envelope; a new alert returns a fully scored ``FusedAlert``.
+
+    The body's ``tenant_id`` is a *claim*, not a selector
+    (GHSA-qfvv-rf5p-6h69). This engine instance is shared with the Kafka
+    consumer, so a write lands in the named tenant's live dedup,
+    correlation and RBA state — and the engine attributes the resulting
+    ``FusedAlert`` to that tenant. The route used to accept any
+    authenticated caller's body verbatim, which let a viewer in tenant A
+    inject alerts into tenant B and register dedup fingerprints there,
+    suppressing B's real alerts. The tenant must therefore come from the
+    credential (console claim, or the service token's declared
+    ``X-AiSOC-Tenant-ID``), and the caller must hold a role that carries
+    ``alerts:write`` — submitting an alert is a write, and ``viewer``
+    may not do it even inside its own tenant.
     """
     if _worker_ref is None or _worker_ref.engine is None:
         raise HTTPException(status_code=503, detail="Fusion worker not ready")
+    _require_role(
+        principal,
+        _MAY_WRITE_ALERTS,
+        verb="submitting an alert to the fusion pipeline",
+        permission="alerts:write",
+    )
+    # `tenant_id` is required on `RawAlert`, so this either proves the body
+    # names a tenant the credential covers or refuses with 403. The
+    # assignment is belt-and-braces: the value that reaches the engine is
+    # the resolved one, never the raw body field.
+    alert.tenant_id = scoped_tenant_or_403(principal, alert.tenant_id)
     return await _worker_ref.engine.process(alert)
 
 
@@ -206,7 +418,11 @@ async def entity_risk_detail(
     record = await eng.get(scoped, entity_type, entity_value)
     if record is None:
         raise HTTPException(status_code=404, detail="entity_not_found")
-    return record.to_dict()
+    # The threshold rides along so a consumer of the *detail* route can
+    # answer "is this promoted?" without a second call — the queue envelope
+    # already carries it, and the API gateway's console adapter needs it on
+    # both routes (#1931).
+    return {**record.to_dict(), "threshold": eng.threshold}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,6 +447,12 @@ async def score_confidence(alert: RawAlert, principal: ScopedPrincipal):
     """
     if _worker_ref is None or _worker_ref.engine is None:
         raise HTTPException(status_code=503, detail="Fusion worker not ready")
+    # The scorer is pure and writes nothing, so no role gate — but the
+    # tenant named in the body must still be one the credential covers
+    # (GHSA-qfvv-rf5p-6h69): the projection is attributed to that tenant,
+    # and an unchecked id here is the same class of defect as /process even
+    # when today's scorer happens not to read tenant state.
+    alert.tenant_id = scoped_tenant_or_403(principal, alert.tenant_id)
     scorer = _worker_ref.engine.confidence_scorer
 
     fused = FusedAlert(
@@ -289,6 +511,22 @@ async def replay_dead_letters(request: DlqReplayRequest, principal: ScopedPrinci
     than produced. That is the property that stops a replay reproducing the
     outage that filled the queue.
     """
+    if not principal.delegated:
+        # The docstring above is the contract: the operator door is the API,
+        # which holds the permission check, the tenant session and the audit
+        # row. This route accepted any console session too (any role, any
+        # tenant), which let a viewer execute a replay while bypassing all
+        # three. A replay is deployment-scoped (a topic range, not a tenant's
+        # rows), so the only honest console path is the audited one.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "dead-letter replay is dispatched by the platform API "
+                "(POST /api/v1/health/dead-letters/replay), which holds the "
+                "permission check and the audit row; a console session cannot "
+                "call the fusion service directly"
+            ),
+        )
     try:
         outcome = await replay_from_offset(
             topic=request.topic,

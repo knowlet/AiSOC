@@ -43,8 +43,10 @@ import { ErrorState } from "@/components/ui/ErrorState";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { InvestigationLedger } from "./InvestigationLedger";
 import { WarRoomPanel } from "./WarRoomPanel";
+import { RelatedCasesPanel } from "./RelatedCasesPanel";
 import { ContextualActions } from "@/components/copilot/ContextualActions";
 import { canUseDemoData } from "@/lib/demoFallback";
+import { useUrlTab } from "@/hooks/useUrlTab";
 
 type WorkspaceTab =
   "overview" | "investigation" | "attack-path" | "attack-chain" | "ledger" | "report";
@@ -57,10 +59,6 @@ const VALID_TABS: readonly WorkspaceTab[] = [
   "ledger",
   "report",
 ];
-
-function isWorkspaceTab(value: string | null): value is WorkspaceTab {
-  return value !== null && (VALID_TABS as readonly string[]).includes(value);
-}
 
 // ─── Demo case ────────────────────────────────────────────────────────────────
 
@@ -304,16 +302,7 @@ function TaskRow({ task, onChangeStatus }: TaskRowProps) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export function CaseWorkspace({ caseId }: { caseId: string }) {
-  // Honor `?tab=…` so the hosted demo deeplink
-  // (`/cases/INC-RT-001?tab=ledger`) lands visitors directly on the live
-  // agent decision feed for the LockBit 3.0 ransomware showcase. Falls back
-  // to the overview when the param is missing or unrecognized.
-  const searchParams = useSearchParams();
-  const initialTab: WorkspaceTab = useMemo(() => {
-    const t = searchParams?.get("tab") ?? null;
-    return isWorkspaceTab(t) ? t : "overview";
-  }, [searchParams]);
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialTab);
+  const [activeTab, setActiveTab] = useUrlTab(VALID_TABS, "overview");
   const { data, error, isLoading, mutate } = useSWR<Case>(
     ["case", caseId],
     () => casesApi.get(caseId),
@@ -570,7 +559,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
       setInvestigating(false);
       toast.error(`Investigation could not start: ${message}`);
     }
-  }, [caseRecord, caseId, investigating, stopPolling, connectWs]);
+  }, [caseRecord, caseId, investigating, stopPolling, connectWs, setActiveTab]);
 
   // ─── Local mutations (optimistic) ──────────────────────────────────────────
 
@@ -639,6 +628,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
   const addComment = async () => {
     const trimmed = newComment.trim();
     if (!caseRecord || !trimmed) return;
+    const previousTimeline = caseRecord.timeline ?? [];
     const optimistic: CaseTimelineEvent = {
       id: `tl-tmp-${Date.now()}`,
       type: "comment",
@@ -648,21 +638,34 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
       actor: "you",
     };
     void mutate(
-      { ...caseRecord, timeline: [...(caseRecord.timeline ?? []), optimistic] },
+      { ...caseRecord, timeline: [...previousTimeline, optimistic] },
       { revalidate: false }
     );
     setNewComment("");
     try {
       await casesApi.addComment(caseRecord.id, trimmed);
       toast.success("Comment added");
-    } catch {
-      toast("Saved locally (writes disabled in demo)");
+    } catch (e: unknown) {
+      if (canUseDemoData()) {
+        // The hosted demo has no write path; the local entry is the product.
+        toast("Saved locally (writes disabled in demo)");
+        return;
+      }
+      // The optimistic entry has to come back off. This branch used to show
+      // the demo copy on every deployment, so a 422 read as "saved" and the
+      // note silently vanished on the next reload (#1932). Restore the
+      // composer so the analyst's text is not lost either.
+      void mutate({ ...caseRecord, timeline: previousTimeline }, { revalidate: false });
+      setNewComment(trimmed);
+      const message = e instanceof Error ? e.message : "the case service rejected the write";
+      toast.error(`Comment not saved — ${message}`);
     }
   };
 
   const addTask = async () => {
     const trimmed = newTask.trim();
     if (!caseRecord || !trimmed) return;
+    const previousTasks = caseRecord.tasks ?? [];
     const optimistic: CaseTask = {
       id: `task-tmp-${Date.now()}`,
       title: trimmed,
@@ -670,15 +673,52 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
       createdAt: new Date().toISOString(),
     };
     void mutate(
-      { ...caseRecord, tasks: [...(caseRecord.tasks ?? []), optimistic] },
+      { ...caseRecord, tasks: [...previousTasks, optimistic] },
       { revalidate: false }
     );
     setNewTask("");
     try {
       await casesApi.addTask(caseRecord.id, optimistic);
       toast.success("Task added");
-    } catch {
-      toast("Saved locally (writes disabled in demo)");
+    } catch (e: unknown) {
+      if (canUseDemoData()) {
+        toast("Saved locally (writes disabled in demo)");
+        return;
+      }
+      // Same rollback contract as addComment: a failed write must not keep
+      // rendering as a saved task on a real deployment (#1932).
+      void mutate({ ...caseRecord, tasks: previousTasks }, { revalidate: false });
+      setNewTask(trimmed);
+      const message = e instanceof Error ? e.message : "the case service rejected the write";
+      toast.error(`Task not saved — ${message}`);
+    }
+  };
+
+  // Resolution is server-persisted (PATCH /cases/{id} `resolution`). A null
+  // draft means "not edited since load/save", so the textarea shows the
+  // stored value and the Save button only lights up on a real change — the
+  // panel used to be a bare `defaultValue` textarea with no save path at
+  // all, so whatever the analyst typed was lost on reload (#1932).
+  const [resolutionDraft, setResolutionDraft] = useState<string | null>(null);
+  const [resolutionSaving, setResolutionSaving] = useState(false);
+
+  const saveResolution = async () => {
+    if (!caseRecord || resolutionDraft === null || resolutionSaving) return;
+    setResolutionSaving(true);
+    try {
+      await casesApi.update(caseRecord.id, { resolution: resolutionDraft });
+      void mutate({ ...caseRecord, resolution: resolutionDraft }, { revalidate: false });
+      setResolutionDraft(null);
+      toast.success("Resolution saved");
+    } catch (e: unknown) {
+      if (canUseDemoData()) {
+        toast("Saved locally (writes disabled in demo)");
+      } else {
+        const message = e instanceof Error ? e.message : "the case service rejected the write";
+        toast.error(`Resolution not saved — ${message}`);
+      }
+    } finally {
+      setResolutionSaving(false);
     }
   };
 
@@ -899,6 +939,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
+            aria-current={activeTab === tab ? "page" : undefined}
             className={clsx(
               "relative px-3 py-2 font-medium capitalize transition-colors",
               activeTab === tab ? "text-emerald-300" : "text-slate-500 hover:text-slate-300"
@@ -1019,6 +1060,8 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
               it is an action on the case, not a facet of it. */}
           <WarRoomPanel caseId={caseId} />
 
+          {!useFallback && <RelatedCasesPanel caseId={caseId} />}
+
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
             {/* Left: Linked alerts + IOCs */}
             {/* Two <aside> landmarks sit side by side here. Unnamed they
@@ -1036,7 +1079,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
                     {(caseRecord.alertIds ?? []).map((id) => (
                       <li key={id}>
                         <Link
-                          href={`/alerts?focus=${encodeURIComponent(id)}`}
+                          href={`/alerts/${encodeURIComponent(id)}`}
                           className="flex items-center justify-between rounded-md border border-slate-800/80 bg-slate-900/40 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:border-slate-700 hover:bg-slate-800/40"
                         >
                           <span className="font-mono">{id}</span>
@@ -1149,12 +1192,24 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
               </Panel>
 
               <Panel title="Resolution">
-                <textarea
-                  defaultValue={caseRecord.resolution ?? ""}
-                  rows={5}
-                  placeholder="Final summary, root cause, remediation…"
-                  className="w-full resize-none rounded-md border border-slate-700/70 bg-slate-900/40 px-2 py-1.5 text-xs text-slate-100 placeholder-slate-600 focus:border-emerald-500/40 focus:outline-none"
-                />
+                <div className="space-y-2">
+                  <textarea
+                    value={resolutionDraft ?? caseRecord.resolution ?? ""}
+                    onChange={(e) => setResolutionDraft(e.target.value)}
+                    rows={5}
+                    placeholder="Final summary, root cause, remediation…"
+                    className="w-full resize-none rounded-md border border-slate-700/70 bg-slate-900/40 px-2 py-1.5 text-xs text-slate-100 placeholder-slate-600 focus:border-emerald-500/40 focus:outline-none"
+                  />
+                  <div className="flex items-center justify-end">
+                    <button
+                      onClick={() => void saveResolution()}
+                      disabled={resolutionDraft === null || resolutionSaving}
+                      className="rounded-md bg-emerald-500 px-2.5 py-1.5 text-xs font-semibold text-emerald-950 transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
+                    >
+                      {resolutionSaving ? "Saving…" : "Save resolution"}
+                    </button>
+                  </div>
+                </div>
               </Panel>
             </aside>
           </div>

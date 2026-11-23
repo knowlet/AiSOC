@@ -79,6 +79,19 @@ OPERATOR_SUPPLIED: dict[str, str] = {
     "AISOC_THREATINTEL_SERVICE_TOKEN": "per-service override for AISOC_SERVICE_TOKEN",
     "AISOC_FUSION_SERVICE_TOKEN": "per-service override for AISOC_SERVICE_TOKEN",
     "AISOC_INGEST_SERVICE_TOKEN": "per-service override for AISOC_SERVICE_TOKEN",
+    # The enrichment service's own resolver (services/enrichment/internal/
+    # tenantauth, GHSA-qf6m-hgwv-65f9) prefers this and falls back to the
+    # shared token; fusion and the agents service mirror that resolution on
+    # the client side so a deployment that isolates enrichment's credential
+    # can. Unset means the shared AISOC_SERVICE_TOKEN, which first run
+    # generates.
+    "AISOC_ENRICHMENT_SERVICE_TOKEN": "per-service override for AISOC_SERVICE_TOKEN",
+    # Same resolution as enrichment's, one service over (#1929): UEBA's own
+    # resolve_token() prefers this and falls back to the shared token, and
+    # the agents context bundle mirrors that preference on the client side
+    # so a deployment that isolates UEBA's credential can. Unset means the
+    # shared AISOC_SERVICE_TOKEN, which first run generates.
+    "AISOC_UEBA_SERVICE_TOKEN": "per-service override for AISOC_SERVICE_TOKEN",
     "AISOC_INTERNAL_TOKEN": "bearer for the opt-in chatops fan-out; unset means no ChatOps notification",
 }
 

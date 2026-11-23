@@ -3,7 +3,7 @@ info:
   title: AiSOC Platform API
   description: AiSOC — open-source AI Security Operations Center. Autonomous threat
     detection, investigation, and response.
-  version: 23.1.0
+  version: 23.5.3
 paths:
   /api/v1/auth/login:
     post:
@@ -776,6 +776,33 @@ paths:
           - type: string
           - type: 'null'
           title: Status
+      - name: unresolved_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: 'Restrict to unresolved alerts (alert_status.unresolved_filter:
+            any status that is not terminal). Dashboard tiles deep-link with this
+            so the clicked number and the resulting list answer the same question.'
+          default: false
+          title: Unresolved Only
+        description: 'Restrict to unresolved alerts (alert_status.unresolved_filter:
+          any status that is not terminal). Dashboard tiles deep-link with this so
+          the clicked number and the resulting list answer the same question.'
+      - name: disposition
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Exact-match on the triage disposition (e.g. 'needs_review').
+            Composable with `status`; the operator queue uses status-less + disposition=needs_review
+            to span new+triaged escalated rows.
+          title: Disposition
+        description: Exact-match on the triage disposition (e.g. 'needs_review').
+          Composable with `status`; the operator queue uses status-less + disposition=needs_review
+          to span new+triaged escalated rows.
       - name: category
         in: query
         required: false
@@ -827,6 +854,38 @@ paths:
           type: string
           default: newest
           title: Sort
+      - name: event_since
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          description: Inclusive event_time lower bound
+          title: Event Since
+        description: Inclusive event_time lower bound
+      - name: event_until
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          description: Exclusive event_time upper bound
+          title: Event Until
+        description: Exclusive event_time upper bound
+      - name: hostname
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            minLength: 1
+            maxLength: 255
+          - type: 'null'
+          title: Hostname
       responses:
         '200':
           description: Successful Response
@@ -2130,15 +2189,8 @@ paths:
       tags:
       - cases
       summary: List related cases (by alert/observable overlap)
-      description: 'Return other cases that share alerts or observables with this
-        case.
-
-
-        This is intentionally a lightweight heuristic — we look for cases that
-
-        overlap on `alert_ids` or share an observable IP/host.  It''s the smallest
-
-        thing the case detail page needs to stop 404''ing.'
+      description: Show shared evidence for this tenant's related cases without merging
+        them.
       operationId: list_related_cases_api_v1_cases__case_id__related_get
       security:
       - HTTPBearer: []
@@ -2155,10 +2207,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response List Related Cases Api V1 Cases  Case Id  Related
-                  Get
+                $ref: '#/components/schemas/RelatedCasesResponse'
         '422':
           description: Validation Error
           content:
@@ -2741,15 +2790,15 @@ paths:
       description: 'Update a connector''s configuration or state.
 
 
-        The PATCH semantics here are deliberately conservative: only fields
+        Only fields the caller supplies are touched, and the two config blobs
 
-        the caller actually supplies are touched. Notably, sending an empty
+        are merged key by key rather than replaced (see
 
-        ``auth_config`` dict will overwrite all secrets — the wizard must
+        :class:`UpdateConnectorRequest`). Replacing them wholesale meant an edit
 
-        therefore omit the field entirely when the operator hasn''t re-typed
+        that re-typed one secret erased every other one, and an edit to one poll
 
-        credentials.'
+        knob erased the checkpoint, so the next poll re-read its whole lookback.'
       operationId: update_connector_api_v1_connectors__connector_id__patch
       security:
       - HTTPBearer: []
@@ -20514,16 +20563,14 @@ paths:
       tags:
       - llm
       summary: Current LLM provider configuration
-      description: "Return the env-only LLM provider snapshot for this pod.\n\n**Authenticated**\
-        \ -- the signature binds ``AuthUser`` and has for as long\nas this route has\
-        \ existed. The docstring used to say \"intentionally\nunauthenticated\", which\
-        \ was prose disagreeing with the code beneath it.\n\n**Env-only**: the response\
-        \ carries no secrets (only ``key_set: bool``).\n\nTenant-aware callers (the\
-        \ web UI's \"Deployment & AI\" Settings\npanel, the agents service's explain\
-        \ path) layer per-tenant BYOK\noverrides on top of this baseline by either:\n\
-        \n* calling :func:`tenant_llm_status` with their own DB session, or\n* pairing\
-        \ this response with ``GET /api/v1/llm/credentials`` to\n  perform the merge\
-        \ client-side."
+      description: 'Return the authenticated tenant''s effective route, without secrets.
+
+
+        Settings consumes this response directly. Returning the environment-only
+
+        baseline hid an enabled BYOK override behind the deployment''s gateway.
+
+        The database dependency also applies the authenticated tenant''s RLS scope.'
       operationId: get_llm_status_api_v1_llm_status_get
       responses:
         '200':
@@ -26734,6 +26781,11 @@ components:
           additionalProperties: true
           type: object
           title: Tags
+        resolution:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Resolution
         sla_due_at:
           anyOf:
           - type: string
@@ -28927,6 +28979,8 @@ components:
           title: Username
         password:
           type: string
+          maxLength: 72
+          minLength: 8
           title: Password
         role:
           type: string
@@ -34165,6 +34219,7 @@ components:
           title: Email
         password:
           type: string
+          minLength: 1
           title: Password
       type: object
       required:
@@ -38435,6 +38490,113 @@ components:
           default: My phone
       type: object
       title: RegisterBeginRequest
+    RelatedCase:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        case_number:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Number
+        title:
+          type: string
+          title: Title
+        severity:
+          type: string
+          title: Severity
+        status:
+          type: string
+          title: Status
+        created_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Created At
+        reason:
+          type: string
+          enum:
+          - shared_alerts
+          - shared_observables
+          title: Reason
+        shared_alert_ids:
+          items:
+            type: string
+            format: uuid
+          type: array
+          maxItems: 10
+          title: Shared Alert Ids
+        shared_alert_count:
+          type: integer
+          minimum: 0.0
+          title: Shared Alert Count
+        shared_observables:
+          items:
+            $ref: '#/components/schemas/RelatedCaseObservable'
+          type: array
+          maxItems: 10
+          title: Shared Observables
+        shared_observable_count:
+          type: integer
+          minimum: 0.0
+          title: Shared Observable Count
+      type: object
+      required:
+      - id
+      - case_number
+      - title
+      - severity
+      - status
+      - created_at
+      - reason
+      - shared_alert_ids
+      - shared_alert_count
+      - shared_observables
+      - shared_observable_count
+      title: RelatedCase
+    RelatedCaseObservable:
+      properties:
+        kind:
+          type: string
+          enum:
+          - ip
+          - user
+          - host
+          - domain
+          - hash
+          - file
+          - process
+          - alert
+          title: Kind
+        value:
+          type: string
+          title: Value
+      type: object
+      required:
+      - kind
+      - value
+      title: RelatedCaseObservable
+    RelatedCasesResponse:
+      properties:
+        related:
+          items:
+            $ref: '#/components/schemas/RelatedCase'
+          type: array
+          maxItems: 20
+          title: Related
+        limit:
+          type: integer
+          title: Limit
+          default: 20
+        has_more:
+          type: boolean
+          title: Has More
+          default: false
+      type: object
+      title: RelatedCasesResponse
     RelatedEntity:
       properties:
         group:
@@ -43368,6 +43530,11 @@ components:
             format: date-time
           - type: 'null'
           title: Sla Due At
+        resolution:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Resolution
       type: object
       title: UpdateCaseRequest
     UpdateConnectorRequest:
@@ -43375,6 +43542,8 @@ components:
         name:
           anyOf:
           - type: string
+            maxLength: 255
+            minLength: 1
           - type: 'null'
           title: Name
         is_enabled:
@@ -43403,6 +43572,22 @@ components:
           title: Tags
       type: object
       title: UpdateConnectorRequest
+      description: 'Partial update of a saved connector.
+
+
+        ``auth_config`` and ``connector_config`` are merged into what is stored,
+
+        one top-level key at a time: a key the caller supplies replaces the stored
+
+        value, a key supplied as ``null`` is removed, and a key the caller omits
+
+        is left alone. That is what lets the console''s edit dialog rotate one
+
+        secret without re-typing the others, and change a poll knob without
+
+        clearing the ``checkpoint`` and ``filter_rules`` the connectors service
+
+        keeps in the same column.'
     UpdateHuntRequest:
       properties:
         title:

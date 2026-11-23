@@ -45,7 +45,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy import select, text
 
 from app.api.v1.deps import AuthUser, DBSession, require_permission
@@ -67,6 +67,7 @@ from app.services.case_postmortem import build_case_postmortem
 from app.services.case_postmortem_html import render_case_postmortem_html
 from app.services.case_summary import build_case_summary
 from app.services.case_summary_html import render_case_summary_html
+from app.services.related_cases import ObservableKind, RelatedCasesResponse, find_related_cases
 from app.services.semantic_memory import remember_closed_case
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,12 @@ class UpdateCaseRequest(BaseModel):
     compliance_frameworks: list[str] | None = None
     tags: dict[str, str] | None = None
     sla_due_at: datetime | None = None
+    #: Final summary / root cause / remediation. The column has existed since
+    #: migration 046 (083 on the consolidated table) and the console has
+    #: always rendered a Resolution panel, but nothing could write it: this
+    #: model had no field, so whatever the analyst typed was lost on reload
+    #: (#1932). An empty string is a valid value (clearing the resolution).
+    resolution: str | None = None
 
 
 class AddAlertsRequest(BaseModel):
@@ -241,7 +248,7 @@ class AddAlertsRequest(BaseModel):
 
 class ObservableNode(BaseModel):
     id: str
-    kind: Literal["ip", "user", "host", "domain", "hash", "file", "process", "alert"]
+    kind: ObservableKind
     value: str
     tags: list[str] = Field(default_factory=list)
 
@@ -258,7 +265,14 @@ class UpdateObservablesRequest(BaseModel):
 
 
 class AddCommentRequest(BaseModel):
-    body: str = Field(..., min_length=1)
+    # `comment` is accepted as an alias because the console's
+    # ``casesApi.addComment`` sent ``{"comment": ...}`` for several releases
+    # while this model only read ``body`` — every post 422'd, and the
+    # workspace's optimistic insert made the failure invisible (#1932).
+    # Accepting both names fixes deployed consoles against a new API, while
+    # the console itself now sends ``body``; new callers should prefer
+    # ``body``, which is also what the response and the row column are named.
+    body: str = Field(..., min_length=1, validation_alias=AliasChoices("body", "comment"))
     # `is_system` is no longer accepted from callers (GHSA-9mc5-hqgh-j6wf).
     # It was, and `case_summary` renders such a row as an unattributed
     # "System note" while the post-mortem drops it from the analyst record,
@@ -298,6 +312,9 @@ class CaseResponse(BaseModel):
     updated_at: datetime
     created_by: str | None
     tags: dict[str, Any]
+    #: See ``UpdateCaseRequest.resolution``. ``None`` means never written,
+    #: which is the honest value for rows that predate the write path.
+    resolution: str | None = None
     sla_due_at: datetime | None
     # Workstream 8 — populated only by ``POST /cases`` (create-time
     # fan-out) and ``PATCH /cases/{id}`` when ``status`` is changed.
@@ -453,6 +470,10 @@ def _row_to_case(row: Any) -> CaseResponse:
         created_by=row.created_by,
         tags=_coerce_tags(row.tags),
         sla_due_at=row.sla_due_at,
+        # `getattr` with a default for the same reason as `reopened_at`
+        # above: some callers hand this mapper rows selected with an
+        # explicit column list that predates the column.
+        resolution=getattr(row, "resolution", None),
     )
 
 
@@ -530,7 +551,19 @@ async def list_cases(
         "offset": offset,
         "tenant_id": user.tenant_id,
     }
-    if status_filter:
+    if status_filter == "open":
+        # "open" is not a stored status (the CHECK vocabulary is new/triaged/
+        # investigating/contained/resolved/closed) but the update schema has
+        # always accepted it as a legacy alias, and the console's add-to-case
+        # picker queries it. Honouring the alias on write while string-matching
+        # it on read meant `?status=open` matched zero rows on every
+        # deployment, which silently killed that picker. Expand it through the
+        # same predicate the rest of the product uses (case_status.is_open).
+        placeholders = ", ".join(f":status_{i}" for i in range(len(case_status.OPEN_STATUSES)))
+        where_clauses.append(f"status IN ({placeholders})")
+        for i, value in enumerate(case_status.OPEN_STATUSES):
+            params[f"status_{i}"] = value
+    elif status_filter:
         where_clauses.append("status = :status")
         params["status"] = status_filter
     if severity:
@@ -827,6 +860,9 @@ async def update_case(
     if body.tags is not None:
         sets.append("tags = CAST(:tags AS JSONB)")
         params["tags"] = _json.dumps(body.tags)
+    if body.resolution is not None:
+        sets.append("resolution = :resolution")
+        params["resolution"] = body.resolution
 
     if body.status:
         sets.append("status = :status")
@@ -2328,63 +2364,15 @@ async def case_investigation_pdf(
     )
 
 
-@router.get("/{case_id}/related", summary="List related cases (by alert/observable overlap)")
+@router.get("/{case_id}/related", response_model=RelatedCasesResponse, summary="List related cases (by alert/observable overlap)")
 async def list_related_cases(
     case_id: str,
     db: DBSession,
     user: CaseReader,
-) -> dict[str, Any]:
-    """Return other cases that share alerts or observables with this case.
-
-    This is intentionally a lightweight heuristic — we look for cases that
-    overlap on `alert_ids` or share an observable IP/host.  It's the smallest
-    thing the case detail page needs to stop 404'ing.
-    """
+) -> RelatedCasesResponse:
+    """Show shared evidence for this tenant's related cases without merging them."""
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
-    row = (
-        await db.execute(
-            text("SELECT alert_ids, observable_graph FROM aisoc_cases WHERE id = :id AND tenant_id = :tenant_id").bindparams(
-                id=cid, tenant_id=user.tenant_id
-            )
-        )
-    ).fetchone()
-    if not row:
+    result = await find_related_cases(db, tenant_id=user.tenant_id, case_id=cid)
+    if result is None:
         raise HTTPException(status_code=404, detail="Case not found.")
-
-    alert_ids = list(row.alert_ids or [])
-    related: list[dict[str, Any]] = []
-
-    if alert_ids:
-        rows = (
-            await db.execute(
-                text(
-                    """
-                    SELECT id, case_number, title, severity, status, created_at
-                    FROM aisoc_cases
-                    WHERE id <> :id
-                      AND tenant_id = :tenant_id
-                      AND alert_ids && CAST(:alerts AS UUID[])
-                    ORDER BY created_at DESC
-                    LIMIT 20
-                    """
-                ).bindparams(
-                    id=cid,
-                    tenant_id=user.tenant_id,
-                    alerts=[str(a) for a in alert_ids],
-                )
-            )
-        ).fetchall()
-        for r in rows:
-            related.append(
-                {
-                    "id": str(r.id),
-                    "case_number": r.case_number,
-                    "title": r.title,
-                    "severity": r.severity or "medium",
-                    "status": r.status or "new",
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                    "reason": "shared_alerts",
-                }
-            )
-
-    return {"related": related}
+    return result

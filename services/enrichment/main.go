@@ -50,6 +50,9 @@ func main() {
 		VirusTotalAPIKey:       cfg.VirusTotalAPIKey,
 		AbuseIPDBAPIKey:        cfg.AbuseIPDBAPIKey,
 		GreyNoiseAPIKey:        cfg.GreyNoiseAPIKey,
+		ShodanAPIKey:           cfg.ShodanAPIKey,
+		IPInfoAPIKey:           cfg.IPInfoAPIKey,
+		URLScanAPIKey:          cfg.URLScanAPIKey,
 		CybleAPIKey:            cfg.CybleAPIKey,
 		CybleBaseURL:           cfg.CybleBaseURL,
 		RecordedFutureAPIKey:   cfg.RecordedFutureAPIKey,
@@ -69,12 +72,17 @@ func main() {
 		RiskIQAPIKey:           cfg.RiskIQAPIKey,
 		CrowdstrikeIntelID:     cfg.CrowdstrikeIntelID,
 		CrowdstrikeIntelSecret: cfg.CrowdstrikeIntelSecret,
+		ThreatIntelURL:         cfg.ThreatIntelURL,
+		ServiceToken:           cfg.ServiceToken,
 	})
 
 	log.Info().
 		Bool("virustotal", cfg.VirusTotalAPIKey != "").
 		Bool("abuseipdb", cfg.AbuseIPDBAPIKey != "").
 		Bool("greynoise", cfg.GreyNoiseAPIKey != "").
+		Bool("shodan", cfg.ShodanAPIKey != "").
+		Bool("ipinfo", cfg.IPInfoAPIKey != "").
+		Bool("urlscan", cfg.URLScanAPIKey != "").
 		Bool("cyble", cfg.CybleAPIKey != "").
 		Bool("recorded_future", cfg.RecordedFutureAPIKey != "").
 		Bool("mandiant", cfg.MandiantAPIKey != "" && cfg.MandiantAPISecret != "").
@@ -85,6 +93,7 @@ func main() {
 		Bool("domaintools", cfg.DomainToolsAPIKey != "").
 		Bool("riskiq", cfg.RiskIQAPIKey != "").
 		Bool("crowdstrike_intel", cfg.CrowdstrikeIntelID != "" && cfg.CrowdstrikeIntelSecret != "").
+		Bool("threatintel_feed_lookup", cfg.ThreatIntelURL != "" && cfg.ServiceToken != "").
 		Msg("Threat intelligence providers configured")
 
 	// Initialize handler and server
