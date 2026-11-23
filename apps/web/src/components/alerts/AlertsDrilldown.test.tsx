@@ -359,6 +359,20 @@ describe('operations posture links open the filtered alert grid', () => {
     });
   });
 
+  it('drops the page_size alias when the analyst picks a page size', async () => {
+    window.history.replaceState(null, '', '/alerts?view=alerts&page_size=100');
+    await renderCurrentUrl();
+    expect(requestedFilters()?.pageSize).toBe(100);
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Page size' }), '25');
+    expect(Object.fromEntries(new URLSearchParams(window.location.search))).toEqual({ view: 'alerts' });
+    expect(requestedFilters()?.pageSize).toBe(25);
+
+    cleanup();
+    await renderCurrentUrl();
+    expect(requestedFilters()?.pageSize).toBe(25);
+  });
+
   it('does not thrash list requests when the URL carries pagination params', async () => {
     window.history.replaceState(null, '', '/alerts?view=alerts&pageSize=50');
     await renderCurrentUrl();

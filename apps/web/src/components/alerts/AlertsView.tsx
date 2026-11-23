@@ -457,6 +457,10 @@ export function AlertsView({
       if (value === undefined) url.searchParams.delete(name);
       else url.searchParams.set(name, String(value));
     }
+    // The reader also accepts the API spelling `page_size`. Left in place, it
+    // would bring back the old size on the next read, since an omitted
+    // `pageSize` (the default 25) falls through to it.
+    url.searchParams.delete('page_size');
 
     // Keep a reload on the same queue, including when its final chip is
     // removed. Native history preserves local sort/pagination and unrelated
