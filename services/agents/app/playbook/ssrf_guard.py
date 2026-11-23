@@ -279,6 +279,46 @@ _METADATA_ADDRESSES: frozenset[str] = frozenset(
 )
 
 
+# The deployment's own LLM endpoints. These come from the process
+# environment, which only an operator controls, so they are configuration
+# rather than a destination a tenant chose. The bundled Ollama smoke run and
+# local model servers live on loopback and are reached through these.
+_OPERATOR_LLM_BASE_ENV: tuple[str, ...] = ("OPENAI_BASE_URL", "LLM_BASE_URL", "LLM_GATEWAY_URL")
+
+_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """``(scheme, host, port)`` for ``url``, or ``None`` when it has none."""
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").strip().lower()
+    if not scheme or not host:
+        return None
+    if port is None:
+        port = _DEFAULT_PORTS.get(scheme)
+    if port is None:
+        return None
+    return scheme, host, port
+
+
+def _operator_llm_origins() -> frozenset[tuple[str, str, int]]:
+    """Origins of the LLM endpoints the operator configured in the environment."""
+    origins: set[tuple[str, str, int]] = set()
+    for name in _OPERATOR_LLM_BASE_ENV:
+        raw = (os.getenv(name, "") or "").strip()
+        if not raw:
+            continue
+        origin = _origin(raw)
+        if origin is not None:
+            origins.add(origin)
+    return frozenset(origins)
+
+
 def guard_runtime_llm_url(url: str) -> str:
     """Validate a URL before a runtime LLM call.
 
@@ -287,8 +327,18 @@ def guard_runtime_llm_url(url: str) -> str:
     are refused. An operator allow-list can still name an exact loopback host
     for a tunnel; it cannot re-open link-local or metadata, including a DNS
     name that resolves to one of those addresses.
+
+    The deployment's own endpoint (``OPENAI_BASE_URL``, ``LLM_BASE_URL`` or
+    ``LLM_GATEWAY_URL``) is exempt from the loopback refusal when the URL has
+    the same scheme, host and port. Those values are operator configuration,
+    and a local Ollama or recorded gateway on ``127.0.0.1`` is the supported
+    way to run without a hosted provider. The guard exists for destinations
+    a tenant saved; any other loopback origin is still refused, and
+    link-local and metadata stay blocked for every destination.
     """
-    validate_outbound_url(url, allow_private=True)
+    origin = _origin(url)
+    if origin is None or origin not in _operator_llm_origins():
+        validate_outbound_url(url, allow_private=True)
     _reject_link_local_and_metadata(url)
     return url
 
