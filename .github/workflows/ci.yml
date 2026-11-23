@@ -1957,21 +1957,15 @@ jobs:
         # gates. A gate no workflow runs cannot fail, and check_gate_coverage
         # reports that as the tree already failing its own self-test.
         #
-        # The Qdrant preflight reads collections/<name>/version.info. A bare
-        # run on a runner with no qdrant_data volume used to treat the Compose
-        # pin as the installed version and exit 0. These three fixtures are
-        # stored versions: v1.19.0 may attach to v1.20.0, v1.7.0 must not, and
-        # a payload with no version.info is unknown and must not.
+        # The preflight with no storage version used to read the compose pin
+        # as the installed version and report GO. The exercise starts real
+        # v1.7.0 and v1.19.0 binaries, writes a collection into a fresh
+        # storage directory, and requires NO-GO and GO from that volume.
         run: |
           python3 scripts/generate_dependency_inventory.py --self-test
           python3 scripts/generate_dependency_inventory.py --check
           python3 scripts/check_qdrant_upgrade_preflight.py --self-test
-          python3 scripts/check_qdrant_upgrade_preflight.py --storage-dir tests/fixtures/qdrant/v1.19.0
-          python3 scripts/check_qdrant_upgrade_preflight.py --storage-dir tests/fixtures/qdrant/v1.7.0 || status=$?
-          test "${status:-0}" -eq 1
-          status=0
-          python3 scripts/check_qdrant_upgrade_preflight.py --storage-dir tests/fixtures/qdrant/unknown || status=$?
-          test "$status" -eq 1
+          bash scripts/exercise_qdrant_upgrade_preflight.sh
 
       # Both of these import each service's FastAPI app, so they belong in
       # the job that installs the service dependencies rather than the lint

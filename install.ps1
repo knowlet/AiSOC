@@ -1124,6 +1124,17 @@ function Start-Stack {
     try {
         Test-CorePortsFree
 
+        # Same gate `make up` runs. Compose recreates qdrant on the existing
+        # volume; the image pin in docker-compose.yml is the target, not the
+        # version already on disk. A refusal here must happen before `up -d`.
+        $qdrantPreflight = Invoke-RepoPython -RelativePath 'scripts/check_qdrant_upgrade_preflight.py'
+        if ($null -eq $qdrantPreflight) {
+            Stop-WithError 'python is required to read the existing Qdrant volume before compose recreates it.' 3
+        }
+        if ($qdrantPreflight -ne 0) {
+            Stop-WithError 'Qdrant preflight refused to attach the existing volume to the compose image. Compose was not started.' 3
+        }
+
         # Get-ComposeArgs is evaluated after Test-CorePortsFree so it picks up
         # a port overlay written moments ago.
         $composeArgs = @(Get-ComposeArgs) + @('up', '-d')

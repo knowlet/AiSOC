@@ -737,6 +737,9 @@ ollama:
       cpu: 4000m
       memory: 8Gi
 
+# Same jump as compose. The chart does not run the preflight: before
+# `helm upgrade`, point scripts/check_qdrant_upgrade_preflight.py --url
+# at the Qdrant Service that still has the PVC open. Unknown is a refusal.
 qdrant:
   enabled: true
   image:

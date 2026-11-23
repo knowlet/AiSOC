@@ -59,8 +59,7 @@ Requires [`docs/upgrade/disposable-clickhouse-backups.xml`](disposable-clickhous
 
 **Runbooks must not** suggest replacing a `qdrant/qdrant:v1.7.x` data directory with `v1.20.0`,
 nor importing snapshots taken **before** the format migration.
-
-`make upgrade` (and `make up`, `make up-dev`, `make up-full`, `make up-gpu`, `make up-host-llm`) runs `scripts/check_qdrant_upgrade_preflight.py` before Compose recreates the container. The script reads `collections/<name>/version.info` from the existing volume. A v1.7.0 file, or a collection directory whose version cannot be read, is **NO-GO** and the target stops. Raft or alias files with no collection directory are not a stored collection version (`volume_state` `no-collections`) and do not block startup. The Compose image tag is not used as that stored version. `scripts/upgrade_rehearsal_disposable.sh` runs the same check on its v1.7 directory and does not start v1.20.0 on it. The panic demonstration below is `scripts/qdrant_migration_evidence.sh` on disposable data, not the upgrade path.
+`make upgrade` and `make up` run `scripts/check_qdrant_upgrade_preflight.py` before Compose recreates the container. The installed version is read from the process that has the volume open, or from `aisoc-observed-version` in the storage. Qdrant's own `version.info` is the crate version (`0.4.2` / `0.6.0`), not the release, and is ignored. An unreadable release is NO-GO.
 
 ### Supported path (**proved 2026-11-11**)
 

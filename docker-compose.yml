@@ -321,12 +321,10 @@ services:
     # created. It is by a wide margin the cheapest of the four stores — the
     # next one up, OpenSearch, is 2 GB of image and ~1.05 GB resident — which
     # is why it is the one CORE takes.
-    # v1.7.x data on this tag panics (collection version.info and the on_disk
-    # segment format). `make upgrade` and `make up` run
-    # scripts/check_qdrant_upgrade_preflight.py, which reads
-    # collections/<name>/version.info from qdrant_data, before compose
-    # recreates this container. The tag below is the image to start, not the
-    # version stored in the volume.
+    # v1.7 storage panics on this image (`on_disk` segment payload). The pin
+    # is the target, not the version of `qdrant_data`. `make up` / `make
+    # upgrade` run scripts/check_qdrant_upgrade_preflight.py before compose
+    # recreates this container; an unknown volume version is a refusal.
     image: qdrant/qdrant:v1.20.0
     container_name: aisoc-qdrant
     ports:

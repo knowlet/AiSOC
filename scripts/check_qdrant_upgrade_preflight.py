@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""Machine-readable preflight for attaching an existing Qdrant volume to a new image.
+"""Refuse to attach an existing Qdrant volume to an image that cannot open it.
 
-Qdrant writes the release that created a collection into
-``collections/<name>/version.info`` (the crate version, for example ``1.7.0``,
-with no ``v`` prefix). ``Collection::load`` reads that file and panics when the
-stored version cannot move to the running binary. v1.7.0 data on
-``qdrant/qdrant:v1.20.0`` panics that way (``on_disk`` segment format, and the
-collection version check).
+Qdrant loads on-disk collections only across consecutive minor releases. A
+v1.7 volume mounted on v1.20 panics (`on_disk` segment payload). The compose
+pin is the image we are about to start, not the version that wrote the
+volume. Using it as the installed version makes v1.7 read as v1.20 and the
+check reports GO.
 
-The Compose image tag is the version about to start. It is not the version
-stored in ``qdrant_data``. A run that cannot read a stored version is NO-GO:
-using the pin in its place reports GO for a volume that will panic.
+What is actually on disk is not that release either. ``version.info`` is the
+crate version (``0.4.2`` for the collection crate and ``0.6.0`` for the
+segment crate), and those strings are unchanged from v1.7.0 through v1.20.0.
+They are ignored. The application version is taken, in order, from:
 
-``volume_state``:
+1. the Qdrant process that has the volume open (``GET /``);
+2. the image of the container that still has the volume mounted, when that
+   image is not a target tag that already exited non-zero (a crashed recreate
+   must not count as proof the volume was migrated);
+3. ``aisoc-observed-version`` in the storage root, which this preflight writes
+   after a real observation so a later ``compose down`` (the container is
+   gone, the volume is not) can still be read.
 
-* ``observed`` — at least one ``collections/<name>/version.info`` was read.
-  The oldest of those versions is the one the decision uses.
-* ``empty`` — the directory exists and has no Qdrant payload.
-* ``no-collections`` — raft or alias files are present and there is no
-  collection directory. Qdrant writes ``version.info`` when it creates a
-  collection; with none, there is no collection storage to attach.
-* ``absent`` — Docker confirmed the named volume does not exist.
-* ``unknown`` — a collection is present but its ``version.info`` was not
-  readable, the path could not be read, or Docker could not be asked. NO-GO.
+If the volume has collections and none of those yield a version, the result
+is NO-GO. An absent volume, or one with no collections, has nothing to
+migrate and is GO.
 
 An inventory file that exists but is not valid JSON is a failed preflight.
 """
@@ -31,48 +31,47 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
-from contextlib import redirect_stderr, redirect_stdout
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gate_toolkit import repo_root  # noqa: E402
 
-Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+MARKER_NAME = "aisoc-observed-version"
+STORAGE_MOUNT = "/qdrant/storage"
+_APP_VERSION = re.compile(r"v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)\Z")
 
-_VERSION_TEXT = re.compile(r"v?\d+\.\d+\.\d+")
-_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
-_IMAGE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./:-]*")
 
-# Printed into the JSON when the volume was not actually read. Kept as one
-# sentence so a caller cannot mistake it for a version comparison.
-_UNKNOWN_REASON = "Stored Qdrant version could not be read from the volume. The Compose image pin was not used as the installed version."
-
-_READER_SCRIPT = r"""
+def _read_volume_script() -> str:
+    """List marker and collection files. The marker name is the only interpolation."""
+    marker = MARKER_NAME
+    return f"""
 set -eu
-cd /qdrant/storage
-if [ -d collections ]; then
-  for dir in collections/*/; do
-    [ -d "$dir" ] || continue
-    if [ -f "${dir}version.info" ]; then
-      printf 'VERSION %s ' "${dir%/}"
-      tr -d '\r\n' < "${dir}version.info"
-      printf '\n'
-    else
-      printf 'NOVERSION %s\n' "${dir%/}"
-    fi
-  done
+root=/qdrant/storage
+if [ -f "$root/{marker}" ]; then
+  printf 'MARKER\\n'
+  cat "$root/{marker}"
+  printf '\\nENDMARKER\\n'
 fi
-if [ -f raft_state.json ]; then printf 'MARKER raft_state.json\n'; fi
-if [ -f aliases/data.json ]; then printf 'MARKER aliases/data.json\n'; fi
+if [ ! -d "$root/collections" ]; then
+  printf 'EMPTY\\n'
+  exit 0
+fi
+find "$root/collections" -type f \\( -name segment.json -o -name config.json -o -name version.info \\) -print 2>/dev/null |
+  head -n 40 |
+  while IFS= read -r f; do
+    printf 'FILE %s\\n' "$f"
+    cat "$f"
+    printf '\\nENDFILE\\n'
+  done
 """
 
 
@@ -85,26 +84,34 @@ class InventoryUnreadable(Exception):
         super().__init__(f"{path}: {reason}")
 
 
-@dataclass(frozen=True)
-class StorageObservation:
-    """What was read from a Qdrant storage directory or volume."""
+class DockerUnavailable(Exception):
+    """The daemon could not be asked what volume is already there."""
+
+
+@dataclass
+class StorageScan:
+    """What a storage directory itself says, independent of any image tag."""
 
     state: str
-    version: str | None
-    versions: tuple[str, ...]
+    marker: str | None
+    legacy_on_disk: bool
     detail: str
+
+
+@dataclass
+class Observation:
+    """The installed version of one existing volume, and where it came from."""
+
+    volume_state: str
+    version: str | None
     source: str
-
-
-def _canonical(tag: str) -> str:
-    return tag.strip().lstrip("vV")
-
-
-def _version_key(tag: str) -> tuple[int, int, int]:
-    match = re.match(r"v?(\d+)\.(\d+)\.(\d+)", tag.strip())
-    if match is None:
-        raise ValueError(tag)
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+    legacy_on_disk: bool
+    detail: str
+    storage_path: Path | None = None
+    docker: list[str] | None = None
+    container_id: str | None = None
+    volume_name: str | None = None
+    image_ref: str | None = None
 
 
 def _minor(tag: str) -> int | None:
@@ -117,20 +124,44 @@ def _major(tag: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def normalize_version(text: str | None) -> str | None:
+    """An application release, or None.
+
+    Crate ``version.info`` values (``0.4.2``, ``0.6.0``) match the shape of a
+    semver and are the same on every release this tree cares about, so a
+    major of 0 is not a Qdrant version.
+    """
+    if text is None:
+        return None
+    match = _APP_VERSION.fullmatch(text.strip())
+    if not match or int(match.group("major")) < 1:
+        return None
+    return f"v{match.group('major')}.{match.group('minor')}.{match.group('patch')}"
+
+
+def version_from_image_ref(image: str | None) -> str | None:
+    """``qdrant/qdrant:v1.7.0`` → ``v1.7.0``. A floating tag is not a version."""
+    if not image or ":" not in image:
+        return None
+    tag = image.split("@", 1)[0].rsplit(":", 1)[1]
+    return normalize_version(tag)
+
+
 def decide_jump(storage: str | None, target: str) -> tuple[bool, list[str], list[str]]:
     """Whether ``storage`` may be attached in place to ``target``.
 
-    ``storage`` is a version read from the volume. ``None`` is not a version,
-    and it is not permission to attach.
+    ``storage`` is the version that wrote the volume. Missing means the
+    volume's version was not observed; that is NO-GO, not a permission to
+    assume the compose pin.
     """
-    blocked_reasons: list[str] = []
-    required_steps: list[str] = []
-    if not storage or not storage.strip():
+    if not storage:
         return (
             False,
-            [_UNKNOWN_REASON],
-            ["Read collections/<name>/version.info from the existing qdrant_data volume."],
+            ["Installed Qdrant version is unknown, so the existing volume cannot be attached in place."],
+            ["Observe the Qdrant that has the volume open, then rerun this preflight."],
         )
+    blocked_reasons: list[str] = []
+    required_steps: list[str] = []
     allow_in_place = True
     storage_major, target_major = _major(storage), _major(target)
     storage_minor, target_minor = _minor(storage), _minor(target)
@@ -144,10 +175,17 @@ def decide_jump(storage: str | None, target: str) -> tuple[bool, list[str], list
             blocked_reasons.append("Legacy v1.7.x on-disk segment format cannot load on v1.20.x directly.")
             required_steps.append("Take v1.7 collection snapshot for rollback, then step every minor to v1.20.")
             required_steps.append("Post-ladder snapshots are for forward migrate/DR onto fresh v1.20 volumes only.")
-    if storage_major is None or storage_minor is None:
-        allow_in_place = False
-        blocked_reasons.append(f"Stored version {storage!r} is not a Qdrant release.")
     return allow_in_place, blocked_reasons, required_steps
+
+
+def legacy_on_disk_blocks(target: str, legacy: bool) -> str | None:
+    """v1.20 rejects the ``on_disk`` payload variant v1.7 wrote into segment.json."""
+    if not legacy:
+        return None
+    major, minor = _major(target), _minor(target)
+    if major == 1 and minor is not None and minor >= 20:
+        return "Segment payload storage on this volume is on_disk, which v1.20.x cannot load."
+    return None
 
 
 def qdrant_pin_from_compose(text: str) -> str | None:
@@ -160,12 +198,8 @@ def qdrant_pin_from_compose(text: str) -> str | None:
     return current
 
 
-def qdrant_pin_from_inventory(path: Path) -> str | None:
-    """The inventory's Qdrant tag, or None when the document names none.
-
-    ``datastore_pins`` is the generated shape. The older ``infrastructure``
-    list is still accepted. A file that is not JSON fails the preflight.
-    """
+def target_from_inventory(path: Path, default: str) -> str:
+    """Read the Qdrant pin. A file that is not JSON fails the preflight."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -176,372 +210,249 @@ def qdrant_pin_from_inventory(path: Path) -> str | None:
         raise InventoryUnreadable(path, f"not valid JSON ({exc.msg})") from exc
     if not isinstance(data, dict):
         raise InventoryUnreadable(path, "inventory JSON must be an object")
-
     from_pins: str | None = None
-    pins = data.get("datastore_pins", None)
+    pins = data.get("datastore_pins")
     if pins is not None:
         if not isinstance(pins, dict):
             raise InventoryUnreadable(path, "datastore_pins must be an object")
         pin = pins.get("qdrant/qdrant")
         if isinstance(pin, str) and pin.strip():
             from_pins = pin.strip()
-
     from_rows: str | None = None
-    rows = data.get("infrastructure", None)
-    if rows is not None:
-        if not isinstance(rows, list):
-            raise InventoryUnreadable(path, "infrastructure must be a list")
-        for row in rows:
-            if isinstance(row, dict) and row.get("component") == "Qdrant":
-                pin = row.get("pin")
-                if isinstance(pin, str) and pin.strip():
-                    from_rows = pin.strip()
-                    break
-
-    if from_pins and from_rows and _canonical(from_pins) != _canonical(from_rows):
+    rows = data.get("infrastructure", [])
+    if not isinstance(rows, list):
+        raise InventoryUnreadable(path, "infrastructure must be a list")
+    for row in rows:
+        if isinstance(row, dict) and row.get("component") == "Qdrant":
+            pin = row.get("pin")
+            if isinstance(pin, str) and pin.strip():
+                from_rows = pin.strip()
+                break
+    if from_pins and from_rows and normalize_version(from_pins) != normalize_version(from_rows) and from_pins != from_rows:
         raise InventoryUnreadable(path, "datastore_pins and infrastructure disagree on Qdrant")
-    return from_pins or from_rows
+    return from_pins or from_rows or default
 
 
-def target_from_inventory(path: Path, default: str) -> str:
-    """Read the Qdrant pin. A file that is not JSON fails the preflight."""
-    pin = qdrant_pin_from_inventory(path)
-    return pin if pin else default
+def _infer_versions(root: Path) -> tuple[str | None, str]:
+    compose = root / "docker-compose.yml"
+    if not compose.is_file():
+        raise InventoryUnreadable(compose, "docker-compose.yml is not in the tree")
+    current = qdrant_pin_from_compose(compose.read_text(encoding="utf-8"))
+    if not current:
+        raise InventoryUnreadable(compose, "docker-compose.yml has no qdrant/qdrant pin")
+    target = "v1.20.0"
+    inventory = root / "docs" / "upgrade" / "dependency-inventory.json"
+    if inventory.is_file():
+        target = target_from_inventory(inventory, target)
+    return current, target
 
 
-def _safe_relative(text: str) -> Path:
-    path = Path(text.strip())
-    if path.is_absolute() or ".." in path.parts or not path.parts:
-        raise ValueError(text)
-    return path
-
-
-def read_storage_tree(path: Path, *, source: str) -> StorageObservation:
-    """Read collection ``version.info`` files under a Qdrant storage root.
-
-    The storage root is the directory mounted at ``/qdrant/storage``.
-    """
-    if not path.exists():
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail=f"{path} does not exist",
-            source=source,
-        )
-    if not path.is_dir():
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail=f"{path} is not a directory",
-            source=source,
-        )
-
-    versions: list[str] = []
-    missing: list[str] = []
-    saw_collection = False
-    collections = path / "collections"
-    if collections.is_dir():
-        for child in sorted(entry for entry in collections.iterdir() if entry.is_dir()):
-            saw_collection = True
-            info = child / "version.info"
-            if not info.is_file():
-                missing.append(f"{child.name}: no version.info")
-                continue
-            try:
-                raw = info.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                missing.append(f"{child.name}: {exc}")
-                continue
-            token = raw.strip().split()[0] if raw.strip() else ""
-            if _VERSION_TEXT.fullmatch(token) is None:
-                missing.append(f"{child.name}: version.info is {raw.strip()!r}")
-                continue
-            versions.append(token)
-
-    markers: list[str] = []
-    if (path / "raft_state.json").is_file():
-        markers.append("raft_state.json")
-    if (path / "aliases" / "data.json").is_file():
-        markers.append("aliases/data.json")
-
-    if missing:
-        detail = "unreadable collection version: " + "; ".join(missing)
-        return StorageObservation(state="unknown", version=None, versions=tuple(versions), detail=detail, source=source)
-    if versions:
-        oldest = min(versions, key=_version_key)
-        listed = ", ".join(versions)
-        return StorageObservation(
-            state="observed",
-            version=oldest,
-            versions=tuple(versions),
-            detail=f"collections/*/version.info ({listed}); decision uses {oldest}",
-            source=source,
-        )
-    if saw_collection:
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail="a collection directory is present but no collections/<name>/version.info was readable",
-            source=source,
-        )
-    if markers:
-        found = ", ".join(markers)
-        return StorageObservation(
-            state="no-collections",
-            version=None,
-            versions=(),
-            detail=(
-                f"Qdrant metadata is present ({found}) and there is no collection directory. "
-                "version.info is written when a collection is created."
-            ),
-            source=source,
-        )
-    return StorageObservation(
-        state="empty",
-        version=None,
-        versions=(),
-        detail="storage directory has no Qdrant collections, raft_state.json, or aliases/data.json",
-        source=source,
-    )
-
-
-def volume_name_from_config(config: object) -> str | None:
-    """Resolved Docker volume name for ``qdrant_data`` from ``compose config`` JSON."""
+def _segment_is_legacy(doc: object) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    config = doc.get("config")
     if not isinstance(config, dict):
-        return None
-    volumes = config.get("volumes")
-    if not isinstance(volumes, dict):
-        return None
-    spec = volumes.get("qdrant_data")
-    if not isinstance(spec, dict):
-        return None
-    name = spec.get("name")
-    if isinstance(name, str) and _VOLUME_NAME.fullmatch(name):
-        return name
-    return None
+        return False
+    payload = config.get("payload_storage_type")
+    return isinstance(payload, dict) and payload.get("type") == "on_disk"
 
 
-def reader_argv(volume: str, image: str) -> list[str]:
-    """A container that lists version files and does not start Qdrant.
+def _read_marker(path: Path) -> str | None:
+    marker = path / MARKER_NAME
+    try:
+        if not marker.is_file():
+            return None
+        return normalize_version(marker.read_text(encoding="utf-8"))
+    except OSError:
+        return None
 
-    ``--entrypoint /bin/sh`` replaces the image entrypoint, and the volume is
-    mounted read-only, so the Qdrant binary does not open the storage.
+
+def scan_storage(path: Path) -> StorageScan:
+    """Read one storage directory. Crate ``version.info`` is not a release."""
+    try:
+        if not path.exists():
+            return StorageScan("unreadable", None, False, f"{path} does not exist")
+        if not path.is_dir():
+            return StorageScan("unreadable", None, False, f"{path} is not a directory")
+    except OSError as exc:
+        return StorageScan("unreadable", None, False, str(exc))
+    marker = _read_marker(path)
+    collections = path / "collections"
+    try:
+        if not collections.is_dir():
+            return StorageScan("empty", marker, False, "no collections directory")
+        configs = list(collections.glob("*/config.json"))
+        segments = list(collections.glob("*/*/segments/*/segment.json"))[:40]
+    except OSError as exc:
+        return StorageScan("unreadable", marker, False, str(exc))
+    legacy = False
+    for segment in segments:
+        try:
+            legacy = legacy or _segment_is_legacy(json.loads(segment.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    if configs or segments:
+        return StorageScan("present", marker, legacy, f"{len(configs)} collection config(s)")
+    try:
+        has_child = any(collections.iterdir())
+    except OSError as exc:
+        return StorageScan("unreadable", marker, False, str(exc))
+    if has_child:
+        return StorageScan("present", marker, legacy, "collection directory without a readable config")
+    return StorageScan("empty", marker, False, "collections directory is empty")
+
+
+def parse_volume_listing(text: str) -> StorageScan:
+    """Parse the fixed listing produced inside a volume mount."""
+    marker: str | None = None
+    if "MARKER\n" in text and "\nENDMARKER\n" in text:
+        raw = text.split("MARKER\n", 1)[1].split("\nENDMARKER\n", 1)[0]
+        marker = normalize_version(raw)
+    if "EMPTY\n" in text and "FILE " not in text:
+        return StorageScan("empty", marker, False, "volume has no collections directory")
+    legacy = False
+    present = False
+    chunks = text.split("FILE ")
+    for chunk in chunks[1:]:
+        body = chunk.split("\n", 1)[1] if "\n" in chunk else ""
+        body = body.split("\nENDFILE\n", 1)[0]
+        name = chunk.split("\n", 1)[0]
+        if name.endswith("config.json") or name.endswith("version.info"):
+            present = True
+        if name.endswith("segment.json"):
+            present = True
+            try:
+                legacy = legacy or _segment_is_legacy(json.loads(body))
+            except json.JSONDecodeError:
+                continue
+    if present:
+        return StorageScan("present", marker, legacy, "listed from the volume")
+    return StorageScan("empty", marker, False, "no collection files in the volume")
+
+
+def version_from_api_payload(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get("version")
+    if not isinstance(version, str):
+        return None
+    return normalize_version(version)
+
+
+def read_api_version(base_url: str, timeout: float = 3) -> str | None:
+    """``GET /`` on the Qdrant that has the volume open. Failure is unknown."""
+    url = base_url.rstrip("/") + "/"
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, urllib.error.URLError):
+        return None
+    return version_from_api_payload(payload)
+
+
+def trusted_image_version(
+    image: str | None,
+    *,
+    running: bool,
+    exit_code: int | None,
+    target: str,
+) -> str | None:
+    """The container image is the installed version only while it still is.
+
+    A container already recreated onto the target tag that then exited
+    non-zero is how a refused jump looks after the fact. Its image tag is
+    the target, not the version that wrote the volume.
     """
-    if _VOLUME_NAME.fullmatch(volume) is None:
-        raise ValueError(f"refusing volume name {volume!r}")
-    if _IMAGE_REF.fullmatch(image) is None:
-        raise ValueError(f"refusing image reference {image!r}")
-    return [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--read-only",
-        "--entrypoint",
-        "/bin/sh",
-        "-v",
-        f"{volume}:/qdrant/storage:ro",
-        image,
-        "-c",
-        _READER_SCRIPT,
-    ]
-
-
-def materialize_reader_transcript(text: str, dest: Path) -> None:
-    """Turn the read-only container's stdout into a storage tree."""
-    dest.mkdir(parents=True, exist_ok=True)
-    for line in text.splitlines():
-        if line.startswith("VERSION "):
-            _, rel, version = line.split(" ", 2)
-            path = dest / _safe_relative(rel) / "version.info"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(version.strip(), encoding="utf-8")
-        elif line.startswith("NOVERSION "):
-            rel = line.split(" ", 1)[1]
-            path = dest / _safe_relative(rel)
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "config.json").write_text("{}", encoding="utf-8")
-        elif line.startswith("MARKER "):
-            rel = line.split(" ", 1)[1]
-            path = dest / _safe_relative(rel)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-
-
-def _completed(argv: Sequence[str], code: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(list(argv), code, stdout=stdout, stderr=stderr)
-
-
-def default_runner(cwd: Path) -> Runner:
-    def run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                list(argv),
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=60,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return _completed(argv, 124, stderr=f"timed out: {exc}")
-        except OSError as exc:
-            return _completed(argv, 127, stderr=str(exc))
-
-    return run
-
-
-def _local_reader_image(runner: Runner) -> str | None:
-    listed = runner(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"])
-    if listed.returncode != 0:
+    version = version_from_image_ref(image)
+    if version is None:
         return None
-    names = {line.strip() for line in listed.stdout.splitlines() if line.strip() and "<none>" not in line}
-    preferred = ("alpine:3.20", "alpine:latest", "busybox:latest", "postgres:16-alpine")
-    for image in preferred:
-        if image in names:
-            return image
-    for image in sorted(names):
-        if image.startswith(("alpine:", "busybox:", "postgres:")):
-            return image
-    for image in sorted(names):
-        if image.startswith("qdrant/qdrant:"):
-            return image
-    return None
+    if running:
+        return version
+    target_version = normalize_version(target) or (target if target.startswith("v") else None)
+    if version == target_version and exit_code not in (0, None):
+        return None
+    return version
 
 
-def discover_compose_volume(root: Path, runner: Runner | None = None) -> StorageObservation:
-    """Read the compose project's ``qdrant_data`` volume without starting Qdrant."""
-    run = runner or default_runner(root)
-    config_run = run(["docker", "compose", "config", "--format", "json"])
-    if config_run.returncode != 0:
-        detail = (config_run.stderr or config_run.stdout or "docker compose config failed").strip()
-        return StorageObservation(state="unknown", version=None, versions=(), detail=detail, source="volume")
-    try:
-        config = json.loads(config_run.stdout)
-    except json.JSONDecodeError as exc:
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail=f"docker compose config was not JSON ({exc.msg})",
-            source="volume",
-        )
-    name = volume_name_from_config(config)
-    if not name:
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail="docker compose config did not name the qdrant_data volume",
-            source="volume",
-        )
-    inspected = run(["docker", "volume", "inspect", "--format", "{{.Mountpoint}}", name])
-    if inspected.returncode != 0:
-        err = (inspected.stderr or inspected.stdout or "").strip()
-        if "no such volume" in err.lower():
-            return StorageObservation(
-                state="absent",
-                version=None,
-                versions=(),
-                detail=f"docker volume {name} does not exist",
-                source="volume",
-            )
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail=err or f"docker volume inspect {name} failed",
-            source="volume",
-        )
-    mount = Path(inspected.stdout.strip())
-    mount_error = f"{mount} is not a readable directory"
-    if mount.is_dir() and os.access(mount, os.R_OK | os.X_OK):
-        try:
-            return read_storage_tree(mount, source="volume-mount")
-        except OSError as exc:
-            mount_error = str(exc)
-    image = _local_reader_image(run)
-    if image is None:
-        return StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail=(
-                f"{mount_error}. No local image is available to copy version.info out "
-                "with --entrypoint /bin/sh, and the preflight will not pull one or start Qdrant."
-            ),
-            source="volume",
-        )
-    try:
-        argv = reader_argv(name, image)
-    except ValueError as exc:
-        return StorageObservation(state="unknown", version=None, versions=(), detail=str(exc), source="volume")
-    copied = run(argv)
-    if copied.returncode != 0:
-        err = (copied.stderr or copied.stdout or "read-only copy failed").strip()
-        return StorageObservation(state="unknown", version=None, versions=(), detail=err, source="volume")
-    with tempfile.TemporaryDirectory(prefix="aisoc-qdrant-preflight-") as tmp:
-        try:
-            materialize_reader_transcript(copied.stdout, Path(tmp))
-        except ValueError as exc:
-            return StorageObservation(
-                state="unknown",
-                version=None,
-                versions=(),
-                detail=f"refusing reader output: {exc}",
-                source="volume",
-            )
-        return read_storage_tree(Path(tmp), source="volume-copy")
+def pick_version(
+    *,
+    api: str | None,
+    image: str | None,
+    explicit: str | None,
+    marker: str | None,
+) -> tuple[str | None, str]:
+    """First source that actually observed a release. The compose pin is not one."""
+    if api:
+        return api, "api"
+    if image:
+        return image, "container-image"
+    if explicit:
+        return explicit, "explicit"
+    if marker:
+        return marker, "storage-marker"
+    return None, "unknown"
+
+
+def write_marker(path: Path, version: str) -> None:
+    normalized = normalize_version(version)
+    if normalized is None:
+        raise ValueError(f"refusing to record {version!r}")
+    target = path / MARKER_NAME
+    temporary = path / f".{MARKER_NAME}.tmp"
+    temporary.write_text(normalized + "\n", encoding="utf-8")
+    temporary.replace(target)
 
 
 def build_report(
     *,
     compose_pin: str | None,
     target: str,
-    observation: StorageObservation,
+    observation: Observation,
     error: str | None = None,
 ) -> dict[str, object]:
     blocked_reasons: list[str] = []
     required_steps: list[str] = []
-    allow_in_place = False
-    if observation.state == "observed":
-        allow_in_place, blocked_reasons, required_steps = decide_jump(observation.version, target)
-    elif observation.state in {"absent", "empty", "no-collections"} and error is None:
-        allow_in_place = True
-    else:
-        allow_in_place = False
-        blocked_reasons = [_UNKNOWN_REASON]
-        if observation.detail:
-            blocked_reasons.append(observation.detail)
-        required_steps = [
-            "Inspect the existing qdrant_data volume (collections/<name>/version.info) before recreating Qdrant.",
-        ]
     if error:
-        allow_in_place = False
-        blocked_reasons = [error, *blocked_reasons]
-    ok = allow_in_place and not blocked_reasons and error is None
+        allow = False
+        blocked_reasons.append(error)
+    elif observation.volume_state in {"absent", "empty"}:
+        allow = True
+    elif observation.volume_state == "unreadable" or not observation.version:
+        allow = False
+        blocked_reasons.append(
+            "Installed Qdrant version is unknown. The compose pin is the target image, "
+            "not the version of the existing volume, so it is not used."
+        )
+        required_steps.append(
+            "Leave the current Qdrant container in place and rerun this preflight so it "
+            "can read that process, or restore a volume that already carries "
+            f"{MARKER_NAME}."
+        )
+    else:
+        allow, blocked_reasons, required_steps = decide_jump(observation.version, target)
+    legacy = legacy_on_disk_blocks(target, observation.legacy_on_disk)
+    if legacy and observation.volume_state == "present":
+        allow = False
+        blocked_reasons = [legacy, *blocked_reasons]
+        required_steps.append("Do not mount this volume on qdrant/qdrant:v1.20.x.")
+    ok = allow and not blocked_reasons and error is None
     report: dict[str, object] = {
         "ok": ok,
-        "decision": "GO" if ok else "NO-GO",
         "compose_qdrant_pin": compose_pin,
         "target_image": target,
-        "storage_version_observed": observation.version if observation.state == "observed" else None,
-        "storage_versions_found": list(observation.versions),
-        "volume_state": observation.state,
-        "storage_source": observation.source,
-        "volume_detail": observation.detail,
-        "allow_in_place_volume_attach": allow_in_place and error is None,
+        "storage_version_observed": observation.version,
+        "storage_version_source": observation.source if observation.version else observation.source,
+        "volume_state": observation.volume_state,
+        "legacy_on_disk_payload": observation.legacy_on_disk,
+        "allow_in_place_volume_attach": allow,
         "blocked_reasons": blocked_reasons,
         "required_steps": required_steps,
         "evidence_script": "scripts/qdrant_migration_evidence.sh",
+        "detail": observation.detail,
         "no_go_examples": [
             "Mount v1.7 data directory on qdrant/qdrant:v1.20.0",
             "Upload snapshot created on v1.7.x directly to v1.20.x",
-            "Recreate Qdrant when collections/*/version.info cannot be read",
         ],
     }
     if error:
@@ -549,86 +460,408 @@ def build_report(
     return report
 
 
-def _infer_versions(root: Path) -> tuple[str, str | None]:
-    compose = root / "docker-compose.yml"
-    if not compose.is_file():
-        raise InventoryUnreadable(compose, "docker-compose.yml is not in the tree")
-    current = qdrant_pin_from_compose(compose.read_text(encoding="utf-8"))
-    if not current:
-        raise InventoryUnreadable(compose, "docker-compose.yml has no qdrant/qdrant pin")
-    inventory_pin: str | None = None
-    inventory = root / "docs" / "upgrade" / "dependency-inventory.json"
-    if inventory.is_file():
-        inventory_pin = qdrant_pin_from_inventory(inventory)
-    return current, inventory_pin
+def _run(argv: list[str], *, cwd: Path | None = None, timeout: float = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
 
 
-def _summary(report: dict[str, object]) -> str:
-    stored = report["storage_version_observed"] or report["volume_state"]
-    return f"qdrant preflight: {report['decision']} (stored {stored}, target {report['target_image']})"
+def docker_argv() -> list[str]:
+    """``docker`` if the daemon answers, else ``sudo -n docker``. Never prompts."""
+    if shutil.which("docker"):
+        try:
+            probe = _run(["docker", "info"], timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DockerUnavailable(str(exc)) from exc
+        if probe.returncode == 0:
+            return ["docker"]
+    if shutil.which("sudo"):
+        try:
+            probe = _run(["sudo", "-n", "docker", "info"], timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DockerUnavailable(str(exc)) from exc
+        if probe.returncode == 0:
+            return ["sudo", "-n", "docker"]
+    raise DockerUnavailable("docker is not available, so an existing qdrant_data volume cannot be read")
+
+
+def _compose(docker: list[str], root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return _run([*docker, "compose", *args], cwd=root, timeout=30)
+
+
+def _inspect_container(docker: list[str], container_id: str) -> dict[str, object] | None:
+    try:
+        proc = _run([*docker, "inspect", container_id], timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0]
+    return None
+
+
+def _storage_mount(inspected: dict[str, object]) -> tuple[str, str] | None:
+    mounts = inspected.get("Mounts")
+    if not isinstance(mounts, list):
+        return None
+    for mount in mounts:
+        if not isinstance(mount, dict) or mount.get("Destination") != STORAGE_MOUNT:
+            continue
+        if mount.get("Type") == "bind" and isinstance(mount.get("Source"), str):
+            return ("bind", mount["Source"])
+        if isinstance(mount.get("Name"), str):
+            return ("volume", mount["Name"])
+    return None
+
+
+def _published_http(inspected: dict[str, object]) -> str | None:
+    network = inspected.get("NetworkSettings")
+    if not isinstance(network, dict):
+        return None
+    ports = network.get("Ports")
+    if not isinstance(ports, dict):
+        return None
+    bindings = ports.get("6333/tcp")
+    if not isinstance(bindings, list) or not bindings:
+        return None
+    first = bindings[0]
+    if not isinstance(first, dict):
+        return None
+    host = first.get("HostIp") or "127.0.0.1"
+    port = first.get("HostPort")
+    if not isinstance(port, str) or not port:
+        return None
+    if host in {"0.0.0.0", "::", ""}:
+        host = "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
+def _container_facts(inspected: dict[str, object]) -> tuple[str | None, bool, int | None]:
+    config = inspected.get("Config")
+    image = config.get("Image") if isinstance(config, dict) else None
+    image_ref = image if isinstance(image, str) else None
+    state = inspected.get("State")
+    running = isinstance(state, dict) and state.get("Status") == "running"
+    exit_code: int | None = None
+    if isinstance(state, dict) and isinstance(state.get("ExitCode"), int):
+        exit_code = state["ExitCode"]
+    return image_ref, running, exit_code
+
+
+def _find_container_id(docker: list[str], root: Path) -> str | None:
+    try:
+        proc = _compose(docker, root, "ps", "-aq", "qdrant")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def _find_named_volume(docker: list[str], root: Path) -> str | None:
+    try:
+        proc = _run(
+            [*docker, "volume", "ls", "--filter", "label=com.docker.compose.volume=qdrant_data", "--format", "{{.Name}}"],
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    root_resolved = str(root.resolve())
+    for name in [line.strip() for line in proc.stdout.splitlines() if line.strip()]:
+        try:
+            inspected = _run([*docker, "volume", "inspect", name], timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if inspected.returncode != 0:
+            continue
+        try:
+            payload = json.loads(inspected.stdout)
+        except json.JSONDecodeError:
+            continue
+        if not payload or not isinstance(payload[0], dict):
+            continue
+        labels = payload[0].get("Labels") or {}
+        if not isinstance(labels, dict):
+            continue
+        working = labels.get("com.docker.compose.project.working_dir")
+        if isinstance(working, str) and str(Path(working).resolve()) == root_resolved:
+            return name
+    return None
+
+
+def _run_in_volume(
+    docker: list[str],
+    image: str,
+    volume: str,
+    *,
+    read_only: bool,
+    script: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str] | None:
+    mount = f"{volume}:{STORAGE_MOUNT}" + (":ro" if read_only else "")
+    argv = [*docker, "run", "--rm", "--network", "none", "--entrypoint", "/bin/sh", "-v", mount]
+    for key, value in (env or {}).items():
+        argv.extend(["-e", f"{key}={value}"])
+    argv.extend([image, "-c", script])
+    try:
+        return _run(argv, timeout=90)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _listing_from_mount(docker: list[str], image: str, volume: str) -> StorageScan | None:
+    proc = _run_in_volume(docker, image, volume, read_only=True, script=_read_volume_script())
+    if proc is None or proc.returncode != 0:
+        return None
+    return parse_volume_listing(proc.stdout)
+
+
+def _write_marker_in_volume(docker: list[str], image: str, volume: str, version: str) -> bool:
+    normalized = normalize_version(version)
+    if normalized is None:
+        return False
+    script = f"printf '%s\\n' \"$AISOC_QDRANT_VERSION\" > {STORAGE_MOUNT}/{MARKER_NAME}\n"
+    proc = _run_in_volume(
+        docker,
+        image,
+        volume,
+        read_only=False,
+        script=script,
+        env={"AISOC_QDRANT_VERSION": normalized},
+    )
+    return proc is not None and proc.returncode == 0
+
+
+def _write_marker_exec(docker: list[str], container_id: str, version: str) -> bool:
+    normalized = normalize_version(version)
+    if normalized is None:
+        return False
+    script = f"printf '%s\\n' \"$AISOC_QDRANT_VERSION\" > {STORAGE_MOUNT}/{MARKER_NAME}"
+    try:
+        proc = _run(
+            [*docker, "exec", "-e", f"AISOC_QDRANT_VERSION={normalized}", container_id, "/bin/sh", "-c", script],
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def persist_observation(observation: Observation, version: str) -> bool:
+    """Record a version we actually observed into the volume itself.
+
+    A running container is written with ``exec``. A second mount of a volume
+    qdrant already has open is not used.
+    """
+    if observation.storage_path is not None:
+        try:
+            write_marker(observation.storage_path, version)
+        except (OSError, ValueError):
+            return False
+        return True
+    if observation.docker and observation.container_id and _write_marker_exec(observation.docker, observation.container_id, version):
+        return True
+    if observation.docker and observation.container_id:
+        # exec failed because the container is stopped, or has no shell.
+        # Fall through to a one-shot mount only when nothing is running it.
+        return False if _container_is_running(observation.docker, observation.container_id) else _write_named(observation, version)
+    return _write_named(observation, version)
+
+
+def _container_is_running(docker: list[str], container_id: str) -> bool:
+    inspected = _inspect_container(docker, container_id)
+    if inspected is None:
+        return False
+    _image, running, _code = _container_facts(inspected)
+    return running
+
+
+def _write_named(observation: Observation, version: str) -> bool:
+    if observation.docker and observation.volume_name and observation.image_ref:
+        return _write_marker_in_volume(observation.docker, observation.image_ref, observation.volume_name, version)
+    return False
+
+
+def observe_storage_path(path: Path, *, url: str | None, explicit: str | None) -> Observation:
+    scan = scan_storage(path)
+    api = read_api_version(url) if url else None
+    version, source = pick_version(api=api, image=None, explicit=normalize_version(explicit), marker=scan.marker)
+    storage_path = path if path.is_dir() else None
+    if scan.state != "present":
+        return Observation(
+            volume_state=scan.state,
+            version=None,
+            source="none" if scan.state in {"empty", "absent"} else "unknown",
+            legacy_on_disk=scan.legacy_on_disk,
+            detail=scan.detail,
+            storage_path=storage_path,
+        )
+    if version is None:
+        source = "unknown"
+    return Observation(
+        volume_state="present",
+        version=version,
+        source=source,
+        legacy_on_disk=scan.legacy_on_disk,
+        detail=scan.detail,
+        storage_path=storage_path,
+    )
+
+
+def observe_deployment(root: Path, target: str) -> Observation:
+    """The volume Compose would recreate, read without starting the new image's server."""
+    try:
+        docker = docker_argv()
+    except DockerUnavailable as exc:
+        return Observation("unreadable", None, "unknown", False, str(exc))
+    container_id = _find_container_id(docker, root)
+    reader_image = f"qdrant/qdrant:{target}"
+    if container_id:
+        inspected = _inspect_container(docker, container_id)
+        if inspected is None:
+            return Observation(
+                "unreadable",
+                None,
+                "unknown",
+                False,
+                f"cannot inspect container {container_id}",
+                docker=docker,
+                container_id=container_id,
+            )
+        image_ref, running, exit_code = _container_facts(inspected)
+        image_version = trusted_image_version(image_ref, running=running, exit_code=exit_code, target=target)
+        api = read_api_version(_published_http(inspected) or "") if running and _published_http(inspected) else None
+        mount = _storage_mount(inspected)
+        scan = StorageScan("unreadable", None, False, "storage mount was not inspected")
+        storage_path: Path | None = None
+        volume_name: str | None = None
+        if mount and mount[0] == "bind":
+            storage_path = Path(mount[1])
+            scan = scan_storage(storage_path)
+        elif mount and mount[0] == "volume":
+            volume_name = mount[1]
+            listed = _listing_from_mount(docker, image_ref or reader_image, volume_name)
+            scan = listed if listed is not None else StorageScan("unreadable", None, False, "volume listing failed")
+        version, source = pick_version(api=api, image=image_version, explicit=None, marker=scan.marker)
+        state = scan.state
+        if state == "unreadable" and (api or image_version):
+            # The process answered, or the container image is still the old
+            # one. Not being able to list files is not the same as an empty
+            # volume: collections are assumed present so a failed listing
+            # cannot turn into GO.
+            state = "present"
+            if version is None:
+                source = "unknown"
+        if state == "present" and version is None:
+            source = "unknown"
+        return Observation(
+            volume_state=state,
+            version=version,
+            source=source if state == "present" else "none",
+            legacy_on_disk=scan.legacy_on_disk,
+            detail=scan.detail,
+            storage_path=storage_path,
+            docker=docker,
+            container_id=container_id,
+            volume_name=volume_name,
+            image_ref=image_ref or reader_image,
+        )
+    volume_name = _find_named_volume(docker, root)
+    if volume_name is None:
+        return Observation("absent", None, "none", False, "no qdrant container and no qdrant_data volume", docker=docker)
+    listed = _listing_from_mount(docker, reader_image, volume_name)
+    if listed is None:
+        return Observation(
+            "unreadable",
+            None,
+            "unknown",
+            False,
+            f"volume {volume_name} exists but could not be listed",
+            docker=docker,
+            volume_name=volume_name,
+            image_ref=reader_image,
+        )
+    version, source = pick_version(api=None, image=None, explicit=None, marker=listed.marker)
+    if listed.state == "present" and version is None:
+        source = "unknown"
+    return Observation(
+        volume_state=listed.state,
+        version=version,
+        source=source if listed.state == "present" else "none",
+        legacy_on_disk=listed.legacy_on_disk,
+        detail=listed.detail,
+        docker=docker,
+        volume_name=volume_name,
+        image_ref=reader_image,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--storage",
         "--storage-dir",
         default=None,
-        help="Qdrant storage root (the directory mounted at /qdrant/storage). Version is read from collections/<name>/version.info.",
+        dest="storage",
+        help="Existing Qdrant storage directory (the volume mounted at /qdrant/storage).",
     )
+    parser.add_argument("--url", default=None, help="Base URL of the Qdrant process that has that storage open.")
     parser.add_argument(
         "--storage-version",
         default=None,
-        help="Optional check against the version read from --storage-dir. On its own it is not a volume read and the preflight is NO-GO.",
+        help="Explicit observed release. Not a default: omitting it never substitutes the compose pin.",
     )
+    parser.add_argument("--target", default=None, help="Target image tag (default: the inventory pin).")
     parser.add_argument(
-        "--target",
-        default=None,
-        help="Target image tag. Default: the qdrant/qdrant pin in docker-compose.yml.",
+        "--record-only",
+        action="store_true",
+        help="Write the observed version into the volume and exit 0. make down uses this before it removes the container.",
     )
-    parser.add_argument("--self-test", action="store_true", help="Prove GO, NO-GO, and unknown, then exit.")
     args = parser.parse_args(argv)
-    if args.self_test:
-        return _self_test()
     root = repo_root()
     error: str | None = None
     compose_pin: str | None = None
-    inventory_pin: str | None = None
+    default_target = "v1.20.0"
     try:
-        compose_pin, inventory_pin = _infer_versions(root)
+        compose_pin, default_target = _infer_versions(root)
     except InventoryUnreadable as exc:
         error = str(exc)
-    if error is None and compose_pin and inventory_pin and _canonical(compose_pin) != _canonical(inventory_pin):
-        error = f"dependency inventory pins qdrant/qdrant at {inventory_pin} but docker-compose.yml pins {compose_pin}"
-    target = args.target or compose_pin or inventory_pin or ""
-    if not target:
-        error = error or "no Qdrant target tag"
-    if args.storage_dir is not None:
-        observation = read_storage_tree(Path(args.storage_dir), source="storage-dir")
-        if args.storage_version and observation.version and _canonical(args.storage_version) != _canonical(observation.version):
-            error = f"--storage-version {args.storage_version} does not match {observation.version} read from {args.storage_dir}"
-    elif args.storage_version:
-        observation = StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail=("--storage-version does not read the volume. Pass --storage-dir, or run with no flag so qdrant_data is inspected."),
-            source="cli",
-        )
-    elif error and compose_pin is None:
-        observation = StorageObservation(state="unknown", version=None, versions=(), detail=error, source="none")
+    target = args.target or default_target or "v1.20.0"
+    if args.storage:
+        observation = observe_storage_path(Path(args.storage), url=args.url, explicit=args.storage_version)
+    elif args.url or args.storage_version:
+        stated = normalize_version(args.storage_version)
+        api = read_api_version(args.url) if args.url else None
+        version, source = pick_version(api=api, image=None, explicit=stated, marker=None)
+        state = "present" if version else "unreadable"
+        observation = Observation(state, version, source if version else "unknown", False, "no storage directory was passed")
     else:
-        observation = discover_compose_volume(root)
+        observation = observe_deployment(root, target)
+    # Only a version we measured is written back. An explicit flag must not
+    # stamp the volume, or a wrong --storage-version becomes the next run's
+    # evidence.
+    if observation.version and observation.volume_state == "present" and observation.source in {"api", "container-image"}:
+        persist_observation(observation, observation.version)
     report = build_report(compose_pin=compose_pin, target=target, observation=observation, error=error)
+    if args.record_only:
+        report["recorded"] = bool(observation.version)
+        print(json.dumps(report, indent=2))
+        return 0
     print(json.dumps(report, indent=2))
-    print(_summary(report), file=sys.stderr)
     return 0 if report["ok"] else 1
-
-
-def _capture_main(argv: list[str]) -> tuple[int, dict[str, object]]:
-    stdout = StringIO()
-    with redirect_stdout(stdout), redirect_stderr(StringIO()):
-        code = main(argv)
-    return code, json.loads(stdout.getvalue())
 
 
 def _self_test() -> int:
@@ -639,61 +872,58 @@ def _self_test() -> int:
     allow_step, step_reasons, _steps = decide_jump("v1.19.0", "v1.20.0")
     if not allow_step or step_reasons:
         errors.append("v1.19.0 -> v1.20.0 is a consecutive minor and must be allowed")
-    allow_unknown, unknown_reasons, _steps = decide_jump(None, "v1.20.0")
-    if allow_unknown or not unknown_reasons:
-        errors.append("a missing stored version must be a NO-GO, not the target pin")
+    unknown, unknown_reasons, _steps = decide_jump(None, "v1.20.0")
+    if unknown or not unknown_reasons:
+        errors.append("an unknown installed version must be a NO-GO, not the compose pin")
+    if normalize_version("0.4.2") is not None or normalize_version("0.6.0") is not None:
+        errors.append("crate version.info values were treated as Qdrant releases")
 
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        bad = root / "dependency-inventory.json"
-        bad.write_text("{not json", encoding="utf-8")
+        path = Path(tmp) / "dependency-inventory.json"
+        path.write_text("{not json", encoding="utf-8")
         try:
-            target_from_inventory(bad, "v1.20.0")
+            target_from_inventory(path, "v1.20.0")
         except InventoryUnreadable as exc:
             if "not valid JSON" not in exc.reason:
                 errors.append(f"invalid JSON reason was {exc.reason!r}")
         else:
             errors.append("invalid inventory JSON was accepted and the default pin was kept")
 
-        pinned = root / "inventory.json"
-        pinned.write_text(json.dumps({"datastore_pins": {"qdrant/qdrant": "v1.19.4"}}), encoding="utf-8")
-        if qdrant_pin_from_inventory(pinned) != "v1.19.4":
-            errors.append("datastore_pins qdrant/qdrant was not read")
-
-    fixtures = repo_root() / "tests" / "fixtures" / "qdrant"
-    expectations = (
-        ("v1.7.0", 1, "NO-GO", "1.7.0"),
-        ("v1.19.0", 0, "GO", "1.19.0"),
-        ("unknown", 1, "NO-GO", None),
-    )
-    for name, code, decision, stored in expectations:
-        path = fixtures / name
-        if not path.is_dir():
-            errors.append(f"missing fixture {path}")
-            continue
-        status, report = _capture_main(["--storage-dir", str(path), "--target", "v1.20.0"])
-        if status != code or report.get("decision") != decision:
-            errors.append(f"fixture {name}: exit {status} decision {report.get('decision')!r}, wanted {code} {decision}")
-        if report.get("storage_version_observed") != stored:
-            errors.append(f"fixture {name}: stored {report.get('storage_version_observed')!r}, wanted {stored!r}")
-        pin = report.get("compose_qdrant_pin")
-        observed = report.get("storage_version_observed")
-        if stored is None and pin and observed == pin:
-            errors.append(f"fixture {name}: storage version collapsed to the compose pin")
-
-    invented = build_report(
-        compose_pin="v1.20.0",
-        target="v1.20.0",
-        observation=StorageObservation(
-            state="unknown",
-            version=None,
-            versions=(),
-            detail="not inspected",
-            source="volume",
-        ),
-    )
-    if invented["ok"] or invented["storage_version_observed"] is not None:
-        errors.append("unknown storage was reported as the compose pin")
+        storage = Path(tmp) / "storage"
+        collection = storage / "collections" / "probe"
+        segment = collection / "0" / "segments" / "abc"
+        segment.mkdir(parents=True)
+        (collection / "version.info").write_text("0.4.2", encoding="utf-8")
+        (collection / "config.json").write_text("{}", encoding="utf-8")
+        (segment / "segment.json").write_text(
+            json.dumps({"config": {"payload_storage_type": {"type": "on_disk"}, "vector_data": {"": {"storage_type": "Memory"}}}}),
+            encoding="utf-8",
+        )
+        scanned = scan_storage(storage)
+        if scanned.state != "present" or scanned.marker is not None or not scanned.legacy_on_disk:
+            errors.append(f"v1.7-shaped storage scanned as {scanned}")
+        report = build_report(
+            compose_pin="v1.20.0",
+            target="v1.20.0",
+            observation=Observation("present", None, "unknown", scanned.legacy_on_disk, scanned.detail),
+        )
+        if report["ok"] or report["storage_version_observed"] == "v1.20.0":
+            errors.append("missing storage version fell back to the compose pin")
+        write_marker(storage, "v1.19.0")
+        marked = scan_storage(storage)
+        if marked.marker != "v1.19.0":
+            errors.append(f"marker read back as {marked.marker}")
+        allowed = build_report(
+            compose_pin="v1.20.0",
+            target="v1.20.0",
+            observation=Observation("present", marked.marker, "storage-marker", False, "marker"),
+        )
+        if not allowed["ok"]:
+            errors.append("a stored v1.19.0 marker was refused for v1.20.0")
+        if trusted_image_version("qdrant/qdrant:v1.20.0", running=False, exit_code=101, target="v1.20.0") is not None:
+            errors.append("a crashed target image was trusted as the installed version")
+        if trusted_image_version("qdrant/qdrant:v1.7.0", running=False, exit_code=0, target="v1.20.0") != "v1.7.0":
+            errors.append("a stopped v1.7 container was not trusted")
 
     if errors:
         for item in errors:

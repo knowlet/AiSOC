@@ -80,7 +80,8 @@ console_url = $(if $(strip $(CONSOLE_URL)),$(strip $(CONSOLE_URL)),http://localh
 .PHONY: help install env up up-dev up-full up-gpu up-host-llm _gpu_preflight _llm_note pull down restart status doctor smoke _anonymous_write_is_refused demo logs clean \
         bootstrap ingest-token api-token test test-unit test-integration test-e2e stats papers \
         papers-install demo-script replay-eval replay-eval-verify \
-        upgrade _schema_guard _wait_postgres _upgrade_backup _migrate
+        upgrade _schema_guard _wait_postgres _upgrade_backup _migrate \
+        _qdrant_preflight _qdrant_record_version
 
 help:
 	@echo ""
@@ -96,8 +97,9 @@ help:
 	@echo ""
 	@echo "  Upgrading"
 	@echo "    make upgrade        Back up, apply pending migrations, then start the new code."
-	@echo "                        Refuses first if the Qdrant volume's stored version is unknown"
-	@echo "                        or cannot attach to the new image. Run it after 'git pull'."
+	@echo "                        This is the supported upgrade. Run it after 'git pull'."
+	@echo "                        Refuses to recreate Qdrant when the existing volume's"
+	@echo "                        release is unknown or more than one minor behind."
 	@echo "    make up             Refuses to start when the schema is behind the code, and"
 	@echo "                        names 'make upgrade'. It never migrates on its own."
 	@echo ""
@@ -136,12 +138,7 @@ env:
 # allocated` against whichever container lost the race, which names neither the
 # process holding the port nor what to do about it. Half the stack is running
 # by then, so the error also arrives after a minute of unrelated output.
-up: env _ports _refresh _schema_guard
-	@# Reads collections/<name>/version.info from the existing qdrant_data volume
-	@# and exits 1 before compose recreates Qdrant when that version is unknown
-	@# or unsafe. A volume Docker says is absent, or an empty storage directory,
-	@# is not treated as the Compose pin.
-	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
+up: env _ports _refresh _schema_guard _qdrant_preflight
 	@# UP_FLAGS is the documented way to pass compose's own flags through
 	@# without a second code path for starting the stack. install.sh's
 	@# --rebuild uses it (`make up UP_FLAGS=--build`), which is how that
@@ -199,8 +196,7 @@ bootstrap:
 #
 # The bypass is still refused if the stack publishes a non-loopback address,
 # so this makes a laptop convenient rather than a server open.
-up-dev: env _ports _refresh
-	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
+up-dev: env _ports _refresh _qdrant_preflight
 	$(COMPOSE) -f docker-compose.yml -f infra/compose/docker-compose.dev.yml up -d
 	@$(MAKE) --no-print-directory _wait
 	@echo ""
@@ -213,8 +209,7 @@ up-dev: env _ports _refresh
 	@echo ""
 	@$(MAKE) --no-print-directory bootstrap
 
-up-full: env _ports _refresh _schema_guard
-	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
+up-full: env _ports _refresh _schema_guard _qdrant_preflight
 	AISOC_LAKE_WRITER_ENABLED=true AISOC_GRAPH_ENABLED=true $(COMPOSE) --profile full up -d
 	@$(MAKE) --no-print-directory _wait PROFILE=full
 	@echo ""
@@ -244,8 +239,7 @@ up-full: env _ports _refresh _schema_guard
 # no NVIDIA container toolkit is the daemon's own
 # `could not select device driver "nvidia"`, which names neither a cause nor a
 # next command.
-up-gpu: env _gpu_preflight _ports _refresh _schema_guard
-	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
+up-gpu: env _gpu_preflight _ports _refresh _schema_guard _qdrant_preflight
 	$(COMPOSE) -f docker-compose.yml -f infra/compose/docker-compose.gpu.yml up -d
 	@$(MAKE) --no-print-directory _wait
 	@echo ""
@@ -263,8 +257,7 @@ _gpu_preflight:
 
 # Uses an Ollama already listening on the host. The bundled one is not started
 # at all, so there is no second copy and no port conflict to resolve.
-up-host-llm: env _ports _refresh _schema_guard
-	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
+up-host-llm: env _ports _refresh _schema_guard _qdrant_preflight
 	$(COMPOSE) -f docker-compose.yml -f infra/compose/docker-compose.host-llm.yml up -d
 	@$(MAKE) --no-print-directory _wait
 	@echo ""
@@ -469,16 +462,9 @@ _wait_postgres:
 # something rather than repeating the first check — a pg_dump that writes an
 # empty file exits 0.
 #
-# The Qdrant check is ahead of both, and ahead of `compose up`. The image pin
-# in this file is the version about to start, not the version stored in
-# qdrant_data. v1.7.0 data on v1.20.0 panics. The script reads
-# collections/<name>/version.info from the volume and exits 1 when that
-# version is unknown or unsafe, which stops this target before the container
-# is recreated.
-upgrade:
-	@echo "==> Qdrant storage preflight"
-	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
-	@echo ""
+# `_qdrant_preflight` is a prerequisite, so it runs before this recipe and
+# before `compose up` recreates qdrant on `qdrant_data`.
+upgrade: _qdrant_preflight
 	@echo "==> Preflight"
 	@$(PYTHON) scripts/preflight_upgrade.py --skip-backup-check
 	@echo ""
@@ -628,8 +614,20 @@ _wait:
 	echo "Run 'make doctor' to find out why."; \
 	exit 1
 
-down:
+down: _qdrant_record_version
 	$(COMPOSE) --profile full --profile monitoring --profile chatops --profile extras --profile osquery down
+
+# Qdrant will not open a volume written more than one minor behind the image
+# in docker-compose.yml, and v1.7 storage panics on v1.20. The compose pin is
+# the image about to start, so it is not evidence of what the volume is.
+# This runs before any target that recreates the container. `down` records
+# the version into the volume first: compose down deletes the container and
+# keeps the data, and the next `up` would otherwise have nothing to read.
+_qdrant_preflight:
+	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py
+
+_qdrant_record_version:
+	@$(PYTHON) scripts/check_qdrant_upgrade_preflight.py --record-only
 
 restart: down up
 

@@ -429,19 +429,18 @@ def test_upgrade_target_exists_and_is_ordered() -> None:
     )
 
 
-@pytest.mark.parametrize("target", ["upgrade", "up", "up-dev", "up-full", "up-gpu", "up-host-llm"])
-def test_qdrant_preflight_runs_before_compose_recreates_the_container(target: str) -> None:
-    """The stored volume is judged before `compose up` recreates Qdrant.
-
-    A check that appears only after `up -d` reports a panic the operator
-    already has. `upgrade` is the supported path; the other targets are the
-    commands that also recreate the container on `qdrant_data`.
-    """
-    recipe = _own_recipe(target)
-    assert "check_qdrant_upgrade_preflight.py" in recipe, f"`make {target}` never runs the Qdrant storage preflight:\n{recipe}"
-    assert recipe.index("check_qdrant_upgrade_preflight.py") < recipe.index("up -d"), (
-        f"`make {target}` recreates containers before reading the Qdrant volume:\n{recipe}"
-    )
+def test_qdrant_preflight_runs_before_compose_recreates_the_volume() -> None:
+    """The image pin is the target. The volume has to be read first."""
+    upgrade = _own_recipe("upgrade")
+    assert upgrade.index("_qdrant_preflight") < upgrade.index("up -d")
+    assert "check_qdrant_upgrade_preflight.py" in _own_recipe("_qdrant_preflight")
+    for target in ("up", "up-dev", "up-full", "up-gpu", "up-host-llm"):
+        head = _own_recipe(target).split("\n", 1)[0]
+        assert "_qdrant_preflight" in head.split(), target
+    down_head, _, down_body = _own_recipe("down").partition("\n")
+    assert "_qdrant_record_version" in down_head.split()
+    assert "down" in down_body
+    assert "--record-only" in _own_recipe("_qdrant_record_version")
 
 
 def test_upgrade_is_declared_phony_and_advertised() -> None:

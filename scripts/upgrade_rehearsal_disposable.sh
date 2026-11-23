@@ -117,9 +117,10 @@ curl -fsS -X PUT "http://127.0.0.1:16333/collections/probe/points" \
 SNAP=$(curl -fsS -X POST "http://127.0.0.1:16333/collections/probe/snapshots" 2>/dev/null | head -c 200 || echo none)
 log "Qdrant v1.7 snapshot: $SNAP"
 "${DOCKER[@]}" stop aisoc-qdrant-r1 >/dev/null
-# version.info in $QD_VOL is the stored release. Do not start v1.20 on it.
+# The volume was just written by v1.7.0. version.info there is the crate
+# version (0.4.2), not the release. The preflight must still refuse v1.20.
 set +e
-python3 "$ROOT/scripts/check_qdrant_upgrade_preflight.py" --storage-dir "$QD_VOL" --target v1.20.0
+python3 "$ROOT/scripts/check_qdrant_upgrade_preflight.py" --storage "$QD_VOL" --target v1.20.0
 preflight_status=$?
 set -e
 if [[ "$preflight_status" -eq 0 ]]; then
