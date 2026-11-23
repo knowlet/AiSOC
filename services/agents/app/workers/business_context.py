@@ -160,7 +160,8 @@ def _dotted(alert: dict[str, Any], path: str) -> Any:
     """Walk ``path`` into ``alert``; :data:`_MISSING` when a key is absent.
 
     An absent key and a key whose value is null are different facts, and the
-    console's preview engine (``services/api/.../engine.py``) keeps them apart.
+    console's preview engine
+    (``services/api/app/services/business_context/engine.py``) keeps them apart.
     This used to return ``None`` for both, so ``exists`` on ``owner: null``
     matched in the preview and not here. A mandatory escalation rule written
     against that preview then never fired at triage.
