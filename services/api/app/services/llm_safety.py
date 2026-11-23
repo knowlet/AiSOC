@@ -66,7 +66,7 @@ from app._vendor.llm_contract_rules import (
 from app._vendor.llm_contract_rules import (
     validate_messages as validate_messages,
 )
-from app._vendor.ssrf_guard import validate_outbound_url
+from app._vendor.ssrf_guard import guard_runtime_llm_url
 from app.services import llm_health
 
 # These names are re-exports: callers do
@@ -83,21 +83,10 @@ __all__ = [
     "LLMInputContract",
     "classify_message",
     "is_contract_enforced",
-    "guard_llm_destination",
+    "guard_runtime_llm_url",
     "safe_chat_completions_request",
     "validate_messages",
 ]
-
-
-def guard_llm_destination(url: str) -> str:
-    """Refuse loopback, link-local and metadata before a model POST.
-
-    Private addresses stay allowed. That is the same policy the credential
-    probe uses (``allow_private=True``): an on-prem model host is a normal
-    deployment, and ``169.254.169.254`` is not. Every runtime call goes
-    through here, not only the probe.
-    """
-    return validate_outbound_url(url, allow_private=True)
 
 
 DEFAULT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
@@ -135,9 +124,11 @@ async def safe_chat_completions_request(
     than the provider failing to answer.
     """
     validated = LLMInputContract.validate(messages)
-    # After the contract, before the socket. A tenant route to loopback,
-    # link-local or a name that resolves there must not receive the prompt.
-    guard_llm_destination(url)
+    # Every runtime completion passes through this function, so the outbound
+    # guard lives here rather than at each caller. A tenant route the probe
+    # would refuse must not be posted to from explain, triage or any other
+    # caller that already holds a resolved URL.
+    guard_runtime_llm_url(url)
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:

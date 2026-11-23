@@ -825,7 +825,7 @@ class TestGenerateAlertExplanation:
         assert db.execute.await_count == 3
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("base_path", ["", "/v1"])
+    @pytest.mark.parametrize("base_path", ["", "/v1", "/api"])
     async def test_allowed_no_auth_route_calls_real_http_transport(self, monkeypatch: pytest.MonkeyPatch, base_path: str) -> None:
         """A usable local endpoint does not need the deployment's credentials."""
         from app.core import airgap as airgap_mod
@@ -846,7 +846,8 @@ class TestGenerateAlertExplanation:
                         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                     }
                 ).encode()
-                self.send_response(200 if self.path == "/v1/chat/completions" else 404)
+                accepted = self.path in {"/v1/chat/completions", "/api/chat/completions"}
+                self.send_response(200 if accepted else 404)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(response)))
                 self.end_headers()
@@ -858,6 +859,11 @@ class TestGenerateAlertExplanation:
         monkeypatch.setenv("OPENAI_API_KEY", "environment-provider-test")
         monkeypatch.setenv("LITELLM_MASTER_KEY", "environment-gateway-test")
         monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        # The runtime guard refuses loopback. This fixture is the one host
+        # the operator allow-list exists to admit; the refusal tests do not
+        # set it.
+        monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "127.0.0.1")
+        monkeypatch.delenv("AISOC_SSRF_EXTRA_BLOCKED_HOSTS", raising=False)
         monkeypatch.setattr(airgap_mod.settings, "AISOC_AIRGAPPED", False)
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -891,7 +897,7 @@ class TestGenerateAlertExplanation:
         assert explanation.summary == summary
         assert len(calls) == 1
         request = calls[0]
-        assert request["path"] == "/v1/chat/completions"
+        assert request["path"] == ("/api/chat/completions" if base_path == "/api" else "/v1/chat/completions")
         assert request["body"]["model"] == "tenant-local-model"
         headers = {name.lower(): value for name, value in request["headers"].items()}
         assert headers["authorization"] == "Bearer aisoc-no-auth"

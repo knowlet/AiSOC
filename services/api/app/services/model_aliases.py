@@ -155,37 +155,33 @@ def completions_url_for_base(base_url: str) -> str:
     that was running beside it.
 
     So the suffix is decided by what the base already carries rather than
-    assumed. A bare origin (``https://api.openai.com``, ``http://vllm:8000``)
-    takes ``/v1/chat/completions``. A path the operator already set — ``/v1``,
-    ``/api``, an Azure deployment path — is the API root, and the call is
-    ``{base}/chat/completions``. Inserting ``/v1`` under ``/api`` probes a
-    different URL than the runtime client, which posts ``/chat/completions``
-    onto that root.
-
-    This is the one builder. The credential probe, both explain paths, model
-    discovery and the agent factory's SDK base are derived from it.
+    assumed: a base that ends in a version segment takes ``/chat/completions``,
+    and a bare host takes ``/v1/chat/completions`` so a BYOK value like
+    ``https://api.openai.com`` still resolves. A base that already has some
+    other path, such as ``/api``, does not gain a ``/v1`` segment: the OpenAI
+    SDK appends ``/chat/completions`` to the base it was given, and inserting
+    ``/v1`` made a probe of that base hit a different path from runtime.
     """
     base = (base_url or "").strip().rstrip("/")
     if not base:
         return DEFAULT_OPENAI_CHAT_COMPLETIONS_URL
     if base.endswith("/chat/completions"):
         return base
-    # urlsplit, not a suffix regex: a query string must not hide the path,
-    # and an existing path is not a bare origin.
-    if urlsplit(base).path in ("", "/"):
-        return f"{base}/v1/chat/completions"
-    return f"{base}/chat/completions"
+    path = urlsplit(base).path.rstrip("/")
+    if path:
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
 
 
-def sdk_base_for(base_url: str) -> str:
-    """Base URL the OpenAI SDK should receive so it posts to :func:`completions_url_for_base`.
+def sdk_base_url_for(base_url: str) -> str:
+    """Base URL to give the OpenAI SDK so it requests :func:`completions_url_for_base`.
 
-    The SDK appends ``/chat/completions`` and does not insert ``/v1``. Passing
-    it the parent of the shared completions URL is what makes a probe and a
-    runtime call hit the same path.
+    The SDK joins ``base_url`` with ``chat/completions``. Returning the
+    completions URL with that suffix removed is how a runtime client and a
+    probe that calls :func:`completions_url_for_base` stay on one builder.
     """
     full = completions_url_for_base(base_url)
     suffix = "/chat/completions"
     if full.endswith(suffix):
         return full[: -len(suffix)]
-    return (base_url or "").strip().rstrip("/")
+    return full

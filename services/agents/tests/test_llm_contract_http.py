@@ -13,6 +13,7 @@ These tests ensure the helper:
 from __future__ import annotations
 
 import json
+import socket
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +25,16 @@ from app.llm.contract import (
     safe_chat_completions_request,
     set_contract_enforcement,
 )
+
+
+@pytest.fixture(autouse=True)
+def _public_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtime guard resolves the completions host before the mock client runs."""
+
+    def fake(host: str, *_args: object, **_kwargs: object) -> list:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
+
+    monkeypatch.setattr("app.playbook.ssrf_guard.socket.getaddrinfo", fake)
 
 
 @pytest.fixture

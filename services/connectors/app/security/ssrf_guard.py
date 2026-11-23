@@ -267,4 +267,57 @@ def validate_outbound_url(url: str, *, allow_private: bool | None = None) -> str
     return url
 
 
-__all__ = ["SSRFError", "validate_outbound_url"]
+# Addresses that are cloud metadata even when they are not link-local.
+# 169.254.169.254 is both; the others are the ECS and Alibaba endpoints.
+_METADATA_ADDRESSES: frozenset[str] = frozenset(
+    {
+        "169.254.169.254",
+        "169.254.170.2",
+        "100.100.100.200",
+        "fd00:ec2::254",
+    }
+)
+
+
+def guard_runtime_llm_url(url: str) -> str:
+    """Validate a URL before a runtime LLM call.
+
+    Private LAN hosts stay reachable (``allow_private=True``), which is what
+    local model servers need. Loopback, link-local and metadata destinations
+    are refused. An operator allow-list can still name an exact loopback host
+    for a tunnel; it cannot re-open link-local or metadata, including a DNS
+    name that resolves to one of those addresses.
+    """
+    validate_outbound_url(url, allow_private=True)
+    _reject_link_local_and_metadata(url)
+    return url
+
+
+def _reject_link_local_and_metadata(url: str) -> None:
+    """Refuse link-local and metadata even when the allow-list skipped classification.
+
+    ``validate_outbound_url`` already rejects those addresses for a host it
+    classifies. ``AISOC_SSRF_ALLOW_HOSTS`` returns before that classification,
+    which is the escape hatch for a tunneled loopback appliance. A name on
+    that list that resolves to a metadata address must still be refused.
+    """
+    host = (urlsplit(url.strip()).hostname or "").strip().lower()
+    if not host:
+        raise SSRFError("URL has no hostname")
+
+    literal = _coerce_ip(host)
+    # A name the shared guard already resolved is not looked up again. The
+    # allow-list and IP literals are the paths that skipped that lookup.
+    if literal is None and host not in _allowed_hosts():
+        return
+
+    raw = [literal] if isinstance(literal, ipaddress.IPv4Address | ipaddress.IPv6Address) else _resolve_host_addresses(host)
+    for ip in raw:
+        if not isinstance(ip, ipaddress.IPv4Address | ipaddress.IPv6Address):
+            continue
+        mapped = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None else ip
+        if mapped.is_link_local or str(mapped) in _METADATA_ADDRESSES:
+            raise SSRFError(f"host {host!r} is blocked: link-local or metadata address {mapped}")
+
+
+__all__ = ["SSRFError", "guard_runtime_llm_url", "validate_outbound_url"]

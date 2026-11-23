@@ -69,7 +69,7 @@ from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
 from app.services import llm_health
 from app.services.llm_runtime import probe as probe_runtime
-from app.services.llm_tenant_routing import allows_unauthenticated, requires_explicit_base, tenant_route
+from app.services.llm_tenant_routing import allows_unauthenticated, tenant_route
 from app.services.model_aliases import gateway_url, is_gateway_alias, resolve_api_key
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -372,16 +372,21 @@ async def tenant_llm_status(
         env_base=env_base_url,
         env_model=env_model,
     )
-    if requires_explicit_base(cred.provider) and not (cred.base_url or "").strip():
-        return _compute_status(
+    if cred.provider == "azure-openai" and not (base_url or "").strip():
+        snap = _compute_status(
             base_url="",
-            model="",
-            key_set=False,
+            model=model or "",
+            key_set=bool(cred.api_key_vault),
             source="tenant",
-            policy_override=(
-                "Azure OpenAI requires an explicit base URL. The deployment endpoint was not used, and the stored key was not sent there."
-            ),
+            allows_no_auth=False,
         )
+        snap["provider"] = "azure-openai"
+        snap["effective_path"] = "fallback"
+        snap["policy_note"] = (
+            "Azure OpenAI has no base URL. The stored key is not sent to the deployment default. Set the resource endpoint before using it."
+        )
+        return snap
+
     tenant_contributed = tenant_base or tenant_model
     env_contributed = (not tenant_base and bool(env_base_url)) or (not tenant_model and bool(env_model))
     env_key_set = env_key_set and inherit_env_key
