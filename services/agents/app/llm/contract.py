@@ -193,7 +193,7 @@ async def safe_ainvoke(llm: Any, messages: Iterable[Any], *, cache_response: boo
     if use_cache:
         cached = _RESPONSE_CACHE.lookup(model=model, prompt=prompt, user_input=user_input)
         if cached is not None:
-            return AIMessage(content=cached)
+            return AIMessage(content=cached, response_metadata={"aisoc_response_cache_hit": True})
 
     # Pseudonymize before egress, restore after. Here rather than at each
     # of the sixteen call sites, because this is the one place they all

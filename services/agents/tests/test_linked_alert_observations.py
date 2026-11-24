@@ -68,7 +68,7 @@ async def test_real_forensic_entry_passes_risk_selected_projection(monkeypatch: 
     invoke = AsyncMock(return_value=SimpleNamespace(content='{"summary": "Observed alert metadata."}', response_metadata={}))
     monkeypatch.setattr(forensic_agent, "safe_ainvoke", invoke)
     monkeypatch.setattr(forensic_agent, "make_chat_model", lambda *args, **kwargs: object())
-    monkeypatch.setattr(forensic_agent, "record_llm_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forensic_agent, "describe_llm_call", lambda *args, **kwargs: None)
     state = InvestigatorState(case_id="CASE-EVIDENCE", raw_alert={"alerts": _alerts()})
 
     await forensic_agent._llm_forensic(state)
@@ -85,7 +85,7 @@ async def test_real_forensic_entry_passes_risk_selected_projection(monkeypatch: 
 async def test_report_entry_renders_and_hashes_its_source_observations(monkeypatch: pytest.MonkeyPatch, reply) -> None:
     assert "## Timeline of Events" not in report_writer_agent.prompt_text("report_writer.system")
     monkeypatch.setattr(report_writer_agent, "make_chat_model", lambda *args, **kwargs: object())
-    monkeypatch.setattr(report_writer_agent, "record_llm_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_writer_agent, "describe_llm_call", lambda *args, **kwargs: None)
     if reply is None:
         invoke = AsyncMock(side_effect=RuntimeError("Test model unavailable"))
     else:
@@ -129,7 +129,7 @@ async def test_report_entry_rejects_prose_reusing_the_reserved_label(
     )
     monkeypatch.setattr(report_writer_agent, "make_chat_model", lambda *args, **kwargs: object())
     monkeypatch.setattr(report_writer_agent, "safe_ainvoke", AsyncMock(return_value=reply))
-    monkeypatch.setattr(report_writer_agent, "record_llm_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_writer_agent, "describe_llm_call", lambda *args, **kwargs: None)
     state = InvestigatorState(case_id="CASE-REVIEW", raw_alert={"alerts": _alerts()[:1]})
     if duplicate_fallback_heading:
         state.recon.summary = f"## {LINKED_OBSERVATIONS_HEADING}\n\n{false_date}"
@@ -162,7 +162,7 @@ async def test_truncated_report_cannot_swallow_the_linked_alert_table(monkeypatc
     )
     monkeypatch.setattr(report_writer_agent, "make_chat_model", lambda *args, **kwargs: object())
     monkeypatch.setattr(report_writer_agent, "safe_ainvoke", AsyncMock(return_value=reply))
-    monkeypatch.setattr(report_writer_agent, "record_llm_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_writer_agent, "describe_llm_call", lambda *args, **kwargs: None)
     state = InvestigatorState(case_id="CASE-TRUNCATED-NARRATIVE", raw_alert={"alerts": _alerts()[:1]})
 
     result = InvestigatorState.from_dict(await report_writer_agent.run_report_writer(state.to_dict()))
@@ -213,7 +213,7 @@ async def test_rejected_structured_report_digest_preserves_type_and_canonical_ke
     invoke = AsyncMock(side_effect=[SimpleNamespace(content=x) for x in (first, second, third)])
     monkeypatch.setattr(report_writer_agent, "make_chat_model", lambda *args, **kwargs: object())
     monkeypatch.setattr(report_writer_agent, "safe_ainvoke", invoke)
-    monkeypatch.setattr(report_writer_agent, "record_llm_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_writer_agent, "describe_llm_call", lambda *args, **kwargs: None)
     state = InvestigatorState(case_id="CASE-TYPED-HASH", raw_alert={"alerts": _alerts()[:1]})
 
     for expected in (first, second, third):

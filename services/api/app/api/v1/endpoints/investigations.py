@@ -100,6 +100,17 @@ class ModelCostBreakdown(BaseModel):
     resolved_model: str | None = None
     total_prompt_tokens: int
     total_completion_tokens: int
+    #: Cache tokens are included in total_prompt_tokens. Counts qualify
+    #: observed zero, missing metadata and partially covered runs separately.
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    cache_read_token_call_count: int = 0
+    cache_creation_token_call_count: int = 0
+    #: Gateway-reported components, already included in total_cost_usd.
+    cache_read_cost_usd: float = 0.0
+    cache_creation_cost_usd: float = 0.0
+    cache_read_cost_call_count: int = 0
+    cache_creation_cost_call_count: int = 0
     total_cost_usd: float
     measured_call_count: int = 0
     estimated_cost_usd: float = 0.0
@@ -126,6 +137,15 @@ class CostAggregateRow(BaseModel):
     calls: int
     total_prompt_tokens: int
     total_completion_tokens: int
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    cache_read_token_call_count: int = 0
+    cache_creation_token_call_count: int = 0
+    #: Gateway-reported components, already included in total_cost_usd.
+    cache_read_cost_usd: float = 0.0
+    cache_creation_cost_usd: float = 0.0
+    cache_read_cost_call_count: int = 0
+    cache_creation_cost_call_count: int = 0
     total_cost_usd: float
     measured_call_count: int = 0
     estimated_cost_usd: float = 0.0
@@ -297,6 +317,14 @@ def _aggregate_row(row: RowMapping) -> CostAggregateRow:
         calls=calls,
         total_prompt_tokens=int(row["total_prompt_tokens"] or 0),
         total_completion_tokens=int(row["total_completion_tokens"] or 0),
+        total_cache_read_tokens=int(row["total_cache_read_tokens"] or 0),
+        total_cache_creation_tokens=int(row["total_cache_creation_tokens"] or 0),
+        cache_read_token_call_count=int(row["cache_read_token_call_count"] or 0),
+        cache_creation_token_call_count=int(row["cache_creation_token_call_count"] or 0),
+        cache_read_cost_usd=float(row["cache_read_cost_usd"] or 0.0),
+        cache_creation_cost_usd=float(row["cache_creation_cost_usd"] or 0.0),
+        cache_read_cost_call_count=int(row["cache_read_cost_call_count"] or 0),
+        cache_creation_cost_call_count=int(row["cache_creation_cost_call_count"] or 0),
         total_cost_usd=cost,
         measured_call_count=measured_calls,
         estimated_cost_usd=float(row["estimated_cost_usd"] or 0.0),
@@ -330,6 +358,14 @@ async def _fetch_model_costs(
                    resolved_model,
                    total_prompt_tokens,
                    total_completion_tokens,
+                   total_cache_read_tokens,
+                   total_cache_creation_tokens,
+                   cache_read_token_call_count,
+                   cache_creation_token_call_count,
+                   cache_read_cost_usd,
+                   cache_creation_cost_usd,
+                   cache_read_cost_call_count,
+                   cache_creation_cost_call_count,
                    measured_cost_usd,
                    measured_call_count,
                    estimated_cost_usd,
@@ -351,6 +387,14 @@ async def _fetch_model_costs(
             resolved_model=(str(row["resolved_model"]) if row["resolved_model"] else None),
             total_prompt_tokens=int(row["total_prompt_tokens"] or 0),
             total_completion_tokens=int(row["total_completion_tokens"] or 0),
+            total_cache_read_tokens=int(row["total_cache_read_tokens"] or 0),
+            total_cache_creation_tokens=int(row["total_cache_creation_tokens"] or 0),
+            cache_read_token_call_count=int(row["cache_read_token_call_count"] or 0),
+            cache_creation_token_call_count=int(row["cache_creation_token_call_count"] or 0),
+            cache_read_cost_usd=float(row["cache_read_cost_usd"] or 0.0),
+            cache_creation_cost_usd=float(row["cache_creation_cost_usd"] or 0.0),
+            cache_read_cost_call_count=int(row["cache_read_cost_call_count"] or 0),
+            cache_creation_cost_call_count=int(row["cache_creation_cost_call_count"] or 0),
             total_cost_usd=float(row["measured_cost_usd"] or 0.0),
             measured_call_count=int(row["measured_call_count"] or 0),
             estimated_cost_usd=float(row["estimated_cost_usd"] or 0.0),
@@ -431,6 +475,14 @@ async def aggregate_costs(
                        SUM(c.call_count)              AS calls,
                        SUM(c.total_prompt_tokens)     AS total_prompt_tokens,
                        SUM(c.total_completion_tokens) AS total_completion_tokens,
+                       SUM(c.total_cache_read_tokens) AS total_cache_read_tokens,
+                       SUM(c.total_cache_creation_tokens) AS total_cache_creation_tokens,
+                       SUM(c.cache_read_token_call_count) AS cache_read_token_call_count,
+                       SUM(c.cache_creation_token_call_count) AS cache_creation_token_call_count,
+                       SUM(c.cache_read_cost_usd) AS cache_read_cost_usd,
+                       SUM(c.cache_creation_cost_usd) AS cache_creation_cost_usd,
+                       SUM(c.cache_read_cost_call_count) AS cache_read_cost_call_count,
+                       SUM(c.cache_creation_cost_call_count) AS cache_creation_cost_call_count,
                        SUM(c.measured_cost_usd)       AS measured_cost_usd,
                        SUM(c.measured_call_count)     AS measured_call_count,
                        SUM(c.estimated_cost_usd)      AS estimated_cost_usd,

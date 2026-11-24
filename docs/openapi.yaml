@@ -29871,6 +29871,38 @@ components:
         total_completion_tokens:
           type: integer
           title: Total Completion Tokens
+        total_cache_read_tokens:
+          type: integer
+          title: Total Cache Read Tokens
+          default: 0
+        total_cache_creation_tokens:
+          type: integer
+          title: Total Cache Creation Tokens
+          default: 0
+        cache_read_token_call_count:
+          type: integer
+          title: Cache Read Token Call Count
+          default: 0
+        cache_creation_token_call_count:
+          type: integer
+          title: Cache Creation Token Call Count
+          default: 0
+        cache_read_cost_usd:
+          type: number
+          title: Cache Read Cost Usd
+          default: 0.0
+        cache_creation_cost_usd:
+          type: number
+          title: Cache Creation Cost Usd
+          default: 0.0
+        cache_read_cost_call_count:
+          type: integer
+          title: Cache Read Cost Call Count
+          default: 0
+        cache_creation_cost_call_count:
+          type: integer
+          title: Cache Creation Cost Call Count
+          default: 0
         total_cost_usd:
           type: number
           title: Total Cost Usd
@@ -37309,6 +37341,38 @@ components:
         total_completion_tokens:
           type: integer
           title: Total Completion Tokens
+        total_cache_read_tokens:
+          type: integer
+          title: Total Cache Read Tokens
+          default: 0
+        total_cache_creation_tokens:
+          type: integer
+          title: Total Cache Creation Tokens
+          default: 0
+        cache_read_token_call_count:
+          type: integer
+          title: Cache Read Token Call Count
+          default: 0
+        cache_creation_token_call_count:
+          type: integer
+          title: Cache Creation Token Call Count
+          default: 0
+        cache_read_cost_usd:
+          type: number
+          title: Cache Read Cost Usd
+          default: 0.0
+        cache_creation_cost_usd:
+          type: number
+          title: Cache Creation Cost Usd
+          default: 0.0
+        cache_read_cost_call_count:
+          type: integer
+          title: Cache Read Cost Call Count
+          default: 0
+        cache_creation_cost_call_count:
+          type: integer
+          title: Cache Creation Cost Call Count
+          default: 0
         total_cost_usd:
           type: number
           title: Total Cost Usd
@@ -37372,6 +37436,38 @@ components:
         total_completion_tokens:
           type: integer
           title: Total Completion Tokens
+        total_cache_read_tokens:
+          type: integer
+          title: Total Cache Read Tokens
+          default: 0
+        total_cache_creation_tokens:
+          type: integer
+          title: Total Cache Creation Tokens
+          default: 0
+        cache_read_token_call_count:
+          type: integer
+          title: Cache Read Token Call Count
+          default: 0
+        cache_creation_token_call_count:
+          type: integer
+          title: Cache Creation Token Call Count
+          default: 0
+        cache_read_cost_usd:
+          type: number
+          title: Cache Read Cost Usd
+          default: 0.0
+        cache_creation_cost_usd:
+          type: number
+          title: Cache Creation Cost Usd
+          default: 0.0
+        cache_read_cost_call_count:
+          type: integer
+          title: Cache Read Cost Call Count
+          default: 0
+        cache_creation_cost_call_count:
+          type: integer
+          title: Cache Creation Cost Call Count
+          default: 0
         total_cost_usd:
           type: number
           title: Total Cost Usd

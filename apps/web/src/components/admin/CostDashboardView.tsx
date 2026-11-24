@@ -40,6 +40,7 @@ import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 
 import { costsApi, type CostDashboard } from '@/lib/api';
+import { PromptCacheBreakdown } from '@/components/costs/PromptCacheBreakdown';
 
 const WINDOW_PRESETS: { label: string; days: number }[] = [
   { label: 'Last 7 days', days: 7 },
@@ -348,7 +349,7 @@ function ModelTable({ data }: { data: CostDashboard }) {
   return (
     <Card
       title="Spend by model"
-      subtitle="Measured cost vs imputed list price, per model. An alias row shows what the gateway resolved it to."
+      subtitle="Gateway-reported cost and cache components by model. Prompt tokens and total cost already include their cache portions."
     >
       {by_model.length === 0 ? (
         <p className="text-sm text-gray-500">No per-model rows recorded for this window.</p>
@@ -361,8 +362,9 @@ function ModelTable({ data }: { data: CostDashboard }) {
                 <th className="py-2 pr-4 font-medium text-right">Calls</th>
                 <th className="py-2 pr-4 font-medium text-right">Prompt tokens</th>
                 <th className="py-2 pr-4 font-medium text-right">Completion tokens</th>
+                <th className="py-2 pr-4 font-medium">Prompt cache</th>
                 <th className="py-2 pr-4 font-medium text-right">Measured</th>
-                <th className="py-2 pr-4 font-medium text-right">Imputed (list)</th>
+                <th className="py-2 pr-4 font-medium text-right">Uncached comparison</th>
                 <th className="py-2 font-medium text-right">Avg latency</th>
               </tr>
             </thead>
@@ -384,6 +386,9 @@ function ModelTable({ data }: { data: CostDashboard }) {
                   <td className="py-2.5 pr-4 text-right text-gray-300 tabular-nums">
                     {fmtNumber(m.total_completion_tokens)}
                   </td>
+                  <td className="py-2.5 pr-4">
+                    <PromptCacheBreakdown data={m} calls={m.calls} />
+                  </td>
                   <td className="py-2.5 pr-4 text-right text-white tabular-nums">
                     {fmtSpend(
                       m.total_cost_usd,
@@ -403,7 +408,7 @@ function ModelTable({ data }: { data: CostDashboard }) {
                     {!m.imputed_is_estimable ? '—' : fmtUsd(m.imputed_public_cost_usd)}
                     {m.unpriced_tokens > 0 && (
                       <span className="block text-[10px] text-gray-500">
-                        {!m.imputed_is_estimable ? 'no published price' : `excludes ${fmtNumber(m.unpriced_tokens)} unpriced tokens`}
+                        {!m.imputed_is_estimable ? 'no supported estimate' : `excludes ${fmtNumber(m.unpriced_tokens)} tokens`}
                       </span>
                     )}
                   </td>
@@ -488,7 +493,7 @@ function ByokPanel({ data }: { data: CostDashboard }) {
           <p className="text-xs uppercase tracking-wide text-gray-400">BYOK savings</p>
           <p className="mt-1 text-lg font-semibold text-white">
             {!b.imputed_is_estimable
-              ? 'Not estimable — no model in this window has a published list price'
+              ? 'Not estimable — no supported list-price comparison in this window'
               : b.is_byok_active
                 ? `~${fmtUsd(b.savings_usd)} saved by running your own model`
                 : `Hosted via ${b.provider} — no local-model savings to attribute`}
@@ -503,11 +508,11 @@ function ByokPanel({ data }: { data: CostDashboard }) {
           hint={b.recorded_is_measured ? 'reported by the gateway' : 'not measured'}
         />
         <Stat
-          label="Imputed list-price cost"
+          label="Uncached list-price comparison"
           value={!b.imputed_is_estimable ? '—' : `~${fmtUsd(b.imputed_public_cost_usd)}`}
           hint={
             !b.imputed_is_estimable
-              ? 'no published price for these models'
+              ? 'missing price or unsupported cache pricing'
               : b.unpriced_tokens > 0
                 ? `estimate · excludes ${fmtNumber(b.unpriced_tokens)} unpriced tokens`
                 : 'estimate'
@@ -521,10 +526,10 @@ function ByokPanel({ data }: { data: CostDashboard }) {
         />
       </dl>
       <p className="mt-4 text-xs text-gray-500">
-        Imputed cost re-prices prompt + completion tokens against each model&apos;s public list price,
-        and only for models that have one — there is no default rate, so a model nobody publishes a
-        price for contributes nothing here rather than a guess. Savings approximate what an equivalent
-        hosted call would have cost; they are an estimate, not a billing-grade figure.
+        This comparison assumes uncached input at the listed model rates. Rows reporting cache use
+        are excluded because provider and cache-lifetime prices are not available here. Missing cache
+        metadata can leave discounts unknown. These estimates are not an invoice or a measurement of
+        cache savings; reported cache costs are already part of the gateway total.
       </p>
     </section>
   );

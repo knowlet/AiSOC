@@ -141,6 +141,33 @@ function seed(days: number, payload: CostDashboard) {
   swrCalls.set(JSON.stringify(['cost-dashboard', days]), payload);
 }
 
+it('shows reported cache portions without adding them to measured model spend', () => {
+  const data = fixture();
+  data.by_model[0] = {
+    ...data.by_model[0]!,
+    total_cache_read_tokens: 900000,
+    total_cache_creation_tokens: 100000,
+    cache_read_token_call_count: 800,
+    cache_creation_token_call_count: 800,
+    cache_read_cost_usd: 3.5,
+    cache_creation_cost_usd: 6,
+    cache_read_cost_call_count: 700,
+    cache_creation_cost_call_count: 600,
+    imputed_is_estimable: false,
+    imputed_public_cost_usd: 0,
+    unpriced_tokens: 1800000,
+  };
+  seed(30, data);
+  render(<CostDashboardView />);
+  const row = within(screen.getByRole('row', { name: /gpt-4o-mini/ }));
+  expect(row.getByText('900,000 tokens · 800/800 calls')).toBeInTheDocument();
+  expect(row.getByText('$3.500000 · 700/800 calls')).toBeInTheDocument();
+  expect(row.getByText('$65.40')).toBeInTheDocument();
+  expect(row.queryByText('$74.90')).not.toBeInTheDocument();
+  expect(row.getByText('no supported estimate')).toBeInTheDocument();
+  expect(screen.getByText(/This comparison assumes uncached input/)).toBeInTheDocument();
+});
+
 beforeEach(() => {
   swrCalls.clear();
   dashboardMock.mockReset();
@@ -425,7 +452,7 @@ describe('CostDashboardView — a window nothing measured', () => {
     const table = screen.getByTestId('model-table');
     expect(within(table).getByText('aisoc-triage')).toBeInTheDocument();
     expect(within(table).getByText('→ ollama/qwen2:1.5b')).toBeInTheDocument();
-    expect(within(table).getByText('no published price')).toBeInTheDocument();
+    expect(within(table).getByText('no supported estimate')).toBeInTheDocument();
   });
 
   it('refuses to claim a BYOK saving it cannot compute', () => {
@@ -436,7 +463,7 @@ describe('CostDashboardView — a window nothing measured', () => {
     expect(panel).toHaveAttribute('data-byok', 'active');
     expect(
       within(panel).getByText(
-        'Not estimable — no model in this window has a published list price',
+        'Not estimable — no supported list-price comparison in this window',
       ),
     ).toBeInTheDocument();
     expect(within(panel).getByText('not estimable')).toBeInTheDocument();

@@ -3171,7 +3171,23 @@ export interface LedgerRunSummary {
   error: string | null;
 }
 
-export interface LedgerModelCost {
+/** Prompt-cache portions of input and cost, with independent observation coverage.
+ * Optional for compatibility with a server predating cache telemetry. A zero
+ * coverage count means not reported, even when the numeric component is zero.
+ * Gateway-reported cache dollars are already included in total_cost_usd.
+ */
+export interface CacheCostTelemetry {
+  total_cache_read_tokens?: number;
+  total_cache_creation_tokens?: number;
+  cache_read_token_call_count?: number;
+  cache_creation_token_call_count?: number;
+  cache_read_cost_usd?: number;
+  cache_creation_cost_usd?: number;
+  cache_read_cost_call_count?: number;
+  cache_creation_cost_call_count?: number;
+}
+
+export interface LedgerModelCost extends CacheCostTelemetry {
   model: string;
   /** What the gateway resolved ``model`` to; ``model`` is often an alias. */
   resolved_model: string | null;
@@ -3474,7 +3490,7 @@ export interface SOCMetrics {
  * Mirrors ``CostAggregate`` Pydantic model in
  * ``services/api/app/api/v1/endpoints/investigations.py``.
  */
-export interface CostAggregateRow {
+export interface CostAggregateRow extends CacheCostTelemetry {
   model: string;
   runs: number;
   calls: number;
@@ -7442,7 +7458,7 @@ export interface CostBucket {
   call_count: number;
 }
 
-export interface ModelBreakdown {
+export interface ModelBreakdown extends CacheCostTelemetry {
   /** Lowercased model id as requested — usually an ``aisoc-<role>`` alias. */
   model: string;
   /** What the gateway resolved that alias to, e.g. ``ollama/qwen2:1.5b``. */
@@ -7459,8 +7475,8 @@ export interface ModelBreakdown {
   unpriced_call_count: number;
   /**
    * What this volume would have cost on the public list price. Read it with
-   * ``imputed_is_estimable``: false means the model has no published price
-   * and this is 0 because there is nothing to compute, not because it is free.
+   * ``imputed_is_estimable``: false means no supported uncached comparison
+   * exists. Cached rows are excluded; 0 here does not mean they were free.
    */
   imputed_public_cost_usd: number;
   imputed_is_estimable: boolean;

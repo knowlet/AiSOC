@@ -17,7 +17,7 @@ from typing import Any
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.core.cost_telemetry import record_llm_call
+from app.core.cost_telemetry import describe_llm_call
 from app.llm import safe_ainvoke
 from app.llm.factory import make_chat_model, resolve_model_alias
 from app.llm.prompt_registry import prompt_text
@@ -93,8 +93,8 @@ async def _llm_responder(state: InvestigatorState) -> dict[str, Any]:
         tokens = 0
         if hasattr(response, "response_metadata"):
             tokens = response.response_metadata.get("token_usage", {}).get("total_tokens", 0) or 0
-        # Tier 1.6: record cost telemetry on the active CostTracker.
-        call_record = record_llm_call(
+        # The shared invocation wrapper books the call; this only describes it for the audit log.
+        call_record = describe_llm_call(
             response,
             model=model,
             latency_ms=latency_ms,

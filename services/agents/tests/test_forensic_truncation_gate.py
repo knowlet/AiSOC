@@ -46,7 +46,7 @@ def _state() -> InvestigatorState:
 def _stub_model(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(forensic_agent, "make_chat_model", MagicMock(return_value=object()))
     monkeypatch.setattr(forensic_agent, "resolve_model_alias", MagicMock(return_value="test-model"))
-    monkeypatch.setattr(forensic_agent, "record_llm_call", MagicMock(return_value=None))
+    monkeypatch.setattr(forensic_agent, "describe_llm_call", MagicMock(return_value=None))
     yield
 
 

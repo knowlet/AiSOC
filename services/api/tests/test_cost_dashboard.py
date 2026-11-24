@@ -293,7 +293,7 @@ def test_byok_savings_hosted_reports_max_zero() -> None:
     savings_fn = _internal_helpers["_byok_savings"]
     # Hosted provider where the recorded cost matches imputed → zero savings.
     rows = [
-        _cost(model="gpt-4o", prompt_tokens=1000, completion_tokens=500, cost_usd=0.0125),
+        _cost(model="gpt-4o", prompt_tokens=1000, completion_tokens=500, cost_usd=0.0075),
     ]
     result = savings_fn(rows, LlmContext(provider="openai", is_local=False))
     assert result.is_byok_active is False
@@ -304,7 +304,7 @@ def test_byok_savings_hosted_with_discount_reports_positive() -> None:
     savings_fn = _internal_helpers["_byok_savings"]
     # Operator paid less than list price (negotiated rate) → positive
     # potential additional savings if they switched to BYOK.
-    rows = [_cost(model="gpt-4o", cost_usd=0.001)]  # imputed ≈ $0.0125
+    rows = [_cost(model="gpt-4o", cost_usd=0.001)]  # imputed ≈ $0.0075
     result = savings_fn(rows, LlmContext(provider="openai", is_local=False))
     assert result.is_byok_active is False
     assert result.savings_usd > 0
@@ -397,7 +397,7 @@ def test_build_dashboard_end_to_end() -> None:
             model="gpt-4o",
             prompt_tokens=10_000,
             completion_tokens=5_000,
-            cost_usd=0.125,  # cheaper than imputed → operator saved
+            cost_usd=0.05,  # cheaper than imputed → operator saved
             started_at=datetime(2026, 5, 3, 14, 0, tzinfo=UTC),
         ),
         _cost(
@@ -406,7 +406,7 @@ def test_build_dashboard_end_to_end() -> None:
             model="gpt-4o",
             prompt_tokens=5000,
             completion_tokens=2000,
-            cost_usd=0.05,
+            cost_usd=0.02,
             started_at=datetime(2026, 5, 3, 15, 0, tzinfo=UTC),
         ),
     ]

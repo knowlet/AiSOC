@@ -40,6 +40,7 @@ import {
 } from '@/lib/api';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { PromptCacheBreakdown } from '@/components/costs/PromptCacheBreakdown';
 import { ReplayControls } from '@/components/cases/replay/ReplayControls';
 import { useReplayController } from '@/components/cases/replay/useReplayController';
 
@@ -589,6 +590,10 @@ function ModelCostsCard({ costs }: { costs: LedgerModelCost[] }) {
           {sorted.length} model{sorted.length === 1 ? '' : 's'}
         </span>
       </div>
+      <p className="border-b border-slate-800/80 px-3 py-2 text-[11px] text-slate-400">
+        Prompt tokens include cache reads and writes. Reported cache costs are already included in
+        the total. Coverage shows how many calls reported each component.
+      </p>
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-slate-800/60 text-xs">
           <thead className="bg-slate-950/40">
@@ -597,6 +602,7 @@ function ModelCostsCard({ costs }: { costs: LedgerModelCost[] }) {
               <th className="px-3 py-2 text-right">Calls</th>
               <th className="px-3 py-2 text-right">Prompt tok</th>
               <th className="px-3 py-2 text-right">Completion tok</th>
+              <th className="px-3 py-2">Prompt cache</th>
               <th className="px-3 py-2 text-right">Cost (USD)</th>
               <th className="px-3 py-2 text-right">Latency</th>
             </tr>
@@ -616,6 +622,9 @@ function ModelCostsCard({ costs }: { costs: LedgerModelCost[] }) {
                 </td>
                 <td className="px-3 py-2 text-right">
                   {c.total_completion_tokens.toLocaleString()}
+                </td>
+                <td className="px-3 py-2">
+                  <PromptCacheBreakdown data={c} calls={c.call_count} />
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">
                   {formatModelCost(c)}

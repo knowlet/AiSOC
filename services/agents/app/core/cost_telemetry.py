@@ -20,16 +20,17 @@ to deterministic-only over money that was never spent.
 A call is now booked under exactly one of three provenances, and the counts
 travel with the sums everywhere:
 
-``GATEWAY`` — measured
+``GATEWAY`` — gateway-reported
     The gateway reported the cost on the response headers. It resolved the
-    alias, so it is the only party that knows what was actually called. This
-    is real money (and is legitimately ``0.0`` for a local model, which is a
-    *measured* zero, not an absent one).
+    alias and applied its configured accounting, including prompt caching.
+    This is a reported cost, not an independently reconciled provider invoice.
+    It can legitimately be ``0.0`` for a local model: a reported zero, not an
+    absent measurement.
 
 ``LIST_PRICE_ESTIMATE`` — estimated, and labelled as such on every surface
     No gateway figure, but the concrete model is one this table has a public
-    list price for. Only ever keyed on a **concrete** model id — the alias, or
-    the resolved model name the gateway supplied — never on an alias alone.
+    list price for. Only ever keyed on a **concrete** requested or resolved
+    model id, never on an alias alone.
 
 ``UNPRICED`` — not measured
     Neither of the above. Reported as *not measured*, never as zero. Following
@@ -68,6 +69,7 @@ import structlog
 from app.core.gateway_cost import GatewayCost, extract_gateway_cost
 from app.core.model_attribution import ATTRIBUTION_GATEWAY_HEADER, extract_serving_attribution
 from app.core.schema_bootstrap import ensure_columns, ensure_table
+from app.core.token_usage import extract_token_usage
 
 logger = structlog.get_logger()
 
@@ -94,8 +96,8 @@ def current_cost_tracker() -> CostTracker | None:
 # Cost provenance
 # ---------------------------------------------------------------------------
 
-#: The gateway reported what the call cost. Real money; ``0.0`` is a measured
-#: zero (a local model), not a missing figure.
+#: The gateway reported what the call cost under its configured accounting;
+#: ``0.0`` is a reported zero (a local model), not a missing figure.
 GATEWAY = "gateway"
 
 #: Re-priced from a public list price for a concrete model. An approximation,
@@ -117,16 +119,27 @@ COST_SOURCES = (GATEWAY, LIST_PRICE_ESTIMATE, UNPRICED)
 # here and can never become one — see ``_estimate_cost``.
 # ---------------------------------------------------------------------------
 _PRICING: dict[str, tuple[float, float]] = {
-    "gpt-4o": (0.005, 0.015),
+    "gpt-4o": (0.0025, 0.01),
     "gpt-4o-mini": (0.00015, 0.0006),
     "gpt-4-turbo": (0.01, 0.03),
     "gpt-4": (0.03, 0.06),
     "gpt-3.5-turbo": (0.0005, 0.0015),
     "claude-3-5-sonnet-20241022": (0.003, 0.015),
+    "claude-sonnet-4-6": (0.003, 0.015),
     "claude-3-opus-20240229": (0.015, 0.075),
     "claude-3-haiku-20240307": (0.00025, 0.00125),
     "gemini-1.5-pro": (0.00125, 0.005),
     "gemini-1.5-flash": (0.000075, 0.0003),
+}
+
+# USD per 1k tokens: cache read, five-minute write, one-hour write.
+# Explicit model rates, never a universal cache discount. Unsupported cache
+# pricing stays unknown. Sources and version boundaries are in
+# docs/research/investigation-cost-accounting.md.
+_CACHE_PRICING: dict[str, tuple[float, float | None, float | None]] = {
+    "gpt-4o": (0.00125, None, None),
+    "gpt-4o-mini": (0.000075, None, None),
+    "claude-sonnet-4-6": (0.0003, 0.00375, 0.006),
 }
 
 #: Shape of a logical task alias. An alias is resolved by the gateway and
@@ -138,20 +151,29 @@ _GATEWAY_ALIAS_PREFIX = "aisoc-"
 def _price_key(model: str | None) -> str | None:
     """The table key for ``model``, or ``None`` if it cannot be priced.
 
-    Providers are commonly prefixed at the gateway (``openai/gpt-4o-mini``,
-    ``ollama/qwen2:1.5b``), so the provider segment is dropped before lookup —
-    but only for a name that actually carries one, and never for an alias.
+    Only the model's own provider prefix is accepted. A similarly named model
+    hosted on another platform does not inherit direct-provider prices.
     """
     name = (model or "").strip().lower()
     if not name or name.startswith(_GATEWAY_ALIAS_PREFIX):
         return None
     if name in _PRICING:
         return name
-    bare = name.rsplit("/", 1)[-1]
-    return bare if bare in _PRICING else None
+    provider, separator, bare = name.partition("/")
+    expected = "openai" if bare.startswith("gpt-") else "anthropic" if bare.startswith("claude-") else "gemini"
+    return bare if separator and provider == expected and bare in _PRICING else None
 
 
-def _estimate_cost(model: str | None, prompt_tokens: int, completion_tokens: int) -> float | None:
+def _estimate_cost(
+    model: str | None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    cache_read_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
+    cache_creation_5m_tokens: int | None = None,
+    cache_creation_1h_tokens: int | None = None,
+) -> float | None:
     """List-price estimate for ``model``, or ``None`` when it has no known price.
 
     ``None`` is the whole point. The previous version returned a number
@@ -162,7 +184,24 @@ def _estimate_cost(model: str | None, prompt_tokens: int, completion_tokens: int
     if key is None:
         return None
     in_price, out_price = _PRICING[key]
-    return (max(prompt_tokens, 0) / 1000) * in_price + (max(completion_tokens, 0) / 1000) * out_price
+    read, write = cache_read_tokens or 0, cache_creation_tokens or 0
+    if min(prompt_tokens, completion_tokens, read, write) < 0 or read + write > prompt_tokens:
+        return None
+    cache_cost = 0.0
+    if read or write:
+        rates = _CACHE_PRICING.get(key)
+        if rates is None:
+            return None
+        read_price, short_price, long_price = rates
+        cache_cost = read * read_price
+        if write:
+            short, long = cache_creation_5m_tokens, cache_creation_1h_tokens
+            if short is None or long is None or min(short, long) < 0 or short + long != write:
+                return None
+            if short_price is None or long_price is None:
+                return None
+            cache_cost += short * short_price + long * long_price
+    return ((prompt_tokens - read - write) * in_price + cache_cost + completion_tokens * out_price) / 1000
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +240,13 @@ class CallRecord:
     tool: str | None = None
     step: str | None = None
     gateway_cost: GatewayCost | None = None
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_creation_5m_tokens: int | None = None
+    cache_creation_1h_tokens: int | None = None
+    cache_read_cost_usd: float | None = None
+    cache_creation_cost_usd: float | None = None
+    usage_supports_estimate: bool = True
 
     def __post_init__(self) -> None:
         gateway = self.gateway_cost
@@ -211,13 +257,25 @@ class CallRecord:
                 self.resolved_model = gateway.resolved_model
                 self.attribution_source = self.attribution_source or ATTRIBUTION_GATEWAY_HEADER
             self.call_id = self.call_id or gateway.call_id
+            self.cache_read_cost_usd = gateway.cache_read_cost_usd
+            self.cache_creation_cost_usd = gateway.cache_creation_cost_usd
             return
         # No gateway figure. An estimate is allowed only against a concrete
         # model id — preferring what the gateway said it resolved to, since
         # that is the thing that would actually have been billed.
-        estimate = _estimate_cost(self.resolved_model, self.prompt_tokens, self.completion_tokens)
-        if estimate is None:
-            estimate = _estimate_cost(self.model, self.prompt_tokens, self.completion_tokens)
+        estimate = (
+            _estimate_cost(
+                self.resolved_model or self.model,
+                self.prompt_tokens,
+                self.completion_tokens,
+                cache_read_tokens=self.cache_read_tokens,
+                cache_creation_tokens=self.cache_creation_tokens,
+                cache_creation_5m_tokens=self.cache_creation_5m_tokens,
+                cache_creation_1h_tokens=self.cache_creation_1h_tokens,
+            )
+            if self.usage_supports_estimate
+            else None
+        )
         if estimate is None:
             self.cost_usd = None
             self.cost_source = UNPRICED
@@ -283,6 +341,24 @@ class CostSummary:
 # ---------------------------------------------------------------------------
 
 _POOL: Any = None
+_CACHE_COLUMNS_AVAILABLE = True
+
+_CACHE_COUNTERS = {
+    "cache_read_tokens": "cache_read_token_call_count",
+    "cache_creation_tokens": "cache_creation_token_call_count",
+    "cache_read_cost_usd": "cache_read_cost_call_count",
+    "cache_creation_cost_usd": "cache_creation_cost_call_count",
+}
+
+
+def _cache_summary(records: list[CallRecord]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for value_name, count_name in _CACHE_COUNTERS.items():
+        values = [value for record in records if (value := getattr(record, value_name)) is not None]
+        result[value_name] = sum(values) if values else None
+        result[count_name] = len(values)
+    return result
+
 
 #: Only used when the table is genuinely absent — normally it arrives with
 #: ``services/api/migrations/020_soc_metrics_h2.sql``, which also gives it the
@@ -330,9 +406,33 @@ ALTER TABLE aisoc_run_costs
     ADD COLUMN IF NOT EXISTS resolved_model       TEXT;
 """
 
+# Migration 181 supplies these for DML-only runtime roles. A missing migration
+# must not prevent the legacy totals from being persisted during an upgrade.
+_RUN_COSTS_CACHE_COLUMNS = (
+    "total_cache_read_tokens",
+    "total_cache_creation_tokens",
+    "cache_read_token_call_count",
+    "cache_creation_token_call_count",
+    "cache_read_cost_usd",
+    "cache_creation_cost_usd",
+    "cache_read_cost_call_count",
+    "cache_creation_cost_call_count",
+)
+_RUN_COSTS_CACHE_DDL = """
+ALTER TABLE aisoc_run_costs
+    ADD COLUMN IF NOT EXISTS total_cache_read_tokens BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS total_cache_creation_tokens BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cache_read_token_call_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cache_creation_token_call_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cache_read_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cache_creation_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cache_read_cost_call_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cache_creation_cost_call_count INTEGER NOT NULL DEFAULT 0;
+"""
+
 
 async def _get_pool() -> Any | None:
-    global _POOL
+    global _POOL, _CACHE_COLUMNS_AVAILABLE
     if _POOL is not None:
         return _POOL
     dsn = os.environ.get("DATABASE_URL", "").strip()
@@ -363,6 +463,7 @@ async def _get_pool() -> Any | None:
             # still land, and a dashboard stuck on "not measured" is
             # diagnosable from the message it now prints.
             await ensure_columns(conn, "aisoc_run_costs", _RUN_COSTS_PROVENANCE_COLUMNS, _RUN_COSTS_PROVENANCE_DDL)
+            _CACHE_COLUMNS_AVAILABLE = await ensure_columns(conn, "aisoc_run_costs", _RUN_COSTS_CACHE_COLUMNS, _RUN_COSTS_CACHE_DDL)
         _POOL = pool
         return _POOL
     except Exception as exc:
@@ -397,12 +498,14 @@ async def _flush_to_db(
                 "latency": 0.0,
                 "calls": 0,
                 "resolved": None,
+                "records": [],
             },
         )
         m["prompt"] += r.prompt_tokens
         m["completion"] += r.completion_tokens
         m["latency"] += r.latency_ms
         m["calls"] += 1
+        m["records"].append(r)
         if r.is_measured:
             m["measured"] += r.cost_usd or 0.0
             m["measured_calls"] += 1
@@ -417,51 +520,82 @@ async def _flush_to_db(
     try:
         async with pool.acquire() as conn:
             for model, agg in by_model.items():
-                await conn.execute(
-                    # ``total_cost_usd`` carries **measured** cost only, and the
-                    # provenance columns beside it say how much of the window
-                    # that covers. It cannot also carry the estimate: a column
-                    # named for money cannot be labelled two ways at once, and
-                    # summing a guess into a measurement is how the guess stops
-                    # looking like one.
-                    """
-                    INSERT INTO aisoc_run_costs
-                        (run_id, tenant_id, model,
-                         total_prompt_tokens, total_completion_tokens,
-                         total_cost_usd, total_latency_ms, call_count,
-                         measured_cost_usd, measured_call_count,
-                         estimated_cost_usd, estimated_call_count,
-                         unpriced_call_count, resolved_model)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                    ON CONFLICT (run_id, tenant_id, model) DO UPDATE
-                        SET total_prompt_tokens     = aisoc_run_costs.total_prompt_tokens + EXCLUDED.total_prompt_tokens,
-                            total_completion_tokens = aisoc_run_costs.total_completion_tokens + EXCLUDED.total_completion_tokens,
-                            total_cost_usd          = aisoc_run_costs.total_cost_usd + EXCLUDED.total_cost_usd,
-                            total_latency_ms        = aisoc_run_costs.total_latency_ms + EXCLUDED.total_latency_ms,
-                            call_count              = aisoc_run_costs.call_count + EXCLUDED.call_count,
-                            measured_cost_usd       = aisoc_run_costs.measured_cost_usd + EXCLUDED.measured_cost_usd,
-                            measured_call_count     = aisoc_run_costs.measured_call_count + EXCLUDED.measured_call_count,
-                            estimated_cost_usd      = aisoc_run_costs.estimated_cost_usd + EXCLUDED.estimated_cost_usd,
-                            estimated_call_count    = aisoc_run_costs.estimated_call_count + EXCLUDED.estimated_call_count,
-                            unpriced_call_count     = aisoc_run_costs.unpriced_call_count + EXCLUDED.unpriced_call_count,
-                            resolved_model          = COALESCE(EXCLUDED.resolved_model, aisoc_run_costs.resolved_model),
-                            recorded_at             = now()
-                    """,
-                    run_id,
-                    tenant_id,
-                    model,
-                    agg["prompt"],
-                    agg["completion"],
-                    agg["measured"],
-                    agg["latency"],
-                    agg["calls"],
-                    agg["measured"],
-                    agg["measured_calls"],
-                    agg["estimated"],
-                    agg["estimated_calls"],
-                    agg["unpriced_calls"],
-                    agg["resolved"],
-                )
+                cache = _cache_summary(agg["records"])
+                async with conn.transaction():
+                    await conn.execute(
+                        # ``total_cost_usd`` carries **measured** cost only, and the
+                        # provenance columns beside it say how much of the window
+                        # that covers. It cannot also carry the estimate: a column
+                        # named for money cannot be labelled two ways at once, and
+                        # summing a guess into a measurement is how the guess stops
+                        # looking like one.
+                        """
+                        INSERT INTO aisoc_run_costs
+                            (run_id, tenant_id, model,
+                             total_prompt_tokens, total_completion_tokens,
+                             total_cost_usd, total_latency_ms, call_count,
+                             measured_cost_usd, measured_call_count,
+                             estimated_cost_usd, estimated_call_count,
+                             unpriced_call_count, resolved_model)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                        ON CONFLICT (run_id, tenant_id, model) DO UPDATE
+                            SET total_prompt_tokens     = aisoc_run_costs.total_prompt_tokens + EXCLUDED.total_prompt_tokens,
+                                total_completion_tokens = aisoc_run_costs.total_completion_tokens + EXCLUDED.total_completion_tokens,
+                                total_cost_usd          = aisoc_run_costs.total_cost_usd + EXCLUDED.total_cost_usd,
+                                total_latency_ms        = aisoc_run_costs.total_latency_ms + EXCLUDED.total_latency_ms,
+                                call_count              = aisoc_run_costs.call_count + EXCLUDED.call_count,
+                                measured_cost_usd       = aisoc_run_costs.measured_cost_usd + EXCLUDED.measured_cost_usd,
+                                measured_call_count     = aisoc_run_costs.measured_call_count + EXCLUDED.measured_call_count,
+                                estimated_cost_usd      = aisoc_run_costs.estimated_cost_usd + EXCLUDED.estimated_cost_usd,
+                                estimated_call_count    = aisoc_run_costs.estimated_call_count + EXCLUDED.estimated_call_count,
+                                unpriced_call_count     = aisoc_run_costs.unpriced_call_count + EXCLUDED.unpriced_call_count,
+                                resolved_model          = COALESCE(EXCLUDED.resolved_model, aisoc_run_costs.resolved_model),
+                                recorded_at             = now()
+                        """,
+                        run_id,
+                        tenant_id,
+                        model,
+                        agg["prompt"],
+                        agg["completion"],
+                        agg["measured"],
+                        agg["latency"],
+                        agg["calls"],
+                        agg["measured"],
+                        agg["measured_calls"],
+                        agg["estimated"],
+                        agg["estimated_calls"],
+                        agg["unpriced_calls"],
+                        agg["resolved"],
+                    )
+                    if _CACHE_COLUMNS_AVAILABLE:
+                        # Keep both statements literal so the SQL/migration gate
+                        # can validate every column. The transaction keeps cache
+                        # details and legacy totals on the same set of calls.
+                        await conn.execute(
+                            """
+                            UPDATE aisoc_run_costs SET
+                                total_cache_read_tokens = total_cache_read_tokens + $4,
+                                total_cache_creation_tokens = total_cache_creation_tokens + $5,
+                                cache_read_token_call_count = cache_read_token_call_count + $6,
+                                cache_creation_token_call_count = cache_creation_token_call_count + $7,
+                                cache_read_cost_usd = cache_read_cost_usd + $8,
+                                cache_creation_cost_usd = cache_creation_cost_usd + $9,
+                                cache_read_cost_call_count = cache_read_cost_call_count + $10,
+                                cache_creation_cost_call_count = cache_creation_cost_call_count + $11
+                            WHERE run_id = $1 AND tenant_id = $2 AND model = $3
+                            """,
+                            run_id,
+                            tenant_id,
+                            model,
+                            cache["cache_read_tokens"] or 0,
+                            cache["cache_creation_tokens"] or 0,
+                            cache["cache_read_token_call_count"],
+                            cache["cache_creation_token_call_count"],
+                            cache["cache_read_cost_usd"] or 0.0,
+                            cache["cache_creation_cost_usd"] or 0.0,
+                            cache["cache_read_cost_call_count"],
+                            cache["cache_creation_cost_call_count"],
+                        )
     except Exception as exc:
         logger.warning("cost_telemetry.flush_error", run_id=run_id, error=str(exc))
 
@@ -532,6 +666,11 @@ class CostTracker:
         resolved_model: str | None = None,
         attribution_source: str | None = None,
         system_fingerprint: str | None = None,
+        cache_read_tokens: int | None = None,
+        cache_creation_tokens: int | None = None,
+        cache_creation_5m_tokens: int | None = None,
+        cache_creation_1h_tokens: int | None = None,
+        usage_supports_estimate: bool = True,
     ) -> CallRecord:
         rec = CallRecord(
             model=model,
@@ -544,24 +683,36 @@ class CostTracker:
             resolved_model=resolved_model,
             attribution_source=attribution_source,
             system_fingerprint=system_fingerprint,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cache_creation_5m_tokens=cache_creation_5m_tokens,
+            cache_creation_1h_tokens=cache_creation_1h_tokens,
+            usage_supports_estimate=usage_supports_estimate,
         )
+        return self._add_record(rec)
+
+    def _add_record(self, rec: CallRecord) -> CallRecord:
         self._records.append(rec)
         logger.info(
             "cost_telemetry.call",
             run_id=self.run_id,
             tenant_id=self.tenant_id,
-            model=model,
+            model=rec.model,
             resolved_model=rec.resolved_model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            prompt_tokens=rec.prompt_tokens,
+            completion_tokens=rec.completion_tokens,
+            cache_read_tokens=rec.cache_read_tokens,
+            cache_creation_tokens=rec.cache_creation_tokens,
+            cache_read_cost_usd=rec.cache_read_cost_usd,
+            cache_creation_cost_usd=rec.cache_creation_cost_usd,
             # "not_measured" rather than "0.000000": the log line is read by a
             # human deciding whether a deployment is spending money, and the
             # two answers are not the same answer.
             cost_usd=("not_measured" if rec.cost_usd is None else f"{rec.cost_usd:.6f}"),
             cost_source=rec.cost_source,
-            latency_ms=f"{latency_ms:.1f}",
-            tool=tool,
-            step=step,
+            latency_ms=f"{rec.latency_ms:.1f}",
+            tool=rec.tool,
+            step=rec.step,
         )
         return rec
 
@@ -654,6 +805,7 @@ class CostTracker:
             "models": list({r.model for r in self._records}),
             "resolved_models": sorted({r.resolved_model for r in self._records if r.resolved_model}),
             "attribution_sources": self.attribution_sources,
+            **_cache_summary(self._records),
         }
 
     async def flush(self) -> None:
@@ -670,42 +822,47 @@ class CostTracker:
 
 
 def _extract_token_usage(response: Any) -> tuple[int, int]:
-    """Best-effort extraction of (prompt_tokens, completion_tokens) from a
-    LangChain / OpenAI / Anthropic response object.
+    """Compatibility view of normalized prompt/completion totals."""
+    usage = extract_token_usage(response)
+    return usage.prompt_tokens, usage.completion_tokens
 
-    Newer LangChain releases expose ``response.usage_metadata`` with
-    ``input_tokens`` / ``output_tokens``. Older paths populate
-    ``response.response_metadata['token_usage']``. Some providers only give a
-    ``total_tokens`` rollup; in that case we attribute everything to prompt.
-    Returns ``(0, 0)`` when nothing is available so that recording never
-    crashes the investigation.
+
+def describe_llm_call(
+    response: Any,
+    *,
+    model: str,
+    latency_ms: float,
+    step: str | None = None,
+    tool: str | None = None,
+) -> CallRecord | None:
+    """Describe a response for audit without booking another model invocation.
+
+    Investigator stages need the same cost provenance as the wrapper, but only
+    the wrapper owns accounting. A local response-cache hit has no provider
+    call or cost to describe.
     """
-    if response is None:
-        return 0, 0
-
-    usage_meta = getattr(response, "usage_metadata", None)
-    if isinstance(usage_meta, dict):
-        prompt = int(usage_meta.get("input_tokens", 0) or 0)
-        completion = int(usage_meta.get("output_tokens", 0) or 0)
-        if prompt or completion:
-            return prompt, completion
-        total = int(usage_meta.get("total_tokens", 0) or 0)
-        if total:
-            return total, 0
-
-    response_meta = getattr(response, "response_metadata", None)
-    if isinstance(response_meta, dict):
-        token_usage = response_meta.get("token_usage")
-        if isinstance(token_usage, dict):
-            prompt = int(token_usage.get("prompt_tokens", 0) or 0)
-            completion = int(token_usage.get("completion_tokens", 0) or 0)
-            if prompt or completion:
-                return prompt, completion
-            total = int(token_usage.get("total_tokens", 0) or 0)
-            if total:
-                return total, 0
-
-    return 0, 0
+    metadata = getattr(response, "response_metadata", None)
+    if isinstance(metadata, dict) and metadata.get("aisoc_response_cache_hit") is True:
+        return None
+    usage = extract_token_usage(response)
+    attribution = extract_serving_attribution(response, requested=model)
+    return CallRecord(
+        model=model,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        latency_ms=latency_ms,
+        tool=tool,
+        step=step,
+        gateway_cost=extract_gateway_cost(response),
+        resolved_model=attribution.serving_model,
+        attribution_source=attribution.source,
+        system_fingerprint=attribution.system_fingerprint,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
+        cache_creation_5m_tokens=usage.cache_creation_5m_tokens,
+        cache_creation_1h_tokens=usage.cache_creation_1h_tokens,
+        usage_supports_estimate=usage.supports_estimate,
+    )
 
 
 def record_llm_call(
@@ -731,22 +888,5 @@ def record_llm_call(
     tracker = current_cost_tracker()
     if tracker is None:
         return None
-    prompt_tokens, completion_tokens = _extract_token_usage(response)
-    # One extraction decides the serving identity for both the cost record and
-    # the attribution fields, so the two cannot disagree about who answered.
-    # The gateway header outranks the body inside the extractor; the body is
-    # credited only with evidence it was parsed, never as a copy of the
-    # requested name — see app/core/model_attribution.py.
-    attribution = extract_serving_attribution(response, requested=model)
-    return tracker.record(
-        model=model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        latency_ms=latency_ms,
-        tool=tool,
-        step=step,
-        gateway_cost=extract_gateway_cost(response),
-        resolved_model=attribution.serving_model,
-        attribution_source=attribution.source,
-        system_fingerprint=attribution.system_fingerprint,
-    )
+    record = describe_llm_call(response, model=model, latency_ms=latency_ms, step=step, tool=tool)
+    return tracker._add_record(record) if record is not None else None

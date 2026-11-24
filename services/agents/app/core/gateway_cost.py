@@ -27,8 +27,11 @@ Ollama model and a hosted model in the same config::
     aisoc-summary   openai/gpt-4o-mini      x-litellm-response-cost:          1.35e-05
 
 Same alias set, same request path: the local call is free and says so, the
-hosted call carries the provider's real price. The alias alone distinguishes
+hosted call carries the gateway's calculated price. The alias alone distinguishes
 neither.
+
+Gateway accounting is not a provider invoice reconciliation. Cache components
+are already included in its total and must not be added to it a second time.
 
 ``langchain_openai.ChatOpenAI`` only keeps response headers when built with
 ``include_response_headers=True``; without it ``response_metadata`` has no
@@ -93,6 +96,10 @@ class GatewayCost:
     cost_usd: float
     resolved_model: str | None = None
     call_id: str | None = None
+    #: Gateway-reported components already included in cost_usd. Missing
+    #: headers are unknown, not an observed zero or permission to reprice.
+    cache_read_cost_usd: float | None = None
+    cache_creation_cost_usd: float | None = None
 
 
 def response_headers(response: Any) -> dict[str, str]:
@@ -152,6 +159,8 @@ def extract_gateway_cost(response: Any) -> GatewayCost | None:
                 cost_usd=cost,
                 resolved_model=(headers.get(RESOLVED_MODEL_HEADER) or "").strip() or None,
                 call_id=(headers.get(CALL_ID_HEADER) or "").strip() or None,
+                cache_read_cost_usd=_as_float(headers.get("x-litellm-response-cost-cache-read")),
+                cache_creation_cost_usd=_as_float(headers.get("x-litellm-response-cost-cache-creation")),
             )
     return None
 

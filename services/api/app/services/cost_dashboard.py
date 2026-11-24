@@ -49,7 +49,9 @@ number cannot be labelled two ways, and adding a guess to a measurement is
 how the guess stops looking like one.
 
 BYOK savings are *imputed*: we re-price recorded prompt+completion token
-pairs against the public list price for the model that handled them. Only
+pairs against the uncached public list price for the model that handled them.
+Rows reporting cache usage are excluded because this comparison has no cache
+pricing. Missing cache metadata leaves possible discounts unknown. Only
 models this table actually knows a price for are imputed at all — there is no
 default rate, because a default rate is how the tracker came to invent
 $0.000999 for a free local run in the first place. The response carries
@@ -86,12 +88,13 @@ from app.services.storage_cost import (
 # ---------------------------------------------------------------------------
 
 _PUBLIC_PRICING: dict[str, tuple[float, float]] = {
-    "gpt-4o": (0.005, 0.015),
+    "gpt-4o": (0.0025, 0.01),
     "gpt-4o-mini": (0.00015, 0.0006),
     "gpt-4-turbo": (0.01, 0.03),
     "gpt-4": (0.03, 0.06),
     "gpt-3.5-turbo": (0.0005, 0.0015),
     "claude-3-5-sonnet-20241022": (0.003, 0.015),
+    "claude-sonnet-4-6": (0.003, 0.015),
     "claude-3-opus-20240229": (0.015, 0.075),
     "claude-3-haiku-20240307": (0.00025, 0.00125),
     "gemini-1.5-pro": (0.00125, 0.005),
@@ -111,17 +114,17 @@ _GATEWAY_ALIAS_PREFIX = "aisoc-"
 def _price_key(model: str | None) -> str | None:
     """The pricing-table key for ``model``, or ``None`` if it has no known price.
 
-    Gateway-resolved names carry a provider segment (``openai/gpt-4o-mini``),
-    which is stripped; a logical alias carries no price at all and is refused
-    outright rather than allowed to miss the table and take a default.
+    Only the model's own provider prefix is accepted. A similarly named model
+    hosted on another platform does not inherit direct-provider prices.
     """
     name = (model or "").strip().lower()
     if not name or name.startswith(_GATEWAY_ALIAS_PREFIX):
         return None
     if name in _PUBLIC_PRICING:
         return name
-    bare = name.rsplit("/", 1)[-1]
-    return bare if bare in _PUBLIC_PRICING else None
+    provider, separator, bare = name.partition("/")
+    expected = "openai" if bare.startswith("gpt-") else "anthropic" if bare.startswith("claude-") else "gemini"
+    return bare if separator and provider == expected and bare in _PUBLIC_PRICING else None
 
 
 def _impute_public_cost(
@@ -185,13 +188,24 @@ class ModelBreakdown(BaseModel):
     calls: int
     total_prompt_tokens: int
     total_completion_tokens: int
+    #: These input portions are included in total_prompt_tokens. The counts
+    #: describe coverage, so an unreported component never looks like zero.
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    cache_read_token_call_count: int = 0
+    cache_creation_token_call_count: int = 0
+    #: Gateway-reported components already included in total_cost_usd.
+    cache_read_cost_usd: float = 0.0
+    cache_creation_cost_usd: float = 0.0
+    cache_read_cost_call_count: int = 0
+    cache_creation_cost_call_count: int = 0
     total_cost_usd: float
     measured_call_count: int = 0
     estimated_cost_usd: float = 0.0
     estimated_call_count: int = 0
     unpriced_call_count: int = 0
-    #: List-price re-pricing of this model's tokens. ``0.0`` when nothing here
-    #: has a published price, which ``imputed_is_estimable`` distinguishes from
+    #: Uncached list-price comparison. ``0.0`` when nothing here has supported
+    #: pricing, which ``imputed_is_estimable`` distinguishes from
     #: a genuine zero. Nullable would have been the obvious shape and is the
     #: wrong one: it breaks every generated SDK client, and the precedent set
     #: for MTTR is to keep the number and carry the thing that qualifies it.
@@ -321,6 +335,14 @@ class CostRow:
     estimated_call_count: int = 0
     unpriced_call_count: int = 0
     resolved_model: str | None = None
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
+    cache_read_token_call_count: int = 0
+    cache_creation_token_call_count: int = 0
+    cache_read_cost_usd: float = 0.0
+    cache_creation_cost_usd: float = 0.0
+    cache_read_cost_call_count: int = 0
+    cache_creation_cost_call_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -409,16 +431,17 @@ def _bucket_by_day(rows: list[CostRow]) -> list[CostBucket]:
 
 
 def _imputed_for_row(r: CostRow) -> float | None:
-    """List-price re-pricing of one row, preferring the model actually billed.
+    """Uncached list-price comparison for the model actually billed.
 
-    The gateway-resolved name is tried first because that is the model a
-    provider would have charged for; the requested name is usually an alias
-    and carries no price. ``None`` when neither is priceable.
+    A resolved name is authoritative even when its price is unknown. The
+    requested name is used only if the gateway did not identify a model.
     """
-    imputed = _impute_public_cost(r.resolved_model, r.prompt_tokens, r.completion_tokens)
-    if imputed is None:
-        imputed = _impute_public_cost(r.model, r.prompt_tokens, r.completion_tokens)
-    return imputed
+    # This table has ordinary input/output rates, not provider/TTL-specific
+    # cache rates. Re-pricing cached tokens at full input price would inflate
+    # the comparison and call a cache discount a self-hosting saving.
+    if r.total_cache_read_tokens or r.total_cache_creation_tokens or r.cache_read_cost_usd or r.cache_creation_cost_usd:
+        return None
+    return _impute_public_cost(r.resolved_model or r.model, r.prompt_tokens, r.completion_tokens)
 
 
 def _model_breakdown(rows: list[CostRow]) -> list[ModelBreakdown]:
@@ -429,6 +452,14 @@ def _model_breakdown(rows: list[CostRow]) -> list[ModelBreakdown]:
             "calls": 0,
             "prompt": 0,
             "completion": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_token_calls": 0,
+            "cache_creation_token_calls": 0,
+            "cache_read_cost": 0.0,
+            "cache_creation_cost": 0.0,
+            "cache_read_cost_calls": 0,
+            "cache_creation_cost_calls": 0,
             "cost": 0.0,
             "measured_calls": 0,
             "estimated": 0.0,
@@ -447,6 +478,14 @@ def _model_breakdown(rows: list[CostRow]) -> list[ModelBreakdown]:
         agg["calls"] += r.call_count
         agg["prompt"] += r.prompt_tokens
         agg["completion"] += r.completion_tokens
+        agg["cache_read_tokens"] += r.total_cache_read_tokens
+        agg["cache_creation_tokens"] += r.total_cache_creation_tokens
+        agg["cache_read_token_calls"] += r.cache_read_token_call_count
+        agg["cache_creation_token_calls"] += r.cache_creation_token_call_count
+        agg["cache_read_cost"] += r.cache_read_cost_usd
+        agg["cache_creation_cost"] += r.cache_creation_cost_usd
+        agg["cache_read_cost_calls"] += r.cache_read_cost_call_count
+        agg["cache_creation_cost_calls"] += r.cache_creation_cost_call_count
         agg["cost"] += r.measured_cost_usd
         agg["measured_calls"] += r.measured_call_count
         agg["estimated"] += r.estimated_cost_usd
@@ -471,6 +510,14 @@ def _model_breakdown(rows: list[CostRow]) -> list[ModelBreakdown]:
             calls=int(agg["calls"]),
             total_prompt_tokens=int(agg["prompt"]),
             total_completion_tokens=int(agg["completion"]),
+            total_cache_read_tokens=int(agg["cache_read_tokens"]),
+            total_cache_creation_tokens=int(agg["cache_creation_tokens"]),
+            cache_read_token_call_count=int(agg["cache_read_token_calls"]),
+            cache_creation_token_call_count=int(agg["cache_creation_token_calls"]),
+            cache_read_cost_usd=agg["cache_read_cost"],
+            cache_creation_cost_usd=agg["cache_creation_cost"],
+            cache_read_cost_call_count=int(agg["cache_read_cost_calls"]),
+            cache_creation_cost_call_count=int(agg["cache_creation_cost_calls"]),
             total_cost_usd=round(agg["cost"], 4),
             measured_call_count=int(agg["measured_calls"]),
             estimated_cost_usd=round(agg["estimated"], 4),
@@ -644,6 +691,14 @@ _COST_QUERY = text(
            c.resolved_model          AS resolved_model,
            c.total_prompt_tokens     AS prompt_tokens,
            c.total_completion_tokens AS completion_tokens,
+           c.total_cache_read_tokens,
+           c.total_cache_creation_tokens,
+           c.cache_read_token_call_count,
+           c.cache_creation_token_call_count,
+           c.cache_read_cost_usd,
+           c.cache_creation_cost_usd,
+           c.cache_read_cost_call_count,
+           c.cache_creation_cost_call_count,
            -- measured_cost_usd, not total_cost_usd: rows written before
            -- migration 063 hold a list-price guess in the latter, and
            -- measured_call_count = 0 is what marks them unmeasured.
@@ -711,6 +766,14 @@ async def _fetch_cost_rows(
                 estimated_call_count=int(r["estimated_call_count"] or 0),
                 unpriced_call_count=int(r["unpriced_call_count"] or 0),
                 resolved_model=(str(r["resolved_model"]) if r["resolved_model"] else None),
+                total_cache_read_tokens=int(r["total_cache_read_tokens"] or 0),
+                total_cache_creation_tokens=int(r["total_cache_creation_tokens"] or 0),
+                cache_read_token_call_count=int(r["cache_read_token_call_count"] or 0),
+                cache_creation_token_call_count=int(r["cache_creation_token_call_count"] or 0),
+                cache_read_cost_usd=float(r["cache_read_cost_usd"] or 0.0),
+                cache_creation_cost_usd=float(r["cache_creation_cost_usd"] or 0.0),
+                cache_read_cost_call_count=int(r["cache_read_cost_call_count"] or 0),
+                cache_creation_cost_call_count=int(r["cache_creation_cost_call_count"] or 0),
             )
         )
     return rows
