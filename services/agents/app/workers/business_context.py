@@ -16,7 +16,7 @@ Why a self-contained evaluator here rather than importing the API engine: the
 agents service image ships only its own ``app/`` subtree, so it can't import
 ``services/api``. This module re-implements the same small, documented
 ``when`` (dotted-path + comparators + all/any/not) / ``then``
-(set_severity / route_to / tag / suppress) semantics, loads rules from a YAML
+(set_severity / route_to / tag / suppress / require_escalation) semantics, loads rules from a YAML
 file (``AISOC_BUSINESS_CONTEXT_RULES_FILE``), and is unit-tested against those
 semantics. (Unifying both call sites behind a shared package is a follow-up.)
 
@@ -40,6 +40,7 @@ import yaml
 logger = structlog.get_logger()
 
 _ALLOWED_SEVERITIES = {"info", "low", "medium", "high", "critical"}
+_SEVERITY_RANK = {value: rank for rank, value in enumerate(("info", "low", "medium", "high", "critical"))}
 #: Must match ``ALLOWED_ROUTES`` in
 #: ``services/api/app/services/business_context/models.py``. Duplicated rather
 #: than imported because the two services ship separate images, and kept in
@@ -105,6 +106,13 @@ class RuleAction:
     route_to: str | None = None
     tag: str | None = None
     suppress: bool = False
+    require_escalation: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.require_escalation, bool):
+            raise ValueError("require_escalation must be a boolean")
+        if self.require_escalation and self.suppress:
+            raise ValueError("require_escalation and suppress cannot both be true")
 
 
 @dataclass(frozen=True)
@@ -138,13 +146,31 @@ class _UnknownOperator(ValueError):
         self.op = op
 
 
+class _Missing:
+    """Sentinel for a dotted path that does not exist in the alert."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debug only
+        return "<missing>"
+
+
+_MISSING = _Missing()
+
+
 def _dotted(alert: dict[str, Any], path: str) -> Any:
+    """Walk ``path`` into ``alert``; :data:`_MISSING` when a key is absent.
+
+    An absent key and a key whose value is null are different facts, and the
+    console's preview engine
+    (``services/api/app/services/business_context/engine.py``) keeps them apart.
+    This used to return ``None`` for both, so ``exists`` on ``owner: null``
+    matched in the preview and not here. A mandatory escalation rule written
+    against that preview then never fired at triage.
+    """
     cur: Any = alert
     for part in path.split("."):
-        if isinstance(cur, dict):
-            cur = cur.get(part)
-        else:
-            return None
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
     return cur
 
 
@@ -165,17 +191,13 @@ def _cmp(op: str, actual: Any, expected: Any) -> bool:  # noqa: PLR0911
         if op == "contains":
             return expected in actual if actual is not None else False
         if op == "startswith":
-            return isinstance(actual, str) and actual.startswith(str(expected))
+            return isinstance(actual, str) and isinstance(expected, str) and actual.startswith(expected)
         if op == "endswith":
-            return isinstance(actual, str) and actual.endswith(str(expected))
+            return isinstance(actual, str) and isinstance(expected, str) and actual.endswith(expected)
         if op == "in":
-            return actual in expected if isinstance(expected, list) else False
+            return actual in expected if isinstance(expected, list | tuple | set) else False
         if op == "not_in":
-            return actual not in expected if isinstance(expected, list) else False
-        if op == "exists":
-            return actual is not None
-        if op == "not_exists":
-            return actual is None
+            return actual not in expected if isinstance(expected, list | tuple | set) else False
     except TypeError:
         return False
     return False
@@ -189,7 +211,16 @@ def evaluate_condition(cond: RuleCondition, alert: dict[str, Any]) -> bool:
     if cond.logical == "not":
         return not any(evaluate_condition(c, alert) for c in cond.children)
     if cond.field and cond.op:
-        return _cmp(cond.op, _dotted(alert, cond.field), cond.value)
+        actual = _dotted(alert, cond.field)
+        # Same order as the console engine: the unary operators ask about
+        # presence, and every other operator is false on an absent field.
+        if cond.op == "exists":
+            return actual is not _MISSING
+        if cond.op == "not_exists":
+            return actual is _MISSING
+        if actual is _MISSING:
+            return False
+        return _cmp(cond.op, actual, cond.value)
     return False
 
 
@@ -231,7 +262,19 @@ def _parse_condition(node: Any) -> RuleCondition:
         # from arbitrary aggregator depth, and a top-level-only check would
         # pass `{all: [{op: neq}]}` straight through.
         raise _UnknownOperator(str(op))
-    return RuleCondition(field=node.get("field"), op=op, value=node.get("value"))
+    value = node.get("value")
+    if op in {"in", "not_in"}:
+        # The console accepts a single string here and evaluates it as a
+        # one-element list, but it stores the YAML as written. Without the
+        # same coercion this side compared against a bare string and the rule
+        # never matched, so a preview that showed an escalation was not what
+        # triage did.
+        if isinstance(value, str | bytes):
+            value = [value]
+        if not isinstance(value, list | tuple) or not value:
+            raise ValueError(f"op={op!r} requires a non-empty list")
+        value = list(value)
+    return RuleCondition(field=node.get("field"), op=op, value=value)
 
 
 def load_rules_from_yaml(source: str) -> list[BusinessContextRule]:
@@ -272,6 +315,15 @@ def load_rules_from_yaml(source: str) -> list[BusinessContextRule]:
             route = None
         try:
             when = _parse_condition(entry.get("when") or {})
+            parsed_action = RuleAction(
+                set_severity=sev,
+                route_to=route,
+                tag=action.get("tag"),
+                suppress=bool(action.get("suppress", False)),
+                require_escalation=action.get("require_escalation", False),
+            )
+            if "require_escalation" in action and parsed_action == RuleAction():
+                raise ValueError("require_escalation: false is not an action by itself")
         except _UnknownOperator as exc:
             # Its own event name, matching rule_route_rejected: this is an
             # out-of-grammar *value*, not a malformed document, and it is the
@@ -285,12 +337,7 @@ def load_rules_from_yaml(source: str) -> list[BusinessContextRule]:
             BusinessContextRule(
                 id=rid,
                 when=when,
-                then=RuleAction(
-                    set_severity=sev,
-                    route_to=route,
-                    tag=action.get("tag"),
-                    suppress=bool(action.get("suppress", False)),
-                ),
+                then=parsed_action,
                 enabled=bool(entry.get("enabled", True)),
                 priority=int(entry.get("priority", 100)),
             )
@@ -305,6 +352,8 @@ class BusinessContextResult:
     suppressed: bool
     severity_before: Any
     severity_after: Any
+    require_escalation: bool = False
+    escalation_rule_ids: list[str] = dc_field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -314,18 +363,33 @@ class BusinessContextResult:
 def apply_rules(alert: dict[str, Any], rules: list[BusinessContextRule]) -> BusinessContextResult:
     """Apply enabled rules (priority order) to a copy of ``alert``.
 
-    Suppress short-circuits (once suppressed, downstream rules can't un-suppress),
-    matching the API engine's deterministic contract.
+    Mandatory rules match the original alert before any mutation or suppression.
+    Their requirements cannot be cancelled by ordinary rules. Without a mandatory
+    match, ordinary rules retain their ordered mutations and suppress short circuit.
     """
     out = dict(alert)
     severity_before = out.get("severity")
     matched: list[str] = []
-    for rule in sorted((r for r in rules if r.enabled), key=lambda r: (r.priority, r.id)):
-        if not evaluate_condition(rule.when, out):
+    ordered = sorted((r for r in rules if r.enabled), key=lambda r: (r.priority, r.id))
+    mandatory_matches = [r.then.require_escalation and evaluate_condition(r.when, alert) for r in ordered]
+    escalation_rule_ids = [r.id for r, matches in zip(ordered, mandatory_matches, strict=True) if matches]
+    require_escalation = bool(escalation_rule_ids)
+    floors = [r.then.set_severity for r, matches in zip(ordered, mandatory_matches, strict=True) if matches and r.then.set_severity]
+    if require_escalation:
+        out.pop("__suppressed__", None)
+    for rule, mandatory_match in zip(ordered, mandatory_matches, strict=True):
+        matches = mandatory_match if rule.then.require_escalation else evaluate_condition(rule.when, out)
+        if not matches:
             continue
         matched.append(rule.id)
         act = rule.then
-        if act.set_severity is not None:
+        # An escalation rule's severity is a floor. Assigning it here used to
+        # replace a higher severity with that floor before the floor check ran,
+        # so a critical alert became high and the later check had nothing left
+        # to restore. Ordinary rules still assign, including downward.
+        if act.set_severity is not None and (
+            not act.require_escalation or _SEVERITY_RANK.get(str(out.get("severity")), -1) < _SEVERITY_RANK[act.set_severity]
+        ):
             out["severity"] = act.set_severity
         if act.route_to is not None:
             out["route_to"] = act.route_to
@@ -334,10 +398,16 @@ def apply_rules(alert: dict[str, Any], rules: list[BusinessContextRule]) -> Busi
             if act.tag not in tags:
                 tags.append(act.tag)
             out["tags"] = tags
-        if act.suppress:
+        if act.suppress and not require_escalation:
             out["__suppressed__"] = True
             return BusinessContextResult(out, matched, True, severity_before, out.get("severity"))
-    return BusinessContextResult(out, matched, False, severity_before, out.get("severity"))
+    # Enforce the floor only after ordinary conditions have observed the same
+    # ordered mutations as before. Higher severities are never downgraded.
+    if floors:
+        floor = max(floors, key=lambda severity: _SEVERITY_RANK[severity])
+        if _SEVERITY_RANK.get(str(out.get("severity")), -1) < _SEVERITY_RANK[floor]:
+            out["severity"] = floor
+    return BusinessContextResult(out, matched, False, severity_before, out.get("severity"), require_escalation, escalation_rule_ids)
 
 
 #: How long a tenant's rules are cached before re-reading Postgres. Business

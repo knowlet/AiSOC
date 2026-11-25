@@ -55,6 +55,11 @@ function Row({ row }: { row: PreviewRow }) {
   const sevAfter = String(row.after?.["severity"] ?? sevBefore);
   const routed = String(row.after?.["route_to"] ?? row.after?.["routed_to"] ?? "—");
   const sevChanged = sevBefore !== sevAfter;
+  const requiresEscalation = row.after?.["require_escalation"] === true;
+  const rawEscalationRules = row.after?.["escalation_rule_ids"];
+  const escalationRules = Array.isArray(rawEscalationRules)
+    ? rawEscalationRules.filter((rule): rule is string => typeof rule === "string")
+    : [];
 
   return (
     <>
@@ -87,7 +92,14 @@ function Row({ row }: { row: PreviewRow }) {
           )}
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-xs">
-          {row.suppressed ? (
+          {requiresEscalation ? (
+            <span
+              className="text-rose-200"
+              title={`Required by: ${escalationRules.join(", ")}`}
+            >
+              escalation required
+            </span>
+          ) : row.suppressed ? (
             <span className="text-amber-300">suppressed</span>
           ) : row.changed ? (
             <span className="text-emerald-300">modified</span>

@@ -218,8 +218,13 @@ class TriageWriter(Protocol):
         disposition: str,
         confidence: float | None = None,
         rationale: str = "",
+        require_escalation: bool = False,
     ) -> dict[str, Any] | None:
-        """Project this verdict onto the finding in the source SIEM."""
+        """Project this verdict onto the finding in the source SIEM.
+
+        ``require_escalation`` is the mandatory business-context decision.
+        The API refuses a closing action when it is true.
+        """
 
     def cache_verdict(
         self,
@@ -399,6 +404,7 @@ class LiveTriageWriter:
         disposition: str,
         confidence: float | None = None,
         rationale: str = "",
+        require_escalation: bool = False,
     ) -> dict[str, Any] | None:
         return await siem_writeback.write_back_disposition(
             tenant_id=tenant_id,
@@ -406,6 +412,7 @@ class LiveTriageWriter:
             disposition=disposition,
             confidence=confidence,
             rationale=rationale,
+            require_escalation=require_escalation,
         )
 
     def cache_verdict(

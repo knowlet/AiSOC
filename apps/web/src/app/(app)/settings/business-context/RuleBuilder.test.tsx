@@ -12,9 +12,12 @@
  * never matched.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fireEvent, render, screen } from '@testing-library/react';
+
+import { RuleBuilder } from './RuleBuilder';
 
 const SOURCE = readFileSync(join(__dirname, 'RuleBuilder.tsx'), 'utf8');
 
@@ -61,5 +64,36 @@ describe('RuleBuilder vocabulary', () => {
     for (const field of extractArray('FIELD_SUGGESTIONS')) {
       expect(field.startsWith('alert.')).toBe(false);
     }
+  });
+});
+
+describe('RuleBuilder mandatory escalation', () => {
+  it('authors an escalation requirement without changing severity', () => {
+    const onAppend = vi.fn();
+    render(<RuleBuilder onAppend={onAppend} />);
+    fireEvent.change(screen.getByLabelText('Rule ID'), { target: { value: 'must-review' } });
+    fireEvent.change(screen.getByLabelText('Field'), { target: { value: 'source' } });
+    fireEvent.change(screen.getByLabelText('Value'), { target: { value: 'fixture-source' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Require escalation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Append rule to editor' }));
+
+    expect(onAppend).toHaveBeenCalledOnce();
+    const yaml = onAppend.mock.calls[0][0] as string;
+    expect(yaml).toContain('require_escalation: true');
+    expect(yaml).not.toContain('set_severity:');
+    expect(yaml).not.toContain('suppress: true');
+  });
+
+  it('keeps mandatory escalation and suppression mutually exclusive', () => {
+    render(<RuleBuilder onAppend={vi.fn()} />);
+    const escalation = screen.getByRole('checkbox', { name: 'Require escalation' });
+    const suppression = screen.getByRole('checkbox', { name: 'Suppress matching alerts' });
+
+    fireEvent.click(escalation);
+    expect(suppression).toBeDisabled();
+    fireEvent.click(escalation);
+    expect(suppression).toBeEnabled();
+    fireEvent.click(suppression);
+    expect(escalation).toBeDisabled();
   });
 });

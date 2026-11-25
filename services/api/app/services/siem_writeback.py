@@ -133,11 +133,18 @@ async def write_back_disposition(
     confidence: float | None = None,
     rationale: str = "",
     requested_by: str = "aisoc-agents",
+    require_escalation: bool = False,
 ) -> WritebackReport:
     """Write ``disposition`` back to every source finding behind ``alert_id``.
 
     Never raises. Every branch that does not reach a vendor records
     ``executed=False`` both in the returned report and on the link row.
+
+    ``require_escalation`` is the mandatory business-context decision, carried
+    by the triage worker. A benign or false-positive classification may still
+    be the verdict. It is not permission to close the source finding or to
+    resolve the linked case, so closing actions are refused before any vendor
+    call and before the case transition.
     """
     dry_run = not writeback_executes()
     report = WritebackReport(
@@ -156,6 +163,15 @@ async def write_back_disposition(
         # the same set; this is an optimisation, not a second policy.
         logger.info("siem_writeback.not_actionable", alert_id=str(alert_id), disposition=disposition)
         return report
+
+    if require_escalation and disposition in _CLOSING_DISPOSITIONS:
+        return await _veto_closing_writeback(
+            db,
+            report,
+            tenant_id=tenant_id,
+            alert_id=alert_id,
+            disposition=disposition,
+        )
 
     links = await links_for_alert(db, tenant_id=tenant_id, alert_id=alert_id)
     if not links:
@@ -197,6 +213,51 @@ async def write_back_disposition(
         mode=report.mode,
         executed=report.executed_count,
         attempted=len(report.outcomes),
+    )
+    return report
+
+
+async def _veto_closing_writeback(
+    db: AsyncSession,
+    report: WritebackReport,
+    *,
+    tenant_id: uuid.UUID,
+    alert_id: uuid.UUID,
+    disposition: str,
+) -> WritebackReport:
+    """Refuse a source close and leave the linked case unresolved.
+
+    Recorded on each source link so the reconciliation view shows a refusal
+    rather than a missing attempt. No vendor call is made, and the case
+    transition in :func:`_project_onto_ticket` is not reached.
+    """
+    links = await links_for_alert(db, tenant_id=tenant_id, alert_id=alert_id)
+    detail = (
+        "Mandatory business-context escalation withheld a source close. "
+        f"The {disposition} classification was kept and the finding was left open."
+    )
+    for link in links:
+        report.outcomes.append(
+            await _record(
+                db,
+                tenant_id=tenant_id,
+                link=link,
+                disposition=disposition,
+                outcome=WritebackOutcome(
+                    vendor=link.vendor,
+                    external_id=link.external_id,
+                    status="refused",
+                    executed=False,
+                    writeback_action="refuse",
+                    detail=detail,
+                ),
+            )
+        )
+    logger.info(
+        "siem_writeback.escalation_veto",
+        alert_id=str(alert_id),
+        disposition=disposition,
+        links=len(links),
     )
     return report
 

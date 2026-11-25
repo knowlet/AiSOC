@@ -73,6 +73,7 @@ __all__ = [
     "ClosureAuthorization",
     "alert_class_of",
     "authorize_auto_closure",
+    "requires_escalation",
 ]
 
 #: The keys a fused alert may carry its class under, in precedence order.
@@ -91,7 +92,7 @@ class ClosureAuthorization:
     allowed: bool
     reason: str
     #: Which control decided. One of ``shadow``, ``verdict``,
-    #: ``groundedness``, ``kill_switch``, ``policy``, ``default_deny``,
+    #: ``groundedness``, ``business_context``, ``kill_switch``, ``policy``, ``default_deny``,
     #: ``error``. Written into the alert's findings so an operator asking
     #: "why is this still open" is told which control to look at, rather
     #: than being sent to debug a subsystem that is working.
@@ -113,6 +114,11 @@ def alert_class_of(raw_alert: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def requires_escalation(business_context: Mapping[str, Any] | None) -> bool:
+    """Read the trusted rule result, never fields supplied by an alert source."""
+    return isinstance(business_context, Mapping) and business_context.get("require_escalation") is True
+
+
 async def authorize_auto_closure(
     *,
     tenant_ref: str | None,
@@ -123,6 +129,7 @@ async def authorize_auto_closure(
     ungrounded: bool | None,
     tier: str,
     default_threshold: float | None = None,
+    business_context: Mapping[str, Any] | None = None,
 ) -> ClosureAuthorization:
     """Decide whether this durable write may move an alert to ``resolved``.
 
@@ -151,6 +158,14 @@ async def authorize_auto_closure(
         # its own terms, so a reader does not have to hold three mechanisms
         # in their head to know a shadow run cannot close anything.
         return ClosureAuthorization(False, "shadow run: production status is never changed by an observation", "shadow")
+
+    if requires_escalation(business_context):
+        rule_ids = ", ".join(str(value) for value in (business_context or {}).get("escalation_rule_ids", []))
+        return ClosureAuthorization(
+            False,
+            f"business-context rules require escalation: {rule_ids or 'mandatory policy'}",
+            "business_context",
+        )
 
     normalized = normalize_disposition(str(verdict or ""), default="")
     if normalized not in AUTO_CLOSEABLE_DISPOSITIONS:

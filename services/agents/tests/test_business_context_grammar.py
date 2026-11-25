@@ -112,7 +112,9 @@ def test_every_published_operator_is_actually_evaluable() -> None:
     statically across both services; this asserts it by *firing* each
     operator, so the claim is "this evaluated", not "this parsed".
     """
-    alert = {"host": "dc-01", "score": 5, "tags": ["prod", "crown"], "absent": None}
+    # ``absent`` is not a key at all. A key holding null is present, which is
+    # how the console engine reads it, so it would not satisfy ``not_exists``.
+    alert = {"host": "dc-01", "score": 5, "tags": ["prod", "crown"]}
     cases: dict[str, tuple[str, object]] = {
         "eq": ("host", "dc-01"),
         "ne": ("host", "web-07"),

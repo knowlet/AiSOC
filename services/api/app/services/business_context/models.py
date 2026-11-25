@@ -141,18 +141,20 @@ class RuleCondition:
 class RuleAction:
     """The mutation a matching rule applies to the alert.
 
-    All fields are optional; an action with everything ``None`` is a
-    no-op (allowed at parse time so an analyst can stub a rule and fill
-    in the action later).
+    Escalation is an explicit requirement, independent of severity. A
+    rule that also sets severity establishes a floor for that alert.
     """
 
     set_severity: str | None = None  # one of ALLOWED_SEVERITIES
     route_to: str | None = None  # one of ALLOWED_ROUTES
     tag: str | None = None  # appended to alert.tags
     suppress: bool = False  # if true, alert is dropped before triage
+    require_escalation: bool = False
 
     def is_noop(self) -> bool:
-        return self.set_severity is None and self.route_to is None and self.tag is None and not self.suppress
+        return (
+            self.set_severity is None and self.route_to is None and self.tag is None and not self.suppress and not self.require_escalation
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,11 +263,18 @@ def _parse_action(raw: Any, *, rule_id: str) -> RuleAction:
     if not isinstance(suppress, bool):
         raise RuleParseError(f"rule {rule_id!r}: 'suppress' must be a boolean (got {type(suppress).__name__})")
 
+    require_escalation = raw.get("require_escalation", False)
+    if not isinstance(require_escalation, bool):
+        raise RuleParseError(f"rule {rule_id!r}: 'require_escalation' must be a boolean (got {type(require_escalation).__name__})")
+    if require_escalation and suppress:
+        raise RuleParseError(f"rule {rule_id!r}: 'require_escalation' cannot be combined with 'suppress'")
+
     return RuleAction(
         set_severity=sev,
         route_to=route,
         tag=tag,
         suppress=suppress,
+        require_escalation=require_escalation,
     )
 
 
@@ -291,7 +300,9 @@ def _parse_one_rule(raw: Any, *, source_yaml: str) -> BusinessContextRule:
         raise RuleParseError(f"rule {rid!r}: 'then' clause is required")
     then = _parse_action(then_raw, rule_id=rid)
     if then.is_noop():
-        raise RuleParseError(f"rule {rid!r}: 'then' clause must set at least one of set_severity / route_to / tag / suppress")
+        raise RuleParseError(
+            f"rule {rid!r}: 'then' clause must set at least one of set_severity / route_to / tag / suppress / require_escalation"
+        )
 
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):

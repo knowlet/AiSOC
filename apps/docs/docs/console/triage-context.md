@@ -12,9 +12,10 @@ what it is allowed to do to a verdict.
 
 Two rules hold for every source on the list.
 
-**Context is advisory.** Every block is worded as a reason to consider a
-verdict, never as an instruction. Nothing here overrides direct evidence of
-compromise in the telemetry, and the prompt says so in those words.
+**Prompt context is advisory.** Each prose block gives the model evidence to
+consider. Tenant skills and runbooks do not enforce a disposition. Authored
+business-context actions also run in deterministic code; the explicit
+`require_escalation` action below is enforced outside the model.
 
 **Context is point-in-time during a replay.** When you evaluate AiSOC against
 your own closed findings, every source below is held at the split point, so
@@ -31,6 +32,98 @@ that is done differs by source and is described under
 | Tenant skills | Authored over the [tenant-skills API](./tenant-skills.md), backtested, activated — there is no console editor yet | Your own investigation approach for alerts of a given shape |
 | Knowledge-base runbooks | Documents you ingested at `/kb` | Excerpts from your runbooks that mention something this alert mentions, with citations |
 | Business-context rules | Authored on `/settings/business-context`, applied post-fusion → pre-triage | The prompt names which of your rules fired and what they changed (for example `severity medium → critical`), so the model never reasons over a severity nobody chose in the evidence |
+
+## Mandatory escalation
+
+Use `require_escalation: true` when a matching alert must remain available for
+human review. Pair it with `set_severity: critical` when the same rule should
+also raise the alert's severity. Severity alone does not prohibit closure.
+
+The two actions have separate meanings:
+
+- `set_severity` changes the alert's severity. Ordinary severity actions keep
+  their existing last-matching-rule behavior, including a later rule that
+  lowers severity.
+- `require_escalation` prohibits automatic suppression and closure. A model
+  can still assess the evidence. The benign or false-positive classification
+  can remain, and a remembered benign prior cannot cancel the requirement.
+  The matched rule IDs travel with the verdict. The durable closure check
+  refuses to resolve the AiSOC alert. The worker carries that same decision
+  into source writeback. When it is set, a closing disposition is refused:
+  no source close is dispatched, and the linked case is not resolved. A
+  non-closing writeback, such as a true positive, is unchanged.
+
+Mandatory rules match against the **original alert**, before any ordinary
+rule changes it. When one matches, suppression is refused regardless of rule
+priority. A severity on a matching mandatory rule is a floor in triage and in
+preview. It raises a lower severity and does not replace a higher one. An
+ordinary rule cannot leave the final severity below that floor. The live
+alert row is raised to the floor and is not lowered when it is already more
+severe. Shadow runs still leave the operational alert columns unchanged.
+
+The action must be a YAML boolean, not a quoted string or a number. A rule
+cannot combine `require_escalation: true` and `suppress: true`; the API rejects
+that contradiction. Rules with the action set to `false`, disabled rules,
+and nonmatching rules do not add a restriction. Preview uses the same
+original-alert matching, severity floor, and conflict behavior as the worker.
+The preview sample is not the full fused alert: it does not include
+`connector_type`.
+
+### Wazuh rule identities
+
+Scope an ID list to `connector_type: wazuh` on the fused alert the worker
+evaluates, so an identically numbered detection from another source is not
+included. The settings preview builds its sample from stored alerts and
+exposes the `alerts.connector_type` column as `source`. That sample has no
+`connector_type` field, so this clause matches in triage and does not match
+those preview rows. Inspect a fused alert before choosing the ID field. In
+the current connector, Wazuh's rule ID is emitted as `external_id`; ingest
+projects it to OCSF `finding.uid`. Fusion stores that OCSF event as the
+alert's `raw_event`. The worker evaluates the fused alert and preview reads
+the stored row, so both see `raw_event.finding.uid`. The `in`
+comparator does not coerce types: a quoted id matches a string uid and does
+not match a numeric one. The top-level fused `rule_id` is the detection that
+fired, when one did, and is not the Wazuh rule ID. A connector version that
+changes its external finding identity needs its matching field verified
+again.
+
+This template is deliberately disabled. Replace the placeholder with the
+verified Wazuh rule IDs, using the same type as `raw_event.finding.uid` on a
+real alert. The rule-id clause can be checked against stored alerts in
+preview. The `connector_type` clause has to be checked on a fused alert,
+because the preview sample does not carry it. Enable the rule after both
+clauses have been checked. It does not contain a recommended or preconfigured
+production ID list.
+
+```yaml
+rules:
+  - id: wazuh-mandatory-review
+    enabled: false
+    when:
+      all:
+        - {field: connector_type, op: eq, value: wazuh}
+        - field: raw_event.finding.uid
+          op: in
+          value: ["REPLACE_WITH_VERIFIED_RULE_ID"]
+    then:
+      set_severity: critical
+      require_escalation: true
+```
+
+Saving this YAML through `/settings/business-context` or
+`POST /api/v1/business-context/rules` replaces the tenant's whole rule set, so
+retain its other rules in the document. Tenant rules are cached by the worker
+for up to 30 seconds. A deployment-wide rules file applies to every tenant;
+use the tenant-scoped editor for an environment-specific ID list.
+
+Automatic closure remains default-deny. Do not enable a closure policy just
+to use mandatory escalation. The feature requires both API and agents to
+support the action; an older parser can ignore an unknown action. It applies
+when the worker has loaded and matched the rule set: the existing loader is
+fail-soft on a missing or invalid file, or a first database read failure.
+Verify a real alert's matched rules after rollout. This action does not repair
+connector polling or bring back alerts that never reached triage, and it
+does not authorize a response action.
 
 ## Business impact, cited or absent
 

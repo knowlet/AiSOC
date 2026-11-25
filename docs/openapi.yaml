@@ -41417,6 +41417,10 @@ components:
           type: boolean
           title: Suppress
           default: false
+        require_escalation:
+          type: boolean
+          title: Require Escalation
+          default: false
       type: object
       title: RuleActionWire
     RuleBody:
@@ -43707,6 +43711,13 @@ components:
             format: uuid
           - type: 'null'
           title: Tenant Id
+        require_escalation:
+          type: boolean
+          title: Require Escalation
+          description: When true, a closing disposition is not written to the source
+            finding and does not resolve the linked case. The triage worker sets this
+            from a matched mandatory business-context rule.
+          default: false
       type: object
       required:
       - disposition

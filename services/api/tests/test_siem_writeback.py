@@ -219,6 +219,65 @@ async def test_actions_service_outage_fails_soft(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["benign", "false_positive", "benign_true_positive"])
+async def test_mandatory_escalation_vetoes_a_closing_disposition(monkeypatch, disposition: str) -> None:
+    """A benign classification is kept, and neither the finding nor the case is closed.
+
+    Live writeback and case projection are both on. Without the escalation
+    decision this disposition is dispatched as a close and can resolve the
+    linked case. With it, no vendor call is made and the case transition is
+    not reached.
+    """
+    monkeypatch.setenv("AISOC_SIEM_WRITEBACK_EXECUTE", "1")
+    monkeypatch.setenv("AISOC_SIEM_WRITEBACK_CLOSE_CASE", "1")
+    dispatch = AsyncMock(return_value=_dispatch_response(action="close"))
+    resolve_case = AsyncMock(side_effect=AssertionError("linked case must stay open"))
+
+    with (
+        patch.object(siem_writeback, "links_for_alert", AsyncMock(return_value=[_link()])),
+        patch.object(siem_writeback.actions_client, "dispatch_live_action", dispatch),
+        patch.object(siem_writeback, "record_writeback", AsyncMock()),
+        patch.object(siem_writeback, "_resolve_case_and_fan_out", resolve_case),
+    ):
+        report = await siem_writeback.write_back_disposition(
+            _db(),
+            tenant_id=TENANT,
+            alert_id=ALERT,
+            disposition=disposition,
+            require_escalation=True,
+        )
+
+    dispatch.assert_not_awaited()
+    resolve_case.assert_not_awaited()
+    assert report.executed_count == 0
+    assert report.as_dict()["executed"] is False
+    assert report.outcomes
+    assert all(outcome.writeback_action != "close" and outcome.executed is False for outcome in report.outcomes)
+
+
+@pytest.mark.asyncio
+async def test_mandatory_escalation_still_dispatches_a_non_closing_disposition(monkeypatch) -> None:
+    monkeypatch.setenv("AISOC_SIEM_WRITEBACK_EXECUTE", "1")
+    dispatch = AsyncMock(return_value=_dispatch_response(action="escalate"))
+    with (
+        patch.object(siem_writeback, "links_for_alert", AsyncMock(return_value=[_link()])),
+        patch.object(siem_writeback.actions_client, "dispatch_live_action", dispatch),
+        patch.object(siem_writeback, "record_writeback", AsyncMock()),
+    ):
+        report = await siem_writeback.write_back_disposition(
+            _db(),
+            tenant_id=TENANT,
+            alert_id=ALERT,
+            disposition="true_positive",
+            require_escalation=True,
+        )
+    dispatch.assert_awaited()
+    assert len(dispatch.await_args_list) == 1
+    assert dispatch.await_args_list[0].kwargs["params"]["disposition"] == "true_positive"
+    assert report.executed_count == 1
+
+
+@pytest.mark.asyncio
 async def test_unknown_disposition_costs_no_round_trip() -> None:
     dispatch = AsyncMock()
     with (

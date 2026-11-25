@@ -83,6 +83,7 @@ async def test_posts_the_verdict_with_the_service_token(monkeypatch) -> None:
     assert call["json"]["disposition"] == "false_positive"
     assert call["json"]["tenant_id"] == TENANT
     assert call["json"]["confidence"] == pytest.approx(0.91)
+    assert call["json"]["require_escalation"] is False
 
 
 @pytest.mark.asyncio
@@ -154,3 +155,19 @@ async def test_the_worker_does_not_decide_whether_to_execute(monkeypatch) -> Non
     body = client.calls[0]["json"]
     assert "dry_run" not in body
     assert "execute" not in body
+
+
+@pytest.mark.asyncio
+async def test_mandatory_escalation_is_carried_on_the_writeback_request(monkeypatch) -> None:
+    client = _Client()
+    _install(monkeypatch, client)
+
+    await siem_writeback.write_back_disposition(
+        tenant_id=TENANT,
+        alert_id=ALERT,
+        disposition="benign",
+        require_escalation=True,
+    )
+
+    assert client.calls[0]["json"]["disposition"] == "benign"
+    assert client.calls[0]["json"]["require_escalation"] is True
