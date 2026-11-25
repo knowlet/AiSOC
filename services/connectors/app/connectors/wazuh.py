@@ -446,10 +446,18 @@ class WazuhConnector(BaseConnector):
         instead of multiplying rows.
 
         The window is wider than the alert poll (1h vs 5min) and read to
-        the end through the same ``search_after`` loop, 1000 hits per page:
-        the detector's own scan interval is hourly, so a narrow window
-        would drop findings between polls if the connector was down, and
-        re-scans are idempotent anyway.
+        the end through :meth:`_search`, the same ``search_after`` loop the
+        alert poll uses, 1000 hits per page. The detector's own scan
+        interval is hourly, so a narrow window would drop findings between
+        polls if the connector was down, and re-scans are idempotent anyway.
+
+        The selector is wider than :func:`is_vulnerability_source`. An empty
+        ``data.vulnerability`` object is not indexed, so the CVE has to be
+        selected at ``data.cve``, and exploit alerts carry that same leaf.
+        The classifier runs on the rows the shared reader returned. A page
+        of those alerts is not the end of the window: stopping after
+        ``size`` hits, before classification, dropped every finding once
+        1,000 older ``data.cve`` alerts filled the page.
 
         In ``vuln_mode=alerts`` this returns nothing: that mode puts
         detector events in the alert stream (legacy behaviour), and the
@@ -472,7 +480,20 @@ class WazuhConnector(BaseConnector):
                                 }
                             }
                         },
-                        {"term": {"rule.groups": "vulnerability-detector"}},
+                        # Recognized groups and indexed CVE leaves. data.cve is a
+                        # candidate superset; is_vulnerability_source below keeps
+                        # exploit alerts that carry it out of inventory. Paging
+                        # is _search, not a second loop.
+                        {
+                            "bool": {
+                                "should": [
+                                    {"terms": {"rule.groups": list(_VULN_RULE_GROUPS)}},
+                                    {"exists": {"field": "data.vulnerability.cve"}},
+                                    {"exists": {"field": "data.cve"}},
+                                ],
+                                "minimum_should_match": 1,
+                            }
+                        },
                     ]
                 }
             },
@@ -481,7 +502,7 @@ class WazuhConnector(BaseConnector):
         hits = await self._search(query, feed="wazuh.vulnerability_findings")
         findings: list[dict[str, Any]] = []
         for hit in hits:
-            if not isinstance(hit, dict):
+            if not isinstance(hit, dict) or not is_vulnerability_source(hit.get("_source") or {}):
                 continue
             finding = self.normalize_vulnerability(hit)
             if finding is not None:

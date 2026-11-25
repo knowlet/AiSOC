@@ -13,12 +13,14 @@ HTTP routing uses ``respx`` exactly like ``test_wazuh_connector.py``.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, date, datetime
 
 import httpx
 import pytest
 import respx
+import structlog
 from app.connectors.base import Capability
 from app.connectors.wazuh import WazuhConnector, is_vulnerability_source
 from app.patch_calendar import (
@@ -78,6 +80,160 @@ def _real_alert_hit() -> dict:
 
 def _hits_response(hits: list[dict]):
     return httpx.Response(200, json={"hits": {"hits": hits}})
+
+
+def _page_timestamp(hour: int, offset_seconds: int) -> str:
+    minute, second = divmod(offset_seconds, 60)
+    return f"2026-10-06T{hour:02d}:{minute:02d}:{second:02d}.000Z"
+
+
+def _cve_page_hit(doc_id: str, timestamp: str, *, finding: bool) -> dict:
+    if finding:
+        groups = ["vulnerability-detector"]
+        data = {"vulnerability": {"cve": "CVE-2024-9999", "severity": "High"}}
+        rule_id = "20570"
+        description = "CVE-2024-9999 on prod-tmc-01"
+    else:
+        groups = ["exploit_attempt"]
+        data = {"cve": "CVE-2024-0001"}
+        rule_id = "100200"
+        description = "exploit attempt citing CVE-2024-0001"
+    return {
+        "_id": doc_id,
+        "_index": "wazuh-alerts-4.x-2026.10.06",
+        "_source": {
+            "@timestamp": timestamp,
+            "id": doc_id,
+            "agent": {"id": "002", "name": "prod-tmc-01", "ip": "10.0.0.5"},
+            "rule": {"id": rule_id, "level": 10, "description": description, "groups": groups},
+            "data": data,
+        },
+    }
+
+
+def _dig(node: object, field: str) -> object:
+    current = node
+    for part in field.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _indexed(node: object) -> bool:
+    """True when OpenSearch would have an indexed value at this node.
+
+    An empty object has no leaves, so ``exists`` does not match it. A
+    dict matches when any descendant does.
+    """
+    if node is None or node in ("", {}, []):
+        return False
+    if isinstance(node, dict):
+        return any(_indexed(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_indexed(value) for value in node)
+    return True
+
+
+def _clause_matches(source: dict, clause: dict) -> bool:
+    if "terms" in clause:
+        field, values = next(iter(clause["terms"].items()))
+        got = _dig(source, field)
+        if isinstance(got, list):
+            return any(value in got for value in values)
+        return got in values
+    if "exists" in clause:
+        return _indexed(_dig(source, clause["exists"]["field"]))
+    if "range" in clause:
+        # The connector's window is ``now-...``; every fixture is inside it.
+        return True
+    if "bool" in clause:
+        return _bool_matches(source, clause["bool"])
+    return False
+
+
+def _bool_matches(source: dict, boolean: dict) -> bool:
+    if any(_clause_matches(source, clause) for clause in boolean.get("must_not", [])):
+        return False
+    if not all(_clause_matches(source, clause) for clause in boolean.get("must", [])):
+        return False
+    should = boolean.get("should", [])
+    if not should:
+        return True
+    matched = sum(_clause_matches(source, clause) for clause in should)
+    return matched >= boolean.get("minimum_should_match", 1)
+
+
+def _sort_values(source: dict, spec: list[dict]) -> list:
+    values = []
+    for item in spec:
+        field = next(iter(item))
+        values.append(source.get(field))
+    return values
+
+
+def _after_cursor(values: list, cursor: list, spec: list[dict]) -> bool:
+    """True when ``values`` sorts strictly after ``cursor`` under ``spec``."""
+    for value, previous, item in zip(values, cursor, spec, strict=False):
+        options = next(iter(item.values()))
+        order = options.get("order", "asc") if isinstance(options, dict) else options
+        if value == previous:
+            continue
+        if value is None or previous is None:
+            # ``missing: _last`` — a missing value sorts after every present one.
+            if value is None:
+                return False
+            return True
+        later = value < previous if order == "desc" else value > previous
+        return later
+    return False
+
+
+def _page_response(corpus: list[dict], request: httpx.Request) -> httpx.Response:
+    """Apply size, sort, search_after and the bool query the way the indexer does."""
+    body = json.loads(request.content)
+    query = body.get("query") or {}
+    matched = [hit for hit in corpus if _bool_matches(hit["_source"], query.get("bool", {}))]
+    spec = body.get("sort") or []
+
+    def ordering(hit: dict) -> tuple:
+        key = []
+        for value, item in zip(_sort_values(hit["_source"], spec), spec, strict=False):
+            options = next(iter(item.values()))
+            order = options.get("order", "asc") if isinstance(options, dict) else options
+            # Missing sorts last in either direction.
+            if value is None:
+                key.append((1, ""))
+            elif order == "desc":
+                key.append((0, Reverse(value)))
+            else:
+                key.append((0, value))
+        return tuple(key)
+
+    matched.sort(key=ordering)
+    cursor = body.get("search_after")
+    if isinstance(cursor, list) and spec:
+        matched = [hit for hit in matched if _after_cursor(_sort_values(hit["_source"], spec), cursor, spec)]
+    size = body.get("size", len(matched))
+    page = []
+    for hit in matched[:size]:
+        served = dict(hit)
+        served["sort"] = _sort_values(hit["_source"], spec)
+        page.append(served)
+    return _hits_response(page)
+
+
+class Reverse:
+    """Sort key that reverses comparison for one field."""
+
+    def __init__(self, value: object):
+        self.value = value
+
+    def __lt__(self, other: object) -> bool:
+        return isinstance(other, Reverse) and self.value > other.value
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Reverse) and self.value == other.value
 
 
 class TestTheCalendar:
@@ -179,6 +335,80 @@ class TestTheStreamSplit:
         assert f["cvss_score"] == pytest.approx(9.8)
         assert f["severity"] == "critical"
         assert f["source"] == "wazuh"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_inventory_query_covers_custom_markers_without_claiming_exploits(self):
+        custom = _detector_hit()
+        custom["_source"]["rule"]["groups"] = ["custom-detector"]
+        exploit = _real_alert_hit()
+        exploit["_source"]["data"]["cve"] = "CVE-2024-0001"
+        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response([custom, exploit]))
+        findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
+
+        assert [finding["external_id"] for finding in findings] == ["doc-vuln"]
+        query = json.loads(route.calls.last.request.content)
+        selector = query["query"]["bool"]["must"][1]["bool"]
+        assert selector["minimum_should_match"] == 1
+        assert {"terms": {"rule.groups": ["vulnerability-detector", "vulnerability"]}} in selector["should"]
+        assert {"exists": {"field": "data.vulnerability.cve"}} in selector["should"]
+        assert {"exists": {"field": "data.cve"}} in selector["should"]
+        # The shared reader sorts oldest-first and adds the _doc tiebreak.
+        assert query["sort"][0] == {"@timestamp": {"order": "asc"}}
+        assert {"_doc": {"order": "asc"}} in query["sort"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_older_nonmatching_cve_alerts_cannot_hide_findings(self):
+        """A page of non-matching ``data.cve`` alerts is not the whole window.
+
+        The indexer applies ``size`` before ``is_vulnerability_source``.
+        The corpus is 1,001 older exploit alerts that carry ``data.cve``,
+        one real detector finding, and 1,001 newer exploit alerts. One
+        1,000-hit page — oldest-first or newest-first — is entirely
+        exploits, and the old reader returned no findings. The finding is
+        in the middle so a sort flip without paging or a tighter query
+        still misses it.
+        """
+        finding = _cve_page_hit("finding", _page_timestamp(12, 0), finding=True)
+        older = [_cve_page_hit(f"old-{i:04d}", _page_timestamp(6, i), finding=False) for i in range(1001)]
+        newer = [_cve_page_hit(f"new-{i:04d}", _page_timestamp(18, i), finding=False) for i in range(1001)]
+        corpus = [*older, finding, *newer]
+        assert len(older) > 1000
+        assert is_vulnerability_source(finding["_source"])
+        assert not is_vulnerability_source(older[0]["_source"])
+
+        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(side_effect=lambda request: _page_response(corpus, request))
+        findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
+
+        assert [item["external_id"] for item in findings] == ["finding"]
+        assert findings[0]["cve_id"] == "CVE-2024-9999"
+        bodies = [json.loads(call.request.content) for call in route.calls]
+        assert len(bodies) >= 2
+        assert all(body["sort"][0] == {"@timestamp": {"order": "asc"}} for body in bodies)
+        assert all({"_doc": {"order": "asc"}} in body["sort"] for body in bodies)
+        assert "search_after" not in bodies[0]
+        assert "search_after" in bodies[1]
+        selector = bodies[0]["query"]["bool"]["must"][1]["bool"]["should"]
+        assert {"exists": {"field": "data.cve"}} in selector
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_the_findings_walk_stops_at_the_page_cap(self, monkeypatch):
+        monkeypatch.setattr("app.connectors.wazuh.DEFAULT_MAX_PAGES", 2)
+        # Oldest-first: two full pages of older non-matches hide the finding,
+        # and the shared reader's cap stops the walk there.
+        older = [_cve_page_hit(f"old-{i:04d}", _page_timestamp(6, i), finding=False) for i in range(2000)]
+        finding = _cve_page_hit("finding", _page_timestamp(18, 0), finding=True)
+        corpus = [*older, finding]
+        respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(side_effect=lambda request: _page_response(corpus, request))
+
+        with structlog.testing.capture_logs() as logs:
+            findings = await WazuhConnector(INDEXER, USERNAME, PASSWORD).fetch_vulnerability_findings()
+
+        assert findings == []
+        capped = [log for log in logs if log["event"] == "connector.paging.page_cap_reached"]
+        assert [log.get("feed") for log in capped] == ["wazuh.vulnerability_findings"]
 
     @pytest.mark.asyncio
     @respx.mock
