@@ -37674,6 +37674,13 @@ components:
           additionalProperties: true
           type: object
           title: Executed Query Params
+        replayable_sql:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Replayable Sql
+          description: Standalone ClickHouse SQL for editing and replay through /lake/sql;
+            null when unavailable.
       type: object
       required:
       - request_id

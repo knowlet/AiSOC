@@ -65,7 +65,8 @@ from app.services.event_warehouse import (
     resolve_tenant_warehouse,
 )
 from app.services.event_warehouse.elasticsearch import elastic_auth_header
-from app.services.lake_hunt import HuntCompileError, compile_hunt
+from app.services.lake_hunt import HuntCompileError, compile_hunt, render_replayable_sql
+from app.services.lake_sql import LakeSqlError
 from app.services.model_aliases import chat_completions_url, resolve_model_alias
 
 if TYPE_CHECKING:
@@ -264,11 +265,13 @@ class NLQueryExecuteResponse(NLQueryTranslateResponse):
     executed_query_language: Literal["sql", "esql"] | None = None
     #: Bound parameter values, kept separate from the text.
     #:
-    #: The compiled lake query binds its values rather than interpolating
-    #: them, and rendering an interpolated string here would both misreport
-    #: what ran and re-introduce, in a display path, the string-building the
-    #: compiler exists to avoid. The console renders the two side by side.
+    #: Preserve the original execution disclosure. The SQL editor uses the
+    #: separately rendered replayable_sql, since /lake/sql accepts SQL alone.
     executed_query_params: dict[str, Any] = Field(default_factory=dict)
+    replayable_sql: str | None = Field(
+        default=None,
+        description="Standalone ClickHouse SQL for editing and replay through /lake/sql; null when unavailable.",
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -454,6 +457,12 @@ async def _execute_against_lake(
     base.executed_query = compiled.sql
     base.executed_query_language = "sql"
     base.executed_query_params = dict(compiled.params or {})
+    try:
+        base.replayable_sql = render_replayable_sql(compiled, tenant_id=user.tenant_id)
+    except (HuntCompileError, LakeSqlError, ImportError) as exc:
+        # A missing editor representation must not misreport or prevent the
+        # original parameterised execution. Clients retain their editor content.
+        logger.warning("nl_query.lake_replay_unavailable", error=str(exc))
 
     try:
         result = await execute_lake_query(compiled.sql, params=compiled.params)

@@ -12,9 +12,8 @@ Two properties are asserted, and both are about what a reader can trust:
 
 * the response carries the text that was sent and says which language it is
   in, so "the query" is never ambiguous between two of them;
-* bound values stay **out** of that text. The compiler binds rather than
-  interpolates, and rendering an interpolated string would both misreport
-  what ran and re-introduce string-building in a display path.
+* bound values stay **out** of the execution disclosure. A separate replay
+  representation is required for the editor, which submits SQL alone.
 
 These call `_execute_against_lake` rather than reading its source. The
 recorded failure here is a test that substitutes `inspect.getsource` plus a
@@ -35,13 +34,8 @@ from typing import Any
 import pytest
 from app.api.v1.deps import CurrentUser
 from app.api.v1.endpoints import nl_query
-
-
-@dataclass
-class _Compiled:
-    sql: str
-    params: dict[str, Any]
-    unsupported_fields: list[str]
+from app.services.lake_hunt import CompiledHunt, HuntCompileError
+from app.services.lake_sql import LakeSqlForbiddenError, LakeSqlSyntaxError, rewrite_for_tenant
 
 
 @dataclass
@@ -107,8 +101,11 @@ def _base() -> nl_query.NLQueryExecuteResponse:
     )
 
 
-SQL = "SELECT event_time, severity FROM aisoc.raw_events WHERE tenant_id = {tenant:String} LIMIT {limit:UInt32}"
-PARAMS = {"tenant": TENANT, "limit": 500}
+SQL = (
+    "SELECT event_time, severity FROM aisoc.raw_events "
+    "WHERE tenant_id = %(tenant_id)s AND event_time >= now() - INTERVAL %(hours)s HOUR LIMIT 500"
+)
+PARAMS = {"tenant_id": TENANT, "hours": 24}
 
 
 def test_a_fresh_response_discloses_nothing_rather_than_guessing():
@@ -122,6 +119,7 @@ def test_a_fresh_response_discloses_nothing_rather_than_guessing():
     assert response.executed_query_language is None
     assert response.executed_query_params == {}
     assert response.executed_against is None
+    assert response.replayable_sql is None
 
 
 @pytest.mark.asyncio
@@ -130,7 +128,7 @@ async def test_the_lake_path_discloses_compiled_sql_not_the_esql(monkeypatch: py
     monkeypatch.setattr(
         nl_query,
         "compile_hunt",
-        lambda *a, **k: _Compiled(sql=SQL, params=dict(PARAMS), unsupported_fields=[]),
+        lambda *a, **k: CompiledHunt(sql=SQL, params=dict(PARAMS), unsupported_fields=[]),
     )
 
     async def _rows(sql, params=None):
@@ -144,6 +142,7 @@ async def test_the_lake_path_discloses_compiled_sql_not_the_esql(monkeypatch: py
     assert out.executed_query == SQL
     assert out.executed_query_language == "sql"
     assert out.executed_query_params == PARAMS
+    assert out.replayable_sql is not None
     # The ES|QL is a different query and did not produce these rows.
     assert out.executed_query != translated.esql
 
@@ -154,7 +153,7 @@ async def test_bound_values_are_not_inside_the_disclosed_text(monkeypatch: pytes
     monkeypatch.setattr(
         nl_query,
         "compile_hunt",
-        lambda *a, **k: _Compiled(sql=SQL, params=dict(PARAMS), unsupported_fields=[]),
+        lambda *a, **k: CompiledHunt(sql=SQL, params=dict(PARAMS), unsupported_fields=[]),
     )
 
     async def _rows(sql, params=None):
@@ -164,7 +163,7 @@ async def test_bound_values_are_not_inside_the_disclosed_text(monkeypatch: pytes
 
     out = await nl_query._execute_against_lake(_base(), _Translated(), _body(), _user())
     assert TENANT not in (out.executed_query or "")
-    assert out.executed_query_params["tenant"] == TENANT
+    assert out.executed_query_params["tenant_id"] == TENANT
 
 
 @pytest.mark.asyncio
@@ -177,7 +176,7 @@ async def test_a_failed_query_is_still_disclosed(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         nl_query,
         "compile_hunt",
-        lambda *a, **k: _Compiled(sql=SQL, params=dict(PARAMS), unsupported_fields=[]),
+        lambda *a, **k: CompiledHunt(sql=SQL, params=dict(PARAMS), unsupported_fields=[]),
     )
 
     async def _boom(sql, params=None):
@@ -189,6 +188,7 @@ async def test_a_failed_query_is_still_disclosed(monkeypatch: pytest.MonkeyPatch
     assert out.result is None
     assert out.execution_error
     assert out.executed_query == SQL
+    assert out.replayable_sql is not None
 
 
 @pytest.mark.asyncio
@@ -197,7 +197,7 @@ async def test_unsupported_filters_are_reported(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         nl_query,
         "compile_hunt",
-        lambda *a, **k: _Compiled(sql=SQL, params=dict(PARAMS), unsupported_fields=["process.name"]),
+        lambda *a, **k: CompiledHunt(sql=SQL, params=dict(PARAMS), unsupported_fields=["process.name"]),
     )
 
     async def _rows(sql, params=None):
@@ -207,3 +207,60 @@ async def test_unsupported_filters_are_reported(monkeypatch: pytest.MonkeyPatch)
 
     out = await nl_query._execute_against_lake(_base(), _Translated(), _body(), _user())
     assert out.unsupported_filters == ["process.name"]
+
+
+@pytest.mark.asyncio
+async def test_the_editor_gets_sql_that_the_lake_rewriter_can_parse(monkeypatch: pytest.MonkeyPatch):
+    """The real compiler's template cannot be submitted without its bindings."""
+    translated = nl_query.deterministic_translate("show events for user alice")
+    sent = []
+
+    async def _rows(sql, params=None):
+        sent.append((sql, dict(params)))
+        return _LakeRows(columns=["user_name"], rows=[["alice"]], row_count=1)
+
+    monkeypatch.setattr(nl_query, "execute_lake_query", _rows)
+    out = await nl_query._execute_against_lake(_base(), translated, _body(), _user())
+
+    assert len(sent) == 1
+    assert out.executed_query is not None
+    assert out.executed_query == sent[0][0]
+    assert out.executed_query_params == sent[0][1]
+    assert "%(tenant_id)s" in out.executed_query
+    assert "%(hours)s" in out.executed_query
+    assert out.executed_query_params["f0"] == "alice"
+    with pytest.raises(LakeSqlSyntaxError, match="unable to parse SQL"):
+        rewrite_for_tenant(out.executed_query, uuid.UUID(TENANT))
+
+    assert out.replayable_sql is not None
+    replay = rewrite_for_tenant(out.replayable_sql, uuid.UUID(TENANT))
+    assert "%(tenant_id)s" not in replay.sql
+    assert "%(hours)s" not in replay.sql
+    assert "'alice'" in replay.sql
+    assert "LIMIT 500" in replay.sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [HuntCompileError("binding mismatch"), LakeSqlForbiddenError("policy"), ImportError("driver")])
+async def test_unavailable_replay_does_not_change_the_original_execution(monkeypatch: pytest.MonkeyPatch, error: Exception):
+    translated = nl_query.deterministic_translate("show events for user alice")
+    sent = []
+
+    def _unavailable(*args, **kwargs):
+        raise error
+
+    async def _rows(sql, params=None):
+        sent.append((sql, dict(params)))
+        return _LakeRows(columns=["user_name"], rows=[["alice"]], row_count=1)
+
+    monkeypatch.setattr(nl_query, "render_replayable_sql", _unavailable)
+    monkeypatch.setattr(nl_query, "execute_lake_query", _rows)
+    out = await nl_query._execute_against_lake(_base(), translated, _body(), _user())
+
+    assert out.replayable_sql is None
+    assert out.result is not None
+    assert out.result.rows == [["alice"]]
+    assert out.execution_error is None
+    assert sent == [(out.executed_query, out.executed_query_params)]
+    assert out.executed_query_params["tenant_id"] == TENANT
+    assert out.executed_query_params["f0"] == "alice"

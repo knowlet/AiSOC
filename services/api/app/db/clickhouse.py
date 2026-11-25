@@ -269,7 +269,8 @@ async def execute_lake_query(
         instance — bind their values here so no user text is ever
         concatenated into the statement. This includes the tenant predicate:
         binding it as a parameter is stronger than injecting a literal and
-        hoping the rewrite survived.
+        hoping the rewrite survived. ``None`` sends literal SQL unchanged;
+        even an empty dictionary enables the driver's percent substitution.
 
     Returns
     -------
@@ -320,7 +321,7 @@ async def execute_lake_query(
         }
         if query_id is not None:
             kwargs["query_id"] = query_id
-        return client.execute(sql, params or {}, **kwargs)
+        return client.execute(sql, params, **kwargs)
 
     try:
         rows, column_meta = await asyncio.wait_for(asyncio.to_thread(_run), timeout=asyncio_cap)

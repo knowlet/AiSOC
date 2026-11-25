@@ -15,22 +15,27 @@ sort and a limit.
 
 Two properties this must not get wrong:
 
-**No user text ever reaches the SQL string.** Field names resolve through a
-fixed alias map to real column names, operators come from a closed set, and
-every value is bound as a query parameter. A question is untrusted input, and
-the lake holds every tenant's events.
+**Execution uses bound values.** Field names resolve through a fixed alias
+map to real column names, operators come from a closed set, and every value
+is bound as a query parameter. A question is untrusted input, and the lake
+holds every tenant's events.
 
 **Tenant scoping is structural, not rewritten in afterwards.** The tenant
 predicate is part of the generated WHERE clause and its parameter is bound by
 this module, rather than relying on `rewrite_for_tenant` — which exists to
 constrain untrusted *operator* SQL, and which cannot help if a caller forgets
 to use it.
+
+The separate editor representation uses the driver's literal escaping and
+passes the operator SQL policy before it is offered for replay. It never
+replaces the parameterised query used for the original execution.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -110,6 +115,43 @@ class CompiledHunt:
 
 class HuntCompileError(ValueError):
     """The IR could not be compiled into a safe lake query."""
+
+
+_REPLAY_PARAMETER = re.compile(r"%\((tenant_id|hours|f\d+(?:_field)?)\)s")
+
+
+def render_replayable_sql(compiled: CompiledHunt, *, tenant_id: uuid.UUID) -> str:
+    """Render a compiler-owned query for the SQL editor, without its bindings.
+
+    This accepts only ``compile_hunt`` output, never caller-supplied SQL or
+    bindings. The driver remains responsible for literal escaping, including
+    arrays and backslashes. Restrict its input to the types the compiler
+    emits; the driver's fallback for arbitrary objects is not a SQL literal
+    contract. Validate with the same policy used when the editor submits SQL.
+    """
+    if compiled.params.get("tenant_id") != str(tenant_id):
+        raise HuntCompileError("compiled hunt tenant does not match the authenticated tenant")
+
+    names = set(_REPLAY_PARAMETER.findall(compiled.sql))
+    if not {"tenant_id", "hours"}.issubset(names) or names != compiled.params.keys() or "%" in _REPLAY_PARAMETER.sub("", compiled.sql):
+        raise HuntCompileError("compiled hunt has unsupported or incomplete parameter bindings")
+    for value in compiled.params.values():
+        if type(value) in (str, int):
+            continue
+        if type(value) is list and all(type(item) is str for item in value):
+            continue
+        raise HuntCompileError("compiled hunt has an unsupported parameter type")
+
+    # Keep the driver optional for callers that only compile a hunt.
+    from clickhouse_driver.util.escape import escape_params
+
+    from app.services.lake_sql import rewrite_for_tenant
+
+    try:
+        rendered = compiled.sql % escape_params(compiled.params, context=None)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HuntCompileError("could not render the compiled hunt's parameter bindings") from exc
+    return rewrite_for_tenant(rendered, tenant_id, row_cap=MAX_LIMIT).sql
 
 
 #: A vendor field name the lake has no column for, but which the stored

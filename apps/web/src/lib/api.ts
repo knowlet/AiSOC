@@ -5122,6 +5122,8 @@ export interface NlQueryExecuteResponse extends NlQueryTranslateResponse {
   executed_query_language: "sql" | "esql" | null;
   /** Bound values, kept apart from the text rather than interpolated into it. */
   executed_query_params: Record<string, unknown>;
+  /** Editable lake SQL rendered by the server; older API versions omit it. */
+  replayable_sql?: string | null;
 }
 
 export const nlQueryApi = {

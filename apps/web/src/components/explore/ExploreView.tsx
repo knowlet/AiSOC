@@ -21,7 +21,7 @@
  * a single entry point without duplicating those workbenches.
  */
 
-import { Fragment, useCallback, useMemo, useState } from 'react';
+import { Fragment, useCallback, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
   lakeApi,
@@ -210,6 +210,12 @@ function toCsv(columns: string[], rows: unknown[][]): string {
   return [columns.map(escape).join(','), ...rows.map((row) => row.map(escape).join(','))].join('\n');
 }
 
+const EXPLORER_ROW_CAP = 500;
+
+type ExplorerRequest =
+  | { kind: 'question'; body: Parameters<typeof nlQueryApi.execute>[0] }
+  | { kind: 'sql'; body: Parameters<typeof lakeApi.sql>[0] };
+
 function EventsExplorer() {
   const [question, setQuestion] = useState('');
   const [hours, setHours] = useState(24);
@@ -220,60 +226,59 @@ function EventsExplorer() {
   const [rawResult, setRawResult] = useState<LakeQueryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const inFlight = useRef(false);
+  const [lastRequest, setLastRequest] = useState<ExplorerRequest | null>(null);
   const [facetFilters, setFacetFilters] = useState<Partial<Record<EntityFacet, string>>>({});
 
-  const runSql = useCallback(async (query: string) => {
+  const run = useCallback(async (request: ExplorerRequest) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setLastRequest(request);
     setRunning(true);
     setError(null);
+    // A new attempt owns the whole results panel, including failure states.
+    setAnswer(null);
+    setRawResult(null);
+    setFacetFilters({});
     try {
-      const res = await lakeApi.sql({ sql: query, row_cap: 100 });
-      setRawResult(res);
-      // A hand-written SQL run and a translated one are different answers;
-      // keeping a stale translation on screen beside new rows would claim
-      // the question produced them.
-      setAnswer(null);
-      setFacetFilters({});
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Query failed');
-      setRawResult(null);
-    } finally {
-      setRunning(false);
-    }
-  }, []);
-
-  const ask = useCallback(
-    async (q: string) => {
-      const trimmed = q.trim();
-      if (!trimmed) return;
-      setRunning(true);
-      setError(null);
-      try {
-        const res = await nlQueryApi.execute({
-          question: trimmed,
-          time_range_hours: hours,
-          max_rows: 500,
-        });
+      if (request.kind === 'sql') {
+        setRawResult(await lakeApi.sql(request.body));
+      } else {
+        const res = await nlQueryApi.execute(request.body);
         setAnswer(res);
-        setRawResult(null);
-        setFacetFilters({});
-        if (res.executed_query && res.executed_query_language === 'sql') {
-          // Keep the editor in step with what ran, so "Run query" re-runs
-          // the same thing rather than whatever was last typed.
-          setSql(res.executed_query);
+        if (
+          res.executed_against === 'lake' &&
+          res.executed_query_language === 'sql' &&
+          res.replayable_sql
+        ) {
+          // The disclosed query is a driver template. Only the server's
+          // separately rendered SQL can be posted to the raw SQL endpoint.
+          setSql(res.replayable_sql);
         }
         if (res.execution_error) {
           toast.error('The query ran into an error — see the panel below');
         }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Could not run that question');
-        setAnswer(null);
-        toast.error('Could not run that question');
-      } finally {
-        setRunning(false);
       }
-    },
-    [hours],
-  );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Query failed');
+      if (request.kind === 'question') toast.error('Could not run that question');
+    } finally {
+      inFlight.current = false;
+      setRunning(false);
+    }
+  }, []);
+
+  const runSql = (query: string) =>
+    run({ kind: 'sql', body: { sql: query, row_cap: EXPLORER_ROW_CAP } });
+
+  const ask = (q: string) => {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+    return run({
+      kind: 'question',
+      body: { question: trimmed, time_range_hours: hours, max_rows: EXPLORER_ROW_CAP },
+    });
+  };
 
   const columns = answer?.result?.columns ?? rawResult?.columns ?? [];
   const allRows = useMemo<unknown[][]>(
@@ -357,11 +362,12 @@ function EventsExplorer() {
             <button
               key={q}
               type="button"
+              disabled={running}
               onClick={() => {
                 setQuestion(q);
                 void ask(q);
               }}
-              className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+              className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:opacity-50"
             >
               {q}
             </button>
@@ -383,6 +389,14 @@ function EventsExplorer() {
           spellCheck={false}
           className="w-full rounded-lg border border-slate-700 bg-slate-900 p-3 font-mono text-xs text-slate-100"
         />
+        {answer?.executed_against === 'lake' &&
+        answer.executed_query_language === 'sql' &&
+        !answer.replayable_sql ? (
+          <p className="text-xs text-amber-300">
+            This answer has no editable SQL. Ask again to rerun it; the SQL editor has been left
+            unchanged.
+          </p>
+        ) : null}
         <div>
           <button
             type="button"
@@ -426,7 +440,9 @@ function EventsExplorer() {
         }
         error={error ?? answer?.execution_error ?? null}
         loading={running}
-        onRetry={() => void runSql(sql)}
+        onRetry={() => {
+          if (lastRequest) void run(lastRequest);
+        }}
         onExport={exportCsv}
         facets={availableFacets}
         activeFilters={facetFilters}

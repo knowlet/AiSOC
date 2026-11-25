@@ -27,6 +27,7 @@ came back" while leaking every other tenant's.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import UTC, datetime
@@ -45,6 +46,7 @@ pytestmark = [
 
 TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
+REPLAY_USER = "O'Reilly\\path%(f1)s 100% 台灣"
 
 
 def _dsn() -> str:
@@ -77,11 +79,11 @@ def lake():
     client.execute(
         "INSERT INTO aisoc.raw_events "
         "(tenant_id, event_time, class_uid, category_uid, severity_id, severity, "
-        "src_hostname, raw_payload) VALUES",
+        "src_hostname, user_name, mitre_techniques, raw_payload) VALUES",
         [
-            (TENANT_A, now, 2001, 2, 4, "high", "route-a-host-1", "{}"),
-            (TENANT_A, now, 2001, 2, 4, "high", "route-a-host-2", "{}"),
-            (TENANT_B, now, 2001, 2, 4, "high", "route-b-host-1", "{}"),
+            (TENANT_A, now, 2001, 2, 4, "high", "route-a-host-1", REPLAY_USER, ["T1059.001"], '{"EventData":{"EventID":"4625"}}'),
+            (TENANT_A, now, 2001, 2, 4, "high", "route-a-host-2", "ordinary-user", ["T1059.004"], "{}"),
+            (TENANT_B, now, 2001, 2, 4, "high", "route-b-host-1", REPLAY_USER, ["T1059.001"], '{"EventData":{"EventID":"4625"}}'),
         ],
     )
     yield client
@@ -245,3 +247,96 @@ class TestErrorsAreOperatorReadable:
         assert remaining == 3, (
             f"the table has {remaining} rows, not 3 — a refused write still reached ClickHouse, which is worse than accepting it openly"
         )
+
+
+class TestNaturalLanguageReplay:
+    @pytest.mark.parametrize("hours", [1, 168])
+    async def test_nl_query_can_be_run_again_without_losing_rows(self, client, users, lake, hours: int) -> None:  # noqa: ANN001
+        """Exercise Ask → Run query with more than the old 100-row cap.
+
+        Falling back to the disclosed template reproduces the old editor's
+        request on the unfixed service: /lake/sql returns the reported 400.
+        """
+        event_ids = [uuid.uuid4() for _ in range(120)]
+        lake.execute(
+            "INSERT INTO aisoc.raw_events (event_id, tenant_id, event_time, class_uid, src_hostname) VALUES",
+            [(event_id, TENANT_A, datetime.now(UTC), 2001, f"replay-{index}") for index, event_id in enumerate(event_ids)],
+        )
+        try:
+            asked = await client.post(
+                "/api/v1/nl-query/execute",
+                headers=_auth(users, TENANT_A),
+                json={"question": "show all events", "time_range_hours": hours, "max_rows": 500},
+            )
+            assert asked.status_code == 200, asked.text
+            answer = asked.json()
+            assert answer["execution_error"] is None, answer
+            assert answer["executed_against"] == "lake"
+            assert answer["executed_query_params"] == {"tenant_id": str(TENANT_A), "hours": hours}
+            assert "%(tenant_id)s" in answer["executed_query"]
+            assert "%(hours)s" in answer["executed_query"]
+            assert answer["result"]["total_rows"] == 122
+
+            sql = answer.get("replayable_sql") or answer["executed_query"]
+            for _ in range(2):
+                replayed = await client.post(
+                    "/api/v1/lake/sql",
+                    headers=_auth(users, TENANT_A),
+                    json={"sql": sql, "row_cap": 500},
+                )
+                assert replayed.status_code == 200, replayed.text
+                result = replayed.json()
+                assert result["columns"] == answer["result"]["columns"]
+                assert result["row_count"] == 122
+                assert sorted(map(str, result["rows"])) == sorted(map(str, answer["result"]["rows"]))
+            assert answer["replayable_sql"] == sql
+
+            # A copied query still belongs to the caller executing it.
+            foreign = await client.post(
+                "/api/v1/lake/sql",
+                headers=_auth(users, TENANT_B),
+                json={"sql": sql, "row_cap": 500},
+            )
+            assert foreign.status_code == 200, foreign.text
+            assert foreign.json()["rows"] == []
+        finally:
+            lake.execute(
+                "ALTER TABLE aisoc.raw_events DELETE WHERE event_id IN %(ids)s SETTINGS mutations_sync = 2",
+                {"ids": event_ids},
+            )
+
+    @pytest.mark.parametrize(
+        "filters",
+        [
+            [("user.name", "==", REPLAY_USER)],
+            [("user.name", "IN", json.dumps([REPLAY_USER, "absent-user"]))],
+            [("host.name", "LIKE", "%route-a-host-1%")],
+            [("threat.technique.id", "IN", '["T1059.001", "T9999"]')],
+            [("EventID", "==", "4625"), ("event.severity", ">=", "4")],
+        ],
+        ids=["quoted-unicode-percent", "scalar-list", "like-percent", "array-membership", "payload-and-numeric"],
+    )
+    async def test_replay_preserves_compiler_filter_values(self, client, users, lake, filters: list[tuple[str, str, str]]) -> None:  # noqa: ANN001
+        """Compare actual bound execution with rendered SQL through the route."""
+        from app.api.v1.endpoints.nl_query import _nl_query
+        from app.services.lake_hunt import compile_hunt, render_replayable_sql
+
+        compiled = compile_hunt(_nl_query.QueryIntents(filters=filters), tenant_id=str(TENANT_A), hours=24, limit=500)
+        expected, columns = lake.execute(compiled.sql, compiled.params, with_column_types=True)
+        assert len(expected) == 1
+        hostname_index = [name for name, _ in columns].index("src_hostname")
+        assert expected[0][hostname_index] == "route-a-host-1"
+
+        replayed = await client.post(
+            "/api/v1/lake/sql",
+            headers=_auth(users, TENANT_A),
+            json={"sql": render_replayable_sql(compiled, tenant_id=TENANT_A), "row_cap": 500},
+        )
+        assert replayed.status_code == 200, replayed.text
+        result = replayed.json()
+        assert result["columns"] == [name for name, _ in columns]
+        assert result["row_count"] == len(expected)
+        # Compare every selected value, normalizing only HTTP's datetime encoding.
+        for actual, bound in zip(result["rows"], expected, strict=True):
+            for value, original in zip(actual, bound, strict=True):
+                assert (datetime.fromisoformat(value) if isinstance(original, datetime) else value) == original
